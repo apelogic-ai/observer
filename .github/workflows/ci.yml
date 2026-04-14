@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/**"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    paths:
+      - "packages/**"
+      - ".github/workflows/ci.yml"
+
+jobs:
+  agent-tests:
+    name: Agent (tests + typecheck)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        working-directory: packages/agent
+        run: bun install
+
+      - name: Typecheck
+        working-directory: packages/agent
+        run: bun run typecheck
+
+      - name: Test
+        working-directory: packages/agent
+        run: bun run test
+
+  api-tests:
+    name: API (tests + typecheck)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        working-directory: packages/api
+        run: bun install
+
+      - name: Typecheck
+        working-directory: packages/api
+        run: bun run typecheck
+
+      - name: Test
+        working-directory: packages/api
+        run: bun run test
