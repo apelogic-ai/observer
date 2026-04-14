@@ -9,7 +9,7 @@ import type { DisclosureLevel } from "./types";
 export interface ObserverConfig {
   sources: {
     claude_code: boolean;
-    codex: boolean;git
+    codex: boolean;
     cursor: boolean;
   };
   ship: {
