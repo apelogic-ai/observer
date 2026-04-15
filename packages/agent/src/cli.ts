@@ -174,8 +174,12 @@ async function scanAction(opts: ScanOpts): Promise<void> {
     }
   }
 
-  if (opts.endpoint) {
-    console.log(`Shipped: ${batchCount} batch(es) to ${opts.endpoint}`);
+  const destinations: string[] = [];
+  if (opts.endpoint) destinations.push(opts.endpoint);
+  if (opts.localOutput) destinations.push(opts.localOutput);
+
+  if (destinations.length > 0) {
+    console.log(`Shipped: ${batchCount} batch(es) to ${destinations.join(" + ")}`);
     if (failCount > 0) {
       console.log(`  ${failCount} batch(es) failed — will retry on next scan`);
     }
@@ -183,7 +187,7 @@ async function scanAction(opts: ScanOpts): Promise<void> {
     const totalEntries = shipped.reduce((sum, b) => sum + b.entries.length, 0);
     console.log(`Scanned: ${shipped.length} batch(es), ${totalEntries} new entries`);
     if (shipped.length > 0) {
-      console.log("Batches (no endpoint configured — local only):");
+      console.log("Batches (no sink configured — local only):");
       for (const b of shipped) {
         console.log(`  ${b.agent}/${b.project}: ${b.entries.length} entries`);
       }
