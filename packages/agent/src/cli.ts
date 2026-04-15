@@ -71,6 +71,7 @@ interface ScanOpts {
   endpoint?: string;
   apiKey?: string;
   localOutput?: string;
+  disclosure?: string;
 }
 
 async function scanAction(opts: ScanOpts): Promise<void> {
@@ -129,8 +130,9 @@ async function scanAction(opts: ScanOpts): Promise<void> {
   const httpShip = opts.endpoint
     ? createHttpShipper({ endpoint: opts.endpoint, apiKey: opts.apiKey, keypair })
     : null;
+  const disclosure = (opts.disclosure ?? "sensitive") as import("./types").DisclosureLevel;
   const diskShip = opts.localOutput
-    ? createDiskShipper({ outputDir: opts.localOutput, disclosure: "sensitive", redactSecrets: opts.redactSecrets })
+    ? createDiskShipper({ outputDir: opts.localOutput, disclosure, redactSecrets: opts.redactSecrets })
     : null;
 
   const shipFn = httpShip && diskShip
@@ -508,6 +510,7 @@ program
   .option("--endpoint <url>", "Ingestor endpoint URL (e.g. http://localhost:19900/api/ingest)")
   .option("--api-key <key>", "API key for ingestor auth")
   .option("--local-output <path>", "Write normalized traces to local directory")
+  .option("--disclosure <level>", "Disclosure level: basic, moderate, sensitive", "sensitive")
   .action(scanAction);
 
 program
