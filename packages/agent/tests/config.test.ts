@@ -77,10 +77,29 @@ privacy:
     ]);
   });
 
+  it("loads localOutputDir from config", () => {
+    const dir = makeTmpDir();
+    const configFile = join(dir, "config.yaml");
+    writeFileSync(configFile, `
+ship:
+  localOutputDir: ~/.observer/traces/normalized
+  disclosure: sensitive
+`);
+    const config = loadConfig(configFile);
+    expect(config.ship.localOutputDir).toBe("~/.observer/traces/normalized");
+    expect(config.ship.disclosure).toBe("sensitive");
+  });
+
+  it("defaults localOutputDir to null", () => {
+    const config = loadConfig("/nonexistent/config.yaml");
+    expect(config.ship.localOutputDir).toBeNull();
+  });
+
   it("DEFAULT_CONFIG has sane values", () => {
     expect(DEFAULT_CONFIG.pollIntervalMs).toBeGreaterThan(0);
     expect(DEFAULT_CONFIG.sources.claude_code).toBe(true);
     expect(DEFAULT_CONFIG.ship.redactSecrets).toBe(true);
+    expect(DEFAULT_CONFIG.ship.localOutputDir).toBeNull();
     expect(DEFAULT_CONFIG.privacy.excludeProjects).toEqual([]);
   });
 });

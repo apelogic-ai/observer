@@ -17,6 +17,7 @@ import { execSync } from "node:child_process";
 import { discoverTraceSources, type TraceSource } from "./discover";
 import { Shipper, type ShippedBatch } from "./shipper";
 import { createHttpShipper } from "./http-shipper";
+import { createDiskShipper } from "./disk-shipper";
 import { generateKeypair, loadKeypair, getPublicKeyFingerprint } from "./identity";
 import { generateConfig, writeConfig, type InitAnswers } from "./init";
 import { installService, uninstallService, getServicePaths } from "./service";
@@ -69,6 +70,7 @@ interface ScanOpts {
   developer?: string;
   endpoint?: string;
   apiKey?: string;
+  localOutput?: string;
 }
 
 async function scanAction(opts: ScanOpts): Promise<void> {
@@ -122,15 +124,18 @@ async function scanAction(opts: ScanOpts): Promise<void> {
   generateKeypair(opts.stateDir);
   const keypair = loadKeypair(opts.stateDir) ?? undefined;
 
-  // Set up shipping — HTTP if endpoint configured, local logging otherwise
+  // Set up shipping — HTTP, disk, both, or local logging
   const shipped: ShippedBatch[] = [];
-  const shipFn = opts.endpoint
-    ? createHttpShipper({
-        endpoint: opts.endpoint,
-        apiKey: opts.apiKey,
-        keypair,
-      })
-    : async (batch: ShippedBatch) => { shipped.push(batch); };
+  const httpShip = opts.endpoint
+    ? createHttpShipper({ endpoint: opts.endpoint, apiKey: opts.apiKey, keypair })
+    : null;
+  const diskShip = opts.localOutput
+    ? createDiskShipper({ outputDir: opts.localOutput, disclosure: "sensitive", redactSecrets: opts.redactSecrets })
+    : null;
+
+  const shipFn = httpShip && diskShip
+    ? async (batch: ShippedBatch) => { await diskShip(batch); await httpShip(batch); }
+    : httpShip ?? diskShip ?? (async (batch: ShippedBatch) => { shipped.push(batch); });
 
   const shipper = new Shipper({
     developer: opts.developer,
@@ -143,6 +148,9 @@ async function scanAction(opts: ScanOpts): Promise<void> {
   console.log(`Machine: ${shipper.machine}`);
   if (opts.endpoint) {
     console.log(`Endpoint: ${opts.endpoint}`);
+  }
+  if (opts.localOutput) {
+    console.log(`Local output: ${opts.localOutput}`);
   }
   if (keypair) {
     console.log(`Signing: Ed25519 keypair loaded`);
@@ -340,12 +348,19 @@ async function daemonAction(opts: { stateDir: string }): Promise<void> {
   generateKeypair(opts.stateDir);
   const keypair = loadKeypair(opts.stateDir) ?? undefined;
 
-  const shipFn = config.ship.endpoint
-    ? createHttpShipper({
-        endpoint: config.ship.endpoint,
-        keypair,
+  const httpShipDaemon = config.ship.endpoint
+    ? createHttpShipper({ endpoint: config.ship.endpoint, keypair })
+    : null;
+  const diskShipDaemon = config.ship.localOutputDir
+    ? createDiskShipper({
+        outputDir: config.ship.localOutputDir,
+        disclosure: config.ship.disclosure,
+        redactSecrets: config.ship.redactSecrets,
       })
-    : async () => {};
+    : null;
+  const shipFn = httpShipDaemon && diskShipDaemon
+    ? async (batch: ShippedBatch) => { await diskShipDaemon(batch); await httpShipDaemon(batch); }
+    : httpShipDaemon ?? diskShipDaemon ?? (async () => {});
 
   const daemon = new Daemon({
     claudeDir: DEFAULT_CLAUDE_DIR,
@@ -488,6 +503,7 @@ program
   .option("--developer <id>", "Developer identity override")
   .option("--endpoint <url>", "Ingestor endpoint URL (e.g. http://localhost:19900/api/ingest)")
   .option("--api-key <key>", "API key for ingestor auth")
+  .option("--local-output <path>", "Write normalized traces to local directory")
   .action(scanAction);
 
 program

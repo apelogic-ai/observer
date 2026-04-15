@@ -14,6 +14,7 @@ export interface ObserverConfig {
   };
   ship: {
     endpoint: string | null;
+    localOutputDir: string | null;
     redactSecrets: boolean;
     schedule: "realtime" | "hourly" | "daily";
     disclosure: DisclosureLevel;
@@ -35,6 +36,7 @@ export const DEFAULT_CONFIG: ObserverConfig = {
   },
   ship: {
     endpoint: null,
+    localOutputDir: null,
     redactSecrets: true,
     schedule: "hourly",
     disclosure: "basic" as DisclosureLevel,
@@ -82,6 +84,7 @@ export function loadConfig(configPath: string): ObserverConfig {
     },
     ship: {
       endpoint: (rawShip.endpoint as string) ?? DEFAULT_CONFIG.ship.endpoint,
+      localOutputDir: (rawShip.localOutputDir as string) ?? DEFAULT_CONFIG.ship.localOutputDir,
       redactSecrets: rawShip.redactSecrets !== undefined
         ? Boolean(rawShip.redactSecrets)
         : DEFAULT_CONFIG.ship.redactSecrets,
