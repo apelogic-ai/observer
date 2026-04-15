@@ -114,7 +114,7 @@ describe("applyDisclosure", () => {
     expect(result.toolResultContent).toBeNull();
   });
 
-  it("HIGH RISK is NEVER included regardless of level", () => {
+  it("HIGH RISK is stripped for basic, moderate, sensitive", () => {
     const entry = makeEntry({
       toolResultContent: '[{"salary": 150000, "name": "Alice"}]',
       fileContent: "SECRET_KEY=abc123",
@@ -129,6 +129,31 @@ describe("applyDisclosure", () => {
       expect(result.stdout).toBeNull();
       expect(result.queryData).toBeNull();
     }
+  });
+
+  it("full: preserves all fields including HIGH_RISK", () => {
+    const entry = makeEntry({
+      userPrompt: "show me the data",
+      assistantText: "Here it is.",
+      thinking: "Let me query...",
+      toolResultContent: '[{"salary": 150000}]',
+      fileContent: "const secret = 'abc';",
+      stdout: "3 tests passed",
+      queryData: '[{"id": 1}]',
+    });
+
+    const result = applyDisclosure(entry, "full");
+
+    // Everything preserved
+    expect(result.userPrompt).toBe("show me the data");
+    expect(result.assistantText).toBe("Here it is.");
+    expect(result.thinking).toBe("Let me query...");
+    expect(result.toolResultContent).toBe('[{"salary": 150000}]');
+    expect(result.fileContent).toBe("const secret = 'abc';");
+    expect(result.stdout).toBe("3 tests passed");
+    expect(result.queryData).toBe('[{"id": 1}]');
+    expect(result.command).toBe("uv run pytest tests/");
+    expect(result.filePath).toBe("/src/query.ts");
   });
 
   it("basic still includes toolName for analytics", () => {

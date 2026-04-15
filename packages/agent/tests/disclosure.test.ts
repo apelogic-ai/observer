@@ -109,10 +109,10 @@ describe("applyFieldPolicy", () => {
     expect(result.toolName).toBeNull();
   });
 
-  it("HIGH_RISK fields are always null regardless of policy", () => {
+  it("HIGH_RISK fields are included when policy allows them", () => {
     const policy: FieldPolicy = {
       ...DEFAULT_FIELD_POLICIES.sensitive,
-      toolResultContent: true,  // try to force include
+      toolResultContent: true,
       fileContent: true,
       stdout: true,
       queryData: true,
@@ -121,10 +121,20 @@ describe("applyFieldPolicy", () => {
     const entry = makeEntry();
     const result = applyFieldPolicy(entry, policy);
 
-    // HIGH_RISK is hardcoded to always strip
-    expect(result.toolResultContent).toBeNull();
-    expect(result.fileContent).toBeNull();
-    expect(result.stdout).toBeNull();
-    expect(result.queryData).toBeNull();
+    expect(result.toolResultContent).toBe('{"salary": 150000}');
+    expect(result.fileContent).toBe("SECRET_KEY=abc123");
+    expect(result.stdout).toBe("password: hunter2");
+    expect(result.queryData).toBe('[{"ssn": "123-45-6789"}]');
+  });
+
+  it("DEFAULT_FIELD_POLICIES.full matches applyDisclosure full", () => {
+    const entry = makeEntry();
+    const fromLevel = applyDisclosure(entry, "full");
+    const fromPolicy = applyFieldPolicy(entry, DEFAULT_FIELD_POLICIES.full);
+
+    for (const key of Object.keys(entry) as (keyof TraceEntry)[]) {
+      if (["id","timestamp","agent","sessionId","entryType","role","developer","machine","project"].includes(key)) continue;
+      expect(fromPolicy[key]).toEqual(fromLevel[key]);
+    }
   });
 });

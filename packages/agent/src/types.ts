@@ -14,7 +14,7 @@ import { createHash } from "node:crypto";
 // Disclosure levels
 // ---------------------------------------------------------------------------
 
-export type DisclosureLevel = "basic" | "moderate" | "sensitive";
+export type DisclosureLevel = "basic" | "moderate" | "sensitive" | "full";
 
 // ---------------------------------------------------------------------------
 // Unified trace entry — all agents normalize into this
@@ -231,6 +231,13 @@ export const DEFAULT_FIELD_POLICIES: Record<DisclosureLevel, FieldPolicy> = {
     userPrompt: true, assistantText: true, thinking: true, reasoning: true, systemPrompt: true,
     toolResultContent: false, fileContent: false, stdout: false, queryData: false,
   },
+  full: {
+    model: true, tokenUsage: true,
+    toolName: true, toolCallId: true, filePath: true, command: true,
+    taskSummary: true, gitRepo: true, gitBranch: true, gitCommit: true,
+    userPrompt: true, assistantText: true, thinking: true, reasoning: true, systemPrompt: true,
+    toolResultContent: true, fileContent: true, stdout: true, queryData: true,
+  },
 };
 
 const HIGH_RISK_KEYS: (keyof FieldPolicy)[] = [
@@ -238,8 +245,7 @@ const HIGH_RISK_KEYS: (keyof FieldPolicy)[] = [
 ];
 
 /**
- * Apply a per-field policy. HIGH_RISK fields are always stripped
- * regardless of what the policy says.
+ * Apply a per-field policy. Fields set to false are stripped.
  */
 export function applyFieldPolicy(
   entry: TraceEntry,
@@ -248,11 +254,6 @@ export function applyFieldPolicy(
   const result = { ...entry };
 
   for (const [key, include] of Object.entries(policy)) {
-    // HIGH_RISK override — always strip
-    if (HIGH_RISK_KEYS.includes(key as keyof FieldPolicy)) {
-      (result as Record<string, unknown>)[key] = null;
-      continue;
-    }
     if (!include) {
       (result as Record<string, unknown>)[key] = null;
     }
@@ -280,7 +281,7 @@ const HIGH_RISK_FIELDS: (keyof TraceEntry)[] = [
 
 /**
  * Apply disclosure level — strip fields above the allowed tier.
- * HIGH RISK is always stripped regardless of level.
+ * HIGH RISK is stripped unless level is "full" (local-only use).
  */
 export function applyDisclosure(
   entry: TraceEntry,
@@ -288,13 +289,15 @@ export function applyDisclosure(
 ): TraceEntry {
   const result = { ...entry };
 
-  // HIGH RISK — always stripped
-  for (const field of HIGH_RISK_FIELDS) {
-    (result as Record<string, unknown>)[field] = null;
+  // HIGH RISK — stripped unless "full"
+  if (level !== "full") {
+    for (const field of HIGH_RISK_FIELDS) {
+      (result as Record<string, unknown>)[field] = null;
+    }
   }
 
-  // SENSITIVE — stripped unless level is "sensitive"
-  if (level !== "sensitive") {
+  // SENSITIVE — stripped unless level is "sensitive" or "full"
+  if (level !== "sensitive" && level !== "full") {
     for (const field of SENSITIVE_FIELDS) {
       (result as Record<string, unknown>)[field] = null;
     }

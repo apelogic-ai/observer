@@ -510,7 +510,7 @@ program
   .option("--endpoint <url>", "Ingestor endpoint URL (e.g. http://localhost:19900/api/ingest)")
   .option("--api-key <key>", "API key for ingestor auth")
   .option("--local-output <path>", "Write normalized traces to local directory")
-  .option("--disclosure <level>", "Disclosure level: basic, moderate, sensitive", "sensitive")
+  .option("--disclosure <level>", "Disclosure level: basic, moderate, sensitive, full", "sensitive")
   .action(scanAction);
 
 program
