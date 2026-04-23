@@ -13,5 +13,8 @@
   "devDependencies": {
     "turbo": "^2"
   },
-  "packageManager": "bun@1.2.0"
+  "packageManager": "bun@1.2.0",
+  "trustedDependencies": [
+    "duckdb"
+  ]
 }
