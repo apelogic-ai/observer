@@ -23,6 +23,7 @@ const TOOL_NAME_MAP: Record<string, string> = {
 };
 
 function normalizeToolName(raw: string): string {
+  if (raw.startsWith("mcp__")) return raw.replace(/__/g, ":");
   return TOOL_NAME_MAP[raw] ?? raw;
 }
 
@@ -111,7 +112,7 @@ export function parseCursorDb(
 
       const text = bubble.text ?? bubble.rawText ?? "";
       const tokenUsage = bubble.tokenCount?.inputTokens != null
-        ? { input: bubble.tokenCount.inputTokens ?? 0, output: bubble.tokenCount.outputTokens ?? 0, cacheRead: 0, reasoning: 0 }
+        ? { input: bubble.tokenCount.inputTokens ?? 0, output: bubble.tokenCount.outputTokens ?? 0, cacheRead: 0, cacheCreation: 0, reasoning: 0 }
         : null;
 
       // Tool calls

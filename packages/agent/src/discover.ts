@@ -3,8 +3,9 @@
  * Scans known directories for Claude Code, Codex, and other agents.
  */
 
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join, basename } from "node:path";
+import { existsSync, readdirSync, readFileSync, statSync, openSync, readSync, closeSync } from "node:fs";
+import { join, basename, dirname } from "node:path";
+import { resolveRepoFromClaudeProject } from "./repo-resolver";
 
 export type AgentType = "claude_code" | "codex" | "cursor";
 
@@ -54,6 +55,21 @@ function isEphemeralProject(name: string): boolean {
   return SKIP_PATTERNS.some((p) => p.test(name));
 }
 
+/**
+ * Walk up from a path to find the nearest .git directory.
+ * Returns the git root, or the original path if no .git is found.
+ */
+function findGitRoot(dir: string): string {
+  let current = dir;
+  while (current !== "/" && current !== ".") {
+    if (existsSync(join(current, ".git"))) return current;
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return dir;
+}
+
 function discoverClaudeCode(claudeDir: string): TraceSource[] {
   const projectsDir = join(claudeDir, "projects");
   if (!existsSync(projectsDir)) return [];
@@ -71,9 +87,13 @@ function discoverClaudeCode(claudeDir: string): TraceSource[] {
     );
     if (jsonlFiles.length === 0) continue;
 
+    // Resolve the slug back to a real path, find git root, extract repo name
+    const resolvedPath = resolveRepoFromClaudeProject(entry);
+    const project = resolvedPath ? basename(findGitRoot(resolvedPath)) : entry;
+
     sources.push({
       agent: "claude_code",
-      project: entry,
+      project,
       files: jsonlFiles.map((f) => join(projectPath, f)),
     });
   }
@@ -96,9 +116,9 @@ function discoverCodex(codexDir: string): TraceSource[] {
   for (const file of files) {
     let project = "unknown";
     try {
-      const fd = require("node:fs").openSync(file, "r");
-      const bytesRead = require("node:fs").readSync(fd, buf!, 0, 32768, 0);
-      require("node:fs").closeSync(fd);
+      const fd = openSync(file, "r");
+      const bytesRead = readSync(fd, buf!, 0, 32768, 0);
+      closeSync(fd);
       const firstLine = buf!.toString("utf-8", 0, bytesRead).split("\n")[0];
       const entry = JSON.parse(firstLine);
       if (entry.type === "session_meta" && entry.payload?.cwd) {

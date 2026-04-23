@@ -143,6 +143,22 @@ describe("parseCodexEntry", () => {
     expect(parseCodexEntry(raw, sessionId)).toBeNull();
   });
 
+  it("captures call_id on function_call_output for correlation", () => {
+    const raw = {
+      timestamp: "2026-04-08T12:00:01.000Z",
+      type: "response_item",
+      payload: {
+        type: "function_call_output",
+        output: "file.txt created",
+        call_id: "call_456",
+      },
+    };
+    const entry = parseCodexEntry(raw, sessionId);
+    expect(entry).not.toBeNull();
+    expect(entry!.entryType).toBe("tool_result");
+    expect(entry!.toolCallId).toBe("call_456");
+  });
+
   it("returns null for unparseable entries", () => {
     expect(parseCodexEntry({}, sessionId)).toBeNull();
     expect(parseCodexEntry({ type: "unknown" }, sessionId)).toBeNull();

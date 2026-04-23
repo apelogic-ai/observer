@@ -92,6 +92,7 @@ describe("parseCursorDb", () => {
       input: 200,
       output: 150,
       cacheRead: 0,
+      cacheCreation: 0,
       reasoning: 0,
     });
   });
@@ -132,6 +133,21 @@ describe("parseCursorDb", () => {
     const tools = entries.filter((e) => e.entryType === "tool_call");
     const names = tools.map((t) => t.toolName);
     expect(names).toEqual(["edit", "shell", "read", "search"]);
+  });
+
+  it("normalizes MCP tool names with mcp__ prefix", () => {
+    insertComposer(dbPath, "comp-1", { createdAt: 1712592000000 });
+    insertBubble(dbPath, "comp-1", "b-mcp", {
+      type: 2,
+      toolFormerData: [
+        { toolName: "mcp__db_mcp__run_sql", query: "SELECT 1" },
+      ],
+    });
+
+    const entries = parseCursorDb(dbPath);
+    const tools = entries.filter((e) => e.entryType === "tool_call");
+    expect(tools).toHaveLength(1);
+    expect(tools[0].toolName).toBe("mcp:db_mcp:run_sql");
   });
 
   it("extracts cost from usageData", () => {

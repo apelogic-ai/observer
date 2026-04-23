@@ -62,6 +62,13 @@ function hashId(sessionId: string, timestamp: string): string {
   return `cx:${sessionId.slice(0, 8)}:${timestamp.replace(/\D/g, "").slice(0, 14)}:${entryIndex++}`;
 }
 
+/**
+ * Per-session state to track model from turn_context entries.
+ * The model appears on turn_context rows (which have no payload.type)
+ * and applies to all subsequent entries until the next turn_context.
+ */
+const sessionModels = new Map<string, string>();
+
 const EMPTY_TRACE: Omit<TraceEntry, "id" | "timestamp" | "agent" | "sessionId" | "entryType" | "role" | "developer" | "machine" | "project"> = {
   model: null, tokenUsage: null, toolName: null, toolCallId: null,
   filePath: null, command: null, taskSummary: null,
@@ -82,6 +89,14 @@ export function parseCodexEntry(
   const payload = raw.payload as Record<string, unknown> | undefined;
   if (!payload || typeof payload !== "object") return null;
 
+  // turn_context carries the model for subsequent entries in this turn
+  const rawType = raw.type as string | undefined;
+  if (rawType === "turn_context") {
+    const model = payload.model as string | undefined;
+    if (model) sessionModels.set(sessionId, model);
+    return null;
+  }
+
   const ptype = payload.type as string | undefined;
   if (!ptype) return null;
 
@@ -94,7 +109,7 @@ export function parseCodexEntry(
     timestamp,
     agent: "codex" as const,
     sessionId,
-    model: (payload.model as string) ?? null,
+    model: (payload.model as string) ?? sessionModels.get(sessionId) ?? null,
     developer: meta?.developer ?? "",
     machine: meta?.machine ?? "",
     project: meta?.project ?? "",
@@ -111,6 +126,7 @@ export function parseCodexEntry(
       input: ltu.input_tokens ?? 0,
       output: ltu.output_tokens ?? 0,
       cacheRead: ltu.cached_input_tokens ?? 0,
+      cacheCreation: 0,
       reasoning: ltu.reasoning_output_tokens ?? 0,
     };
   }
@@ -136,6 +152,7 @@ export function parseCodexEntry(
       ...base,
       entryType: "tool_result",
       role: "tool",
+      toolCallId: (payload.call_id as string) ?? null,
       toolResultContent: String(output),
       stdout: String(output),
     };
@@ -166,6 +183,25 @@ export function parseCodexEntry(
     const content = payload.content as unknown[];
     const text = Array.isArray(content) ? extractText(content) : "";
     return { ...base, entryType: "message", role: "assistant", assistantText: truncate(text, 500) };
+  }
+
+  // Token count (emitted as event_msg with payload.type=token_count)
+  if (ptype === "token_count") {
+    const info = payload.info as Record<string, unknown> | undefined;
+    const ltu = info?.last_token_usage as Record<string, number> | undefined;
+    if (!ltu) return null;
+    return {
+      ...base,
+      entryType: "token_usage",
+      role: "system",
+      tokenUsage: {
+        input: ltu.input_tokens ?? 0,
+        output: ltu.output_tokens ?? 0,
+        cacheRead: ltu.cached_input_tokens ?? 0,
+        cacheCreation: 0,
+        reasoning: ltu.reasoning_output_tokens ?? 0,
+      },
+    };
   }
 
   // Reasoning

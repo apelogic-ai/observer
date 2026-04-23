@@ -18,7 +18,11 @@ export interface ObserverConfig {
     redactSecrets: boolean;
     schedule: "realtime" | "hourly" | "daily";
     disclosure: DisclosureLevel;
+    useLocalTime: boolean;
     anonymize: boolean;
+  };
+  git: {
+    enabled: boolean;
   };
   privacy: {
     excludeProjects: string[];
@@ -40,7 +44,11 @@ export const DEFAULT_CONFIG: ObserverConfig = {
     redactSecrets: true,
     schedule: "hourly",
     disclosure: "basic" as DisclosureLevel,
+    useLocalTime: false,
     anonymize: false,
+  },
+  git: {
+    enabled: true,
   },
   privacy: {
     excludeProjects: [],
@@ -68,6 +76,7 @@ export function loadConfig(configPath: string): ObserverConfig {
 
   const rawSources = (raw.sources ?? {}) as Record<string, unknown>;
   const rawShip = (raw.ship ?? {}) as Record<string, unknown>;
+  const rawGit = (raw.git ?? {}) as Record<string, unknown>;
   const rawPrivacy = (raw.privacy ?? {}) as Record<string, unknown>;
 
   return {
@@ -92,9 +101,17 @@ export function loadConfig(configPath: string): ObserverConfig {
         DEFAULT_CONFIG.ship.schedule,
       disclosure: (rawShip.disclosure as DisclosureLevel) ??
         DEFAULT_CONFIG.ship.disclosure,
+      useLocalTime: rawShip.useLocalTime !== undefined
+        ? Boolean(rawShip.useLocalTime)
+        : DEFAULT_CONFIG.ship.useLocalTime,
       anonymize: rawShip.anonymize !== undefined
         ? Boolean(rawShip.anonymize)
         : DEFAULT_CONFIG.ship.anonymize,
+    },
+    git: {
+      enabled: rawGit.enabled !== undefined
+        ? Boolean(rawGit.enabled)
+        : DEFAULT_CONFIG.git.enabled,
     },
     privacy: {
       excludeProjects: Array.isArray(rawPrivacy.excludeProjects)

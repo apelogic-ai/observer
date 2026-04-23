@@ -5,6 +5,9 @@
 
 import { discoverTraceSources } from "./discover";
 import { Shipper, type ShippedBatch } from "./shipper";
+import { shipCursorEntries, type CursorShipConfig } from "./disk-shipper";
+import { scanGitEvents } from "./git/scanner";
+import type { DisclosureLevel } from "./types";
 
 export interface DaemonConfig {
   claudeDir: string;
@@ -17,6 +20,12 @@ export interface DaemonConfig {
   machine?: string;
   onShip: (batch: ShippedBatch) => Promise<void>;
   onProgress?: (message: string) => void;
+  /** Required for Cursor SQLite processing */
+  localOutputDir?: string;
+  disclosure?: DisclosureLevel;
+  useLocalTime?: boolean;
+  /** Collect git events alongside traces */
+  collectGit?: boolean;
 }
 
 export class Daemon {
@@ -49,7 +58,25 @@ export class Daemon {
     let shipped = 0;
     for (const source of sources) {
       for (const file of source.files) {
-        if (file.endsWith(".vscdb")) continue;
+        if (file.endsWith(".vscdb")) {
+          // Cursor SQLite — requires local output dir for normalized JSONL
+          if (!this.config.localOutputDir) continue;
+          try {
+            const count = shipCursorEntries(file, {
+              outputDir: this.config.localOutputDir,
+              disclosure: this.config.disclosure ?? "sensitive",
+              redactSecrets: this.config.redactSecrets,
+              useLocalTime: this.config.useLocalTime,
+              developer: this.shipper.developer,
+              machine: this.shipper.machine,
+              stateDir: this.config.stateDir,
+            });
+            if (count > 0) shipped++;
+          } catch {
+            // Cursor DB may be locked by the IDE — skip silently
+          }
+          continue;
+        }
         const ok = await this.shipper.processFile(file, source.agent, source.project);
         if (ok) shipped++;
       }
@@ -57,6 +84,24 @@ export class Daemon {
 
     if (shipped > 0) {
       this.progress(`Shipped ${shipped} batch(es) from ${sources.length} source(s)`);
+    }
+
+    // Git event collection
+    if (this.config.collectGit !== false && this.config.localOutputDir) {
+      try {
+        const gitCount = scanGitEvents({
+          outputDir: this.config.localOutputDir,
+          stateDir: this.config.stateDir,
+          disclosure: this.config.disclosure ?? "sensitive",
+          developer: this.shipper.developer,
+          machine: this.shipper.machine,
+        });
+        if (gitCount > 0) {
+          this.progress(`Git: ${gitCount} event(s) collected`);
+        }
+      } catch {
+        // Git collection is best-effort — don't crash the daemon
+      }
     }
   }
 

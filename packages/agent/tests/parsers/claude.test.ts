@@ -44,6 +44,7 @@ describe("parseClaudeEntry", () => {
       input: 1000,
       output: 200,
       cacheRead: 5000,
+      cacheCreation: 0,
       reasoning: 0,
     });
   });
@@ -128,5 +129,70 @@ describe("parseClaudeEntry", () => {
     };
     const entry = parseClaudeEntry(raw, sessionId);
     expect(entry!.timestamp).toBe("2026-04-08T10:30:00.000Z");
+  });
+
+  it("normalizes Skill meta-tool to skill:{name}", () => {
+    const raw = {
+      type: "assistant",
+      timestamp: "2026-04-08T10:00:01.000Z",
+      message: {
+        content: [
+          { type: "tool_use", name: "Skill", id: "toolu_skill1", input: { command: "pdf" } },
+        ],
+      },
+    };
+    const entry = parseClaudeEntry(raw, sessionId);
+    expect(entry!.toolName).toBe("skill:pdf");
+    expect(entry!.toolCallId).toBe("toolu_skill1");
+  });
+
+  it("normalizes Skill meta-tool with namespaced plugin skill", () => {
+    const raw = {
+      type: "assistant",
+      timestamp: "2026-04-08T10:00:01.000Z",
+      message: {
+        content: [
+          { type: "tool_use", name: "Skill", id: "toolu_skill2", input: { command: "ms-office-suite:pdf" } },
+        ],
+      },
+    };
+    const entry = parseClaudeEntry(raw, sessionId);
+    expect(entry!.toolName).toBe("skill:ms-office-suite:pdf");
+  });
+
+  it("captures tool_use_id on tool_result entries", () => {
+    const raw = {
+      type: "user",
+      timestamp: "2026-04-08T10:00:02.000Z",
+      message: {
+        content: [
+          { type: "tool_result", tool_use_id: "toolu_skill1", content: "# PDF Skill\nInstructions here..." },
+        ],
+      },
+    };
+    const entry = parseClaudeEntry(raw, sessionId);
+    expect(entry!.toolCallId).toBe("toolu_skill1");
+  });
+
+  it("parseClaudeEntries returns multiple entries for multi-block messages", async () => {
+    const { parseClaudeEntries } = await import("../../src/parsers/claude");
+    const raw = {
+      type: "assistant",
+      timestamp: "2026-04-08T10:00:01.000Z",
+      message: {
+        content: [
+          { type: "thinking", thinking: "Let me think about this..." },
+          { type: "text", text: "I'll run the tests." },
+          { type: "tool_use", name: "Bash", id: "toolu_1", input: { command: "pytest" } },
+        ],
+        usage: { input_tokens: 500, output_tokens: 100 },
+      },
+    };
+    const entries = parseClaudeEntries(raw, sessionId);
+    expect(entries.length).toBe(3);
+    const types = entries.map(e => e.entryType);
+    expect(types).toContain("reasoning");
+    expect(types).toContain("message");
+    expect(types).toContain("tool_call");
   });
 });

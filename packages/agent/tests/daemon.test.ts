@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Daemon, type DaemonConfig } from "../src/daemon";
@@ -113,5 +113,80 @@ describe("Daemon", () => {
 
     expect(progress.length).toBeGreaterThan(0);
     expect(progress.some((p) => p.includes("source"))).toBe(true);
+  });
+
+  it("processes Cursor SQLite when localOutputDir is set", async () => {
+    const Database = require("better-sqlite3");
+
+    // Set up a Cursor-like directory with a workspace state.vscdb
+    const cursorDir = makeTmpDir();
+    const wsDir = join(cursorDir, "User", "workspaceStorage", "ws1");
+    mkdirSync(wsDir, { recursive: true });
+    const dbPath = join(wsDir, "state.vscdb");
+
+    const db = new Database(dbPath);
+    db.exec("CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT)");
+    db.exec("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)");
+    db.prepare("INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)").run(
+      "composerData:comp-1",
+      JSON.stringify({ _v: 3, composerId: "comp-1", createdAt: 1712592000000 }),
+    );
+    db.prepare("INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)").run(
+      "bubbleId:comp-1:b1",
+      JSON.stringify({ _v: 2, bubbleId: "b1", type: 1, text: "cursor message" }),
+    );
+    db.close();
+
+    const localOutputDir = makeTmpDir();
+    const daemon = new Daemon(makeConfig({
+      cursorDir,
+      localOutputDir,
+      disclosure: "sensitive",
+    }));
+    await daemon.pollOnce();
+
+    // Should have written to localOutputDir — date from entry timestamp
+    // createdAt 1712592000000 = 2024-04-08 UTC
+    const entryDate = "2024-04-08";
+    const cursorOutputDir = join(localOutputDir, entryDate, "cursor");
+    expect(existsSync(cursorOutputDir)).toBe(true);
+
+    const files = readdirSync(cursorOutputDir).filter(f => f.endsWith(".jsonl"));
+    expect(files.length).toBe(1);
+
+    const content = readFileSync(join(cursorOutputDir, files[0]), "utf-8");
+    const entry = JSON.parse(content.trim());
+    expect(entry.agent).toBe("cursor");
+    expect(entry.userPrompt).toBe("cursor message");
+  });
+
+  it("skips Cursor when localOutputDir is not set", async () => {
+    const Database = require("better-sqlite3");
+
+    const cursorDir = makeTmpDir();
+    const wsDir = join(cursorDir, "User", "workspaceStorage", "ws1");
+    mkdirSync(wsDir, { recursive: true });
+    const dbPath = join(wsDir, "state.vscdb");
+
+    const db = new Database(dbPath);
+    db.exec("CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT)");
+    db.exec("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)");
+    db.prepare("INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)").run(
+      "composerData:comp-1",
+      JSON.stringify({ _v: 3, composerId: "comp-1", createdAt: 1712592000000 }),
+    );
+    db.prepare("INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)").run(
+      "bubbleId:comp-1:b1",
+      JSON.stringify({ _v: 2, bubbleId: "b1", type: 1, text: "cursor message" }),
+    );
+    db.close();
+
+    // No localOutputDir → Cursor should be silently skipped
+    const daemon = new Daemon(makeConfig({ cursorDir }));
+    await daemon.pollOnce();
+
+    // No crash, no Cursor data shipped via onShip
+    const cursorBatches = shipped.filter(b => b.agent === "cursor");
+    expect(cursorBatches).toHaveLength(0);
   });
 });

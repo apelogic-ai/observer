@@ -26,13 +26,14 @@ export interface TraceEntry {
   timestamp: string;
   agent: "claude_code" | "codex" | "cursor";
   sessionId: string;
-  entryType: "message" | "tool_call" | "tool_result" | "reasoning" | "task_summary";
+  entryType: "message" | "tool_call" | "tool_result" | "reasoning" | "task_summary" | "token_usage";
   role: "user" | "assistant" | "system" | "tool";
   model: string | null;
   tokenUsage: {
     input: number;
     output: number;
     cacheRead: number;
+    cacheCreation: number;
     reasoning: number;
   } | null;
   developer: string;

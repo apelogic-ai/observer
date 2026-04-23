@@ -77,6 +77,7 @@ export function parseClaudeEntry(
         input: usage.input_tokens || 0,
         output: usage.output_tokens || 0,
         cacheRead: usage.cache_read_input_tokens || 0,
+        cacheCreation: usage.cache_creation_input_tokens || 0,
         reasoning: 0,
       }
     : null;
@@ -103,19 +104,20 @@ export function parseClaudeEntry(
   if (blockType === "tool_use") {
     const rawName = (firstBlock.name as string) || "unknown";
     const input = firstBlock.input as Record<string, unknown> | undefined;
-    let inputSummary: string | null = null;
-    if (input) {
-      const val = input.command ?? input.sql ?? input.query ?? input.pattern ?? input.file_path;
-      inputSummary = val ? truncate(String(val), 200) : truncate(JSON.stringify(input), 200);
-    }
+
+    // Skill meta-tool: name="Skill", input.command="pdf" → toolName="skill:pdf"
+    const isSkill = rawName === "Skill" && input?.command;
+    const toolName = isSkill
+      ? `skill:${input!.command}`
+      : normalizeToolName(rawName);
 
     return {
       ...base,
       entryType: "tool_call",
       role: "assistant",
-      toolName: normalizeToolName(rawName),
+      toolName,
       toolCallId: (firstBlock.id as string) ?? null,
-      command: input?.command ? truncate(String(input.command), 200) : null,
+      command: !isSkill && input?.command ? truncate(String(input.command), 200) : null,
       filePath: input?.file_path ? String(input.file_path) : null,
     };
   }
@@ -140,6 +142,7 @@ export function parseClaudeEntry(
       ...base,
       entryType: "tool_result",
       role: "tool",
+      toolCallId: (firstBlock.tool_use_id as string) ?? null,
       toolResultContent: typeof resultContent === "string"
         ? resultContent
         : Array.isArray(resultContent) ? extractText(resultContent) : null,
@@ -176,6 +179,36 @@ export function parseClaudeEntry(
   }
 
   return null;
+}
+
+/**
+ * Parse a Claude Code JSONL entry, emitting one TraceEntry per content block.
+ * Unlike parseClaudeEntry (which only looks at the first block), this
+ * handles multi-block messages (e.g. thinking + text + tool_use).
+ */
+export function parseClaudeEntries(
+  raw: Record<string, unknown>,
+  sessionId: string,
+  meta?: { developer?: string; machine?: string; project?: string },
+): TraceEntry[] {
+  const entryType = raw.type as string | undefined;
+  const timestamp = (raw.timestamp as string) || "";
+  const message = raw.message as Record<string, unknown> | undefined;
+
+  if (!message || (entryType !== "user" && entryType !== "assistant")) return [];
+
+  const content = message.content as unknown[];
+  if (!Array.isArray(content) || content.length === 0) return [];
+
+  const entries: TraceEntry[] = [];
+  for (const block of content) {
+    const singleContent = [block];
+    const singleMessage = { ...message, content: singleContent };
+    const singleRaw = { ...raw, message: singleMessage };
+    const entry = parseClaudeEntry(singleRaw, sessionId, meta);
+    if (entry) entries.push(entry);
+  }
+  return entries;
 }
 
 // Re-export for backward compat

@@ -17,7 +17,8 @@ import { execSync } from "node:child_process";
 import { discoverTraceSources, type TraceSource } from "./discover";
 import { Shipper, type ShippedBatch } from "./shipper";
 import { createHttpShipper } from "./http-shipper";
-import { createDiskShipper } from "./disk-shipper";
+import { createDiskShipper, shipCursorEntries } from "./disk-shipper";
+import { scanGitEvents } from "./git/scanner";
 import { generateKeypair, loadKeypair, getPublicKeyFingerprint } from "./identity";
 import { generateConfig, writeConfig, type InitAnswers } from "./init";
 import { installService, uninstallService, getServicePaths } from "./service";
@@ -72,6 +73,8 @@ interface ScanOpts {
   apiKey?: string;
   localOutput?: string;
   disclosure?: string;
+  localTime?: boolean;
+  git?: boolean;
 }
 
 async function scanAction(opts: ScanOpts): Promise<void> {
@@ -132,7 +135,7 @@ async function scanAction(opts: ScanOpts): Promise<void> {
     : null;
   const disclosure = (opts.disclosure ?? "sensitive") as import("./types").DisclosureLevel;
   const diskShip = opts.localOutput
-    ? createDiskShipper({ outputDir: opts.localOutput, disclosure, redactSecrets: opts.redactSecrets })
+    ? createDiskShipper({ outputDir: opts.localOutput, disclosure, redactSecrets: opts.redactSecrets, useLocalTime: opts.localTime })
     : null;
 
   const shipFn = httpShip && diskShip
@@ -166,7 +169,28 @@ async function scanAction(opts: ScanOpts): Promise<void> {
   for (const source of sources) {
     for (const file of source.files) {
       if (file.endsWith(".vscdb")) {
-        console.log(`  [skip] ${source.agent}/${source.project}: SQLite shipping not yet wired`);
+        if (!opts.localOutput) {
+          console.log(`  [skip] ${source.agent}/${source.project}: Cursor SQLite requires --local-output`);
+          continue;
+        }
+        try {
+          const count = shipCursorEntries(file, {
+            outputDir: opts.localOutput,
+            disclosure,
+            redactSecrets: opts.redactSecrets,
+            useLocalTime: opts.localTime,
+            developer: shipper.developer,
+            machine: shipper.machine,
+            stateDir: opts.stateDir,
+          });
+          if (count > 0) {
+            batchCount++;
+            entryCount += count;
+          }
+        } catch (err) {
+          console.log(`  [error] ${source.agent}/${source.project}: ${err instanceof Error ? err.message : err}`);
+          failCount++;
+        }
         continue;
       }
       const ok = await shipper.processFile(file, source.agent, source.project);
@@ -193,6 +217,24 @@ async function scanAction(opts: ScanOpts): Promise<void> {
       for (const b of shipped) {
         console.log(`  ${b.agent}/${b.project}: ${b.entries.length} entries`);
       }
+    }
+  }
+
+  // Git event collection
+  if (opts.git !== false && opts.localOutput) {
+    try {
+      const gitCount = scanGitEvents({
+        outputDir: opts.localOutput,
+        stateDir: opts.stateDir,
+        disclosure,
+        developer: shipper.developer,
+        machine: shipper.machine,
+      });
+      if (gitCount > 0) {
+        console.log(`Git: ${gitCount} event(s) collected`);
+      }
+    } catch (err) {
+      console.log(`Git: collection failed — ${err instanceof Error ? err.message : err}`);
     }
   }
 }
@@ -224,10 +266,10 @@ function statusAction(opts: StatusOpts): void {
 
   // Show shipper state
   const { existsSync, readFileSync } = require("node:fs");
-  const cursorFile = join(opts.stateDir, "shipper-cursors.json");
-  if (existsSync(cursorFile)) {
-    const cursors = JSON.parse(readFileSync(cursorFile, "utf-8"));
-    const tracked = Object.keys(cursors).length;
+  const offsetFile = join(opts.stateDir, "shipper-offsets.json");
+  if (existsSync(offsetFile)) {
+    const offsets = JSON.parse(readFileSync(offsetFile, "utf-8"));
+    const tracked = Object.keys(offsets).length;
     console.log(`\nShipper: tracking ${tracked} file(s)`);
   } else {
     console.log("\nShipper: no state yet (run scan first)");
@@ -362,6 +404,7 @@ async function daemonAction(opts: { stateDir: string }): Promise<void> {
         outputDir: config.ship.localOutputDir,
         disclosure: config.ship.disclosure,
         redactSecrets: config.ship.redactSecrets,
+        useLocalTime: config.ship.useLocalTime,
       })
     : null;
   const shipFn = httpShipDaemon && diskShipDaemon
@@ -377,6 +420,9 @@ async function daemonAction(opts: { stateDir: string }): Promise<void> {
     redactSecrets: config.ship.redactSecrets,
     developer: config.developer ?? undefined,
     onShip: shipFn,
+    localOutputDir: config.ship.localOutputDir ?? undefined,
+    disclosure: config.ship.disclosure,
+    useLocalTime: config.ship.useLocalTime,
     onProgress: (msg) => {
       const ts = new Date().toLocaleTimeString("en-US", { hour12: false });
       console.log(`[${ts}] ${msg}`);
@@ -503,7 +549,7 @@ program
   .option("--claude-dir <path>", "Claude Code directory", DEFAULT_CLAUDE_DIR)
   .option("--codex-dir <path>", "Codex directory", DEFAULT_CODEX_DIR)
   .option("--cursor-dir <path>", "Cursor directory", DEFAULT_CURSOR_DIR)
-  .option("--state-dir <path>", "State directory for cursors", DEFAULT_STATE_DIR)
+  .option("--state-dir <path>", "State directory for offsets", DEFAULT_STATE_DIR)
   .option("--no-redact-secrets", "Disable secret redaction")
   .option("--dry-run", "Discover and count without shipping", false)
   .option("--developer <id>", "Developer identity override")
@@ -511,6 +557,8 @@ program
   .option("--api-key <key>", "API key for ingestor auth")
   .option("--local-output <path>", "Write normalized traces to local directory")
   .option("--disclosure <level>", "Disclosure level: basic, moderate, sensitive, full", "sensitive")
+  .option("--local-time", "Use local timezone for date partitioning (default: UTC)")
+  .option("--no-git", "Skip git event collection")
   .action(scanAction);
 
 program

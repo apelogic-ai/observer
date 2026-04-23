@@ -257,3 +257,137 @@ describe("createDiskShipper", () => {
     expect(entry.project).toBe("cool-project");
   });
 });
+
+describe("shipCursorEntries", () => {
+  let outputDir: string;
+  let stateDir: string;
+
+  beforeEach(() => {
+    outputDir = makeTmpDir();
+    stateDir = makeTmpDir();
+  });
+
+  function createCursorDb(bubbles: Array<{ composerId: string; bubbleId: string; type: number; text: string }>): string {
+    const Database = require("better-sqlite3");
+    const dbDir = makeTmpDir();
+    const dbPath = join(dbDir, "state.vscdb");
+    const db = new Database(dbPath);
+    db.exec("CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT)");
+    db.exec("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT)");
+
+    const composers = new Set(bubbles.map(b => b.composerId));
+    for (const cid of composers) {
+      db.prepare("INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)").run(
+        `composerData:${cid}`,
+        JSON.stringify({ _v: 3, composerId: cid, createdAt: 1712592000000 }),
+      );
+    }
+    for (const b of bubbles) {
+      db.prepare("INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)").run(
+        `bubbleId:${b.composerId}:${b.bubbleId}`,
+        JSON.stringify({ _v: 2, bubbleId: b.bubbleId, type: b.type, text: b.text }),
+      );
+    }
+    db.close();
+    return dbPath;
+  }
+
+  it("parses Cursor SQLite and writes normalized JSONL", async () => {
+    const { shipCursorEntries } = await import("../src/disk-shipper");
+    const dbPath = createCursorDb([
+      { composerId: "comp-1", bubbleId: "b1", type: 1, text: "hello from cursor" },
+    ]);
+
+    const count = shipCursorEntries(dbPath, {
+      outputDir, stateDir, disclosure: "sensitive",
+      developer: "dev@test.com", machine: "test-box",
+    });
+
+    expect(count).toBe(1);
+
+    // createdAt 1712592000000 = 2024-04-08 UTC
+    const entryDate = "2024-04-08";
+    const cursorDir = join(outputDir, entryDate, "cursor");
+    expect(existsSync(cursorDir)).toBe(true);
+
+    const files = readdirSync(cursorDir).filter(f => f.endsWith(".jsonl"));
+    expect(files.length).toBe(1);
+
+    const content = readFileSync(join(cursorDir, files[0]), "utf-8");
+    const entry = JSON.parse(content.trim());
+    expect(entry.agent).toBe("cursor");
+    expect(entry.userPrompt).toBe("hello from cursor");
+    expect(entry.developer).toBe("dev@test.com");
+    expect(entry.machine).toBe("test-box");
+  });
+
+  it("applies disclosure to Cursor entries", async () => {
+    const { shipCursorEntries } = await import("../src/disk-shipper");
+    const dbPath = createCursorDb([
+      { composerId: "comp-1", bubbleId: "b1", type: 1, text: "user prompt here" },
+    ]);
+
+    const count = shipCursorEntries(dbPath, {
+      outputDir, stateDir, disclosure: "basic",
+      developer: "dev@test.com", machine: "test-box",
+    });
+
+    expect(count).toBe(1);
+
+    const entryDate = "2024-04-08";
+    const files = readdirSync(join(outputDir, entryDate, "cursor"));
+    const content = readFileSync(join(outputDir, entryDate, "cursor", files[0]), "utf-8");
+    const entry = JSON.parse(content.trim());
+    expect(entry.userPrompt).toBeNull();
+  });
+
+  it("skips already-shipped entries on re-run (incremental)", async () => {
+    const { shipCursorEntries } = await import("../src/disk-shipper");
+    const dbPath = createCursorDb([
+      { composerId: "comp-1", bubbleId: "b1", type: 1, text: "first message" },
+    ]);
+
+    const cfg = {
+      outputDir, stateDir, disclosure: "sensitive" as const,
+      developer: "dev@test.com", machine: "test-box",
+    };
+
+    // First run — ships 1
+    expect(shipCursorEntries(dbPath, cfg)).toBe(1);
+
+    // Second run — same data, ships 0
+    expect(shipCursorEntries(dbPath, cfg)).toBe(0);
+  });
+
+  it("picks up new bubbles in existing sessions (multi-day)", async () => {
+    const { shipCursorEntries } = await import("../src/disk-shipper");
+    const Database = require("better-sqlite3");
+
+    // Initial session with 1 bubble
+    const dbPath = createCursorDb([
+      { composerId: "comp-1", bubbleId: "b1", type: 1, text: "day 1 message" },
+    ]);
+
+    const cfg = {
+      outputDir, stateDir, disclosure: "sensitive" as const,
+      developer: "dev@test.com", machine: "test-box",
+    };
+
+    // First run
+    expect(shipCursorEntries(dbPath, cfg)).toBe(1);
+
+    // Simulate day 2: new bubble added to same session
+    const db = new Database(dbPath);
+    db.prepare("INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)").run(
+      "bubbleId:comp-1:b2",
+      JSON.stringify({ _v: 2, bubbleId: "b2", type: 2, text: "day 2 response" }),
+    );
+    db.close();
+
+    // Second run — only the new bubble
+    expect(shipCursorEntries(dbPath, cfg)).toBe(1);
+
+    // Third run — nothing new
+    expect(shipCursorEntries(dbPath, cfg)).toBe(0);
+  });
+});
