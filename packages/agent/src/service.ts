@@ -48,7 +48,10 @@ function launchdLabel(name: string): string {
 }
 
 function systemdUnitName(name: string): string {
-  return `observer-${name}.service`;
+  // Keep the default 'agent' unit file at `observer.service` so existing
+  // installs aren't orphaned on upgrade; new services (e.g. dashboard)
+  // get a hyphenated suffix.
+  return name === "agent" ? "observer.service" : `observer-${name}.service`;
 }
 
 export function generateLaunchdPlist(config: ServiceConfig): string {
