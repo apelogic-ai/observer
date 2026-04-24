@@ -114,29 +114,29 @@ console.log(`  ✓ on ${branch}, clean, synced with origin`);
 
 // ── Pre-flight builds ──────────────────────────────────────────────
 
-if (!skipTests) {
-  section("Typecheck");
-  run("bun run typecheck", { cwd: resolve(repoRoot, "packages/agent") });
-  run("bun run typecheck", { cwd: resolve(repoRoot, "packages/dashboard") });
+section("Typecheck");
+run("bun run typecheck", { cwd: resolve(repoRoot, "packages/agent") });
+run("bun run typecheck", { cwd: resolve(repoRoot, "packages/dashboard") });
 
+if (!skipTests) {
   section("Tests");
   run("bun run test", { cwd: resolve(repoRoot, "packages/agent") });
-
-  section("Dashboard build");
-  run("bun run build", { cwd: resolve(repoRoot, "packages/dashboard") });
-
-  section("Binary compile smoke");
-  const smokeBin = "/tmp/observer-release-smoke";
-  run(`bun build --compile src/cli.ts --outfile ${smokeBin}`, {
-    cwd: resolve(repoRoot, "packages/agent"),
-  });
-  run(`chmod +x ${smokeBin} && ${smokeBin} --version`);
-  run(`${smokeBin} dashboard --help | head -3`);
-  run(`rm -f ${smokeBin}`);
-  console.log("  ✓ binary compiles and embeds dashboard");
 } else {
-  console.log("\n(skipping typecheck/tests/build — --skip-tests)");
+  console.log("\n(skipping `bun run test` — --skip-tests; CI still runs them)");
 }
+
+section("Dashboard build");
+run("bun run build", { cwd: resolve(repoRoot, "packages/dashboard") });
+
+section("Binary compile smoke");
+const smokeBin = "/tmp/observer-release-smoke";
+run(`bun build --compile src/cli.ts --outfile ${smokeBin}`, {
+  cwd: resolve(repoRoot, "packages/agent"),
+});
+run(`chmod +x ${smokeBin} && ${smokeBin} --version`);
+run(`${smokeBin} dashboard --help | head -3`);
+run(`rm -f ${smokeBin}`);
+console.log("  ✓ binary compiles and embeds dashboard");
 
 // ── Version bump ───────────────────────────────────────────────────
 
