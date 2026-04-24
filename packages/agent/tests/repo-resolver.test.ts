@@ -53,7 +53,11 @@ describe("resolveRepoFromPath", () => {
 });
 
 describe("resolveRepoFromClaudeProject", () => {
-  it("demangles project name using real directories", () => {
+  // Claude Code's project-name mangling assumes Unix paths (leading `/`,
+  // `/` separators). On Windows hosts the demangling can't reverse a
+  // `C:\…` path from a single-string mangled name. Skip on Windows —
+  // Claude Code itself doesn't run there.
+  it.skipIf(process.platform === "win32")("demangles project name using real directories", () => {
     // Create a temp structure that mimics a real path
     const root = makeTmpDir(); // e.g. /tmp/observer-repo-XXXX
     const projectDir = join(root, "dev", "my-project");
@@ -66,7 +70,7 @@ describe("resolveRepoFromClaudeProject", () => {
     expect(result).toBe(projectDir);
   });
 
-  it("handles nested paths with real directories", () => {
+  it.skipIf(process.platform === "win32")("handles nested paths with real directories", () => {
     const root = makeTmpDir();
     const nested = join(root, "dev", "my-project", "packages", "core");
     mkdirSync(nested, { recursive: true });

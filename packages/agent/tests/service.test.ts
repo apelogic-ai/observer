@@ -78,7 +78,10 @@ describe("getServicePaths", () => {
     expect(paths.plistPath).toContain("com.observer.agent.plist");
   });
 
-  it("returns systemd paths on Linux", () => {
+  // node:path.join uses the host OS separator, so on Windows this assertion
+  // sees backslashes and fails. The agent installs services on Linux only,
+  // so testing the linux path shape only makes sense on Unix hosts.
+  it.skipIf(process.platform === "win32")("returns systemd paths on Linux", () => {
     const paths = getServicePaths("linux", "/home/testuser");
     expect(paths.unitPath).toContain("systemd/user");
     expect(paths.unitPath).toContain("observer.service");
