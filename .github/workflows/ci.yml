@@ -24,8 +24,8 @@ jobs:
         with:
           bun-version: latest
 
-      - name: Install dependencies
-        working-directory: packages/agent
+      # Install at the workspace root — agent imports @observer/dashboard/runtime.
+      - name: Install workspace dependencies
         run: bun install
 
       - name: Typecheck
@@ -35,6 +35,80 @@ jobs:
       - name: Test
         working-directory: packages/agent
         run: bun run test
+
+  dashboard-build:
+    name: Dashboard (typecheck + static export + embed)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install workspace dependencies
+        run: bun install
+
+      - name: Typecheck (UI + server)
+        working-directory: packages/dashboard
+        run: bun run typecheck
+
+      # Runs next build + scripts/bundle-static.ts. The staleness guard in
+      # bundle-static will fail if out/ is out of sync with the source tree.
+      - name: Build (next build + bundle-static)
+        working-directory: packages/dashboard
+        run: bun run build
+
+      - name: Smoke-check artifacts
+        working-directory: packages/dashboard
+        run: |
+          test -f dist/out.tar
+          test -f dist/build-info.json
+          test -f out/index.html
+          echo "build-info:"
+          cat dist/build-info.json
+
+  compile-smoke:
+    name: Compile smoke (${{ matrix.target }})
+    # Cheap sanity that the whole pipeline (workspace install → dashboard build
+    # → agent compile with embedded assets) doesn't regress. Full matrix stays
+    # in release.yml.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        include:
+          - target: linux-x64
+            bun_target: bun-linux-x64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install workspace dependencies
+        run: bun install
+
+      - name: Build dashboard
+        working-directory: packages/dashboard
+        run: bun run build
+
+      - name: Compile observer binary
+        working-directory: packages/agent
+        run: |
+          bun build --compile --target=${{ matrix.bun_target }} \
+            src/cli.ts --outfile observer-${{ matrix.target }}
+
+      - name: Verify binary
+        working-directory: packages/agent
+        run: |
+          chmod +x observer-${{ matrix.target }}
+          ./observer-${{ matrix.target }} --version
+          ./observer-${{ matrix.target }} dashboard --help | head -5
 
   api-tests:
     name: API (tests + typecheck)
