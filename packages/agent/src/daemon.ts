@@ -7,6 +7,8 @@ import { discoverTraceSources } from "./discover";
 import { Shipper, type ShippedBatch } from "./shipper";
 import { shipCursorEntries, type CursorShipConfig } from "./disk-shipper";
 import { scanGitEvents } from "./git/scanner";
+import { loadConfig } from "./config";
+import { join } from "node:path";
 import type { DisclosureLevel } from "./types";
 
 export interface DaemonConfig {
@@ -89,12 +91,15 @@ export class Daemon {
     // Git event collection
     if (this.config.collectGit !== false && this.config.localOutputDir) {
       try {
+        const config = loadConfig(join(this.config.stateDir, "config.yaml"));
+        const extraRepos = Object.keys(config.git.repos).length > 0 ? config.git.repos : undefined;
         const gitCount = scanGitEvents({
           outputDir: this.config.localOutputDir,
           stateDir: this.config.stateDir,
           disclosure: this.config.disclosure ?? "sensitive",
           developer: this.shipper.developer,
           machine: this.shipper.machine,
+          extraRepos,
         });
         if (gitCount > 0) {
           this.progress(`Git: ${gitCount} event(s) collected`);

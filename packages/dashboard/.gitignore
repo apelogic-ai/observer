@@ -20,6 +20,9 @@
 # production
 /build
 
+# compile output (out.tar, build-info.json, observer-dashboard binary)
+/dist/
+
 # misc
 .DS_Store
 *.pem

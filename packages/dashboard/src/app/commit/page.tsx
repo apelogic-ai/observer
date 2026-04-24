@@ -1,7 +1,7 @@
 "use client";
 
-import { use, useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
@@ -10,8 +10,8 @@ import { useFilters } from "@/hooks/use-filters";
 import { formatDateTime, formatDuration, formatNumber } from "@/lib/format";
 import type { CommitDetail, SessionSummary } from "@/lib/queries";
 
-export default function CommitPage({ params }: { params: Promise<{ sha: string }> }) {
-  const { sha } = use(params);
+export default function CommitPage() {
+  const sha = useSearchParams().get("sha") ?? "";
   const router = useRouter();
   const { buildQs } = useFilters();
   const [commit, setCommit] = useState<CommitDetail | null>(null);
@@ -19,6 +19,7 @@ export default function CommitPage({ params }: { params: Promise<{ sha: string }
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    if (!sha) { setLoading(false); return; }
     fetch(`/api/commit-detail?sha=${sha}`)
       .then((r) => r.json())
       .then((d) => {
@@ -33,6 +34,15 @@ export default function CommitPage({ params }: { params: Promise<{ sha: string }
       })
       .catch(() => setLoading(false));
   }, [sha]);
+
+  if (!sha) {
+    return (
+      <main className="flex-1 p-6 max-w-[1600px] mx-auto w-full">
+        <PageHeader title="Commit" breadcrumbs={[{ label: "Overview", href: `/${buildQs()}` }]} />
+        <p className="text-muted-foreground">No commit specified.</p>
+      </main>
+    );
+  }
 
   return (
     <main className="flex-1 p-6 space-y-6 max-w-[1600px] mx-auto w-full">
@@ -85,7 +95,7 @@ export default function CommitPage({ params }: { params: Promise<{ sha: string }
                   <span className="text-muted-foreground">Project</span>
                   <p>
                     <Link
-                      href={`/project/${encodeURIComponent(commit.project)}`}
+                      href={`/project?name=${encodeURIComponent(commit.project)}`}
                       className="hover:text-blue-400 hover:underline"
                     >
                       {commit.project}
@@ -198,7 +208,7 @@ export default function CommitPage({ params }: { params: Promise<{ sha: string }
                 <div className="pt-2 border-t border-border">
                   <button
                     className="text-sm text-blue-400 hover:underline"
-                    onClick={() => router.push(`/session/${commit.session_id}`)}
+                    onClick={() => router.push(`/session?id=${commit.session_id}`)}
                   >
                     View full session trace ({formatNumber(session.entries)} entries)
                   </button>
@@ -215,7 +225,7 @@ export default function CommitPage({ params }: { params: Promise<{ sha: string }
               <CardContent>
                 <button
                   className="font-mono text-sm text-blue-400 hover:underline"
-                  onClick={() => router.push(`/session/${commit.session_id}`)}
+                  onClick={() => router.push(`/session?id=${commit.session_id}`)}
                 >
                   {commit.session_id}
                 </button>

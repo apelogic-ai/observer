@@ -1,7 +1,6 @@
 "use client";
 
-import { use } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useDashboard } from "@/hooks/use-dashboard";
 import { useFilters } from "@/hooks/use-filters";
 import { PageHeader } from "@/components/page-header";
@@ -12,15 +11,23 @@ import { ToolChart } from "@/components/charts/tool-chart";
 import { ModelChart } from "@/components/charts/model-chart";
 import { SessionsTable } from "@/components/sessions-table";
 
-export default function ProjectPage({ params }: { params: Promise<{ name: string }> }) {
-  const { name } = use(params);
-  const projectName = decodeURIComponent(name);
+export default function ProjectPage() {
+  const projectName = useSearchParams().get("name") ?? "";
   const router = useRouter();
   const { filters, setDays, setGranularity, buildQs } = useFilters();
   const { data, loading, error, refresh } = useDashboard({
     ...filters,
     project: projectName,
   });
+
+  if (!projectName) {
+    return (
+      <main className="flex-1 p-6 max-w-[1600px] mx-auto w-full">
+        <PageHeader title="Project" breadcrumbs={[{ label: "Overview", href: `/${buildQs()}` }]} />
+        <p className="text-muted-foreground">No project specified.</p>
+      </main>
+    );
+  }
 
   return (
     <main className="flex-1 p-6 space-y-6 max-w-[1600px] mx-auto w-full">
@@ -55,12 +62,12 @@ export default function ProjectPage({ params }: { params: Promise<{ name: string
               data={data.tools}
               skills={data.skills}
               filters={{ ...filters, project: projectName }}
-              onToolClick={(tool) => router.push(`/tool/${encodeURIComponent(tool)}${buildQs()}`)}
+              onToolClick={(tool) => router.push(`/tool?name=${encodeURIComponent(tool)}`)}
             />
           </div>
           <ModelChart
             data={data.models}
-            onModelClick={(m) => router.push(`/model/${encodeURIComponent(m)}${buildQs()}`)}
+            onModelClick={(m) => router.push(`/model?name=${encodeURIComponent(m)}`)}
           />
           <SessionsTable data={data.sessions} />
         </>

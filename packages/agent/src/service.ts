@@ -1,8 +1,11 @@
 /**
  * Service manager — generates and manages platform-native daemon services.
  *
- * macOS: launchd (~/Library/LaunchAgents/com.observer.agent.plist)
- * Linux: systemd user service (~/.config/systemd/user/observer.service)
+ * Parameterized so one function installs either the collector daemon or the
+ * dashboard server: both run the same observer binary with different argv.
+ *
+ * macOS: launchd (~/Library/LaunchAgents/com.observer.<name>.plist)
+ * Linux: systemd user service (~/.config/systemd/user/observer-<name>.service)
  */
 
 import { mkdirSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
@@ -10,6 +13,13 @@ import { join, dirname } from "node:path";
 import { execSync } from "node:child_process";
 
 export interface ServiceConfig {
+  /** Short name, used in the service label / filename. "agent" by default. */
+  name?: string;
+  /** Human description shown in systemd `Description=`. */
+  description?: string;
+  /** Arguments to pass to the binary. Defaults to ["daemon"] for backwards
+   *  compat with the original collector-service call sites. */
+  args?: string[];
   binaryPath: string;
   homeDir: string;
   logPath: string;
@@ -21,51 +31,67 @@ export interface ServicePaths {
   platform: string;
 }
 
-const LABEL = "com.observer.agent";
+function resolveName(config: ServiceConfig): string {
+  return config.name ?? "agent";
+}
 
-/**
- * Generate a macOS launchd plist.
- */
+function resolveArgs(config: ServiceConfig): string[] {
+  return config.args ?? ["daemon"];
+}
+
+function resolveDescription(config: ServiceConfig): string {
+  return config.description ?? "Observer — AI trace collection";
+}
+
+function launchdLabel(name: string): string {
+  return `com.observer.${name}`;
+}
+
+function systemdUnitName(name: string): string {
+  return `observer-${name}.service`;
+}
+
 export function generateLaunchdPlist(config: ServiceConfig): string {
+  const label = launchdLabel(resolveName(config));
+  const args = resolveArgs(config);
+  const argXml = args.map((a) => `    <string>${escapeXml(a)}</string>`).join("\n");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>${LABEL}</string>
+  <string>${label}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${config.binaryPath}</string>
-    <string>daemon</string>
+    <string>${escapeXml(config.binaryPath)}</string>
+${argXml}
   </array>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
   <true/>
   <key>StandardOutPath</key>
-  <string>${config.logPath}</string>
+  <string>${escapeXml(config.logPath)}</string>
   <key>StandardErrorPath</key>
-  <string>${config.logPath}</string>
+  <string>${escapeXml(config.logPath)}</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key>
-    <string>${config.homeDir}</string>
+    <string>${escapeXml(config.homeDir)}</string>
   </dict>
 </dict>
 </plist>`;
 }
 
-/**
- * Generate a Linux systemd user unit.
- */
 export function generateSystemdUnit(config: ServiceConfig): string {
+  const args = resolveArgs(config).join(" ");
   return `[Unit]
-Description=Observer Agent — AI trace collection
+Description=${resolveDescription(config)}
 After=network.target
 
 [Service]
-ExecStart=${config.binaryPath} daemon
+ExecStart=${config.binaryPath} ${args}
 Restart=on-failure
 RestartSec=60
 Environment=HOME=${config.homeDir}
@@ -74,37 +100,34 @@ Environment=HOME=${config.homeDir}
 WantedBy=default.target`;
 }
 
-/**
- * Get platform-specific service file paths.
- */
 export function getServicePaths(
   platform: string,
   homeDir: string,
+  name: string = "agent",
 ): ServicePaths {
   if (platform === "darwin") {
     return {
-      plistPath: join(homeDir, "Library", "LaunchAgents", `${LABEL}.plist`),
+      plistPath: join(homeDir, "Library", "LaunchAgents", `${launchdLabel(name)}.plist`),
       platform: "darwin",
     };
   }
   if (platform === "linux") {
     return {
-      unitPath: join(homeDir, ".config", "systemd", "user", "observer.service"),
+      unitPath: join(homeDir, ".config", "systemd", "user", systemdUnitName(name)),
       platform: "linux",
     };
   }
   return { platform };
 }
 
-/**
- * Install and start the daemon as a system service.
- */
 export function installService(config: ServiceConfig): {
   success: boolean;
   message: string;
 } {
   const platform = process.platform;
-  const paths = getServicePaths(platform, config.homeDir);
+  const name = resolveName(config);
+  const paths = getServicePaths(platform, config.homeDir, name);
+  const prettyName = name === "agent" ? "Daemon" : cap(name);
 
   if (platform === "darwin" && paths.plistPath) {
     const plist = generateLaunchdPlist(config);
@@ -121,7 +144,7 @@ export function installService(config: ServiceConfig): {
       execSync(`launchctl load ${paths.plistPath}`, { stdio: "pipe" });
       return {
         success: true,
-        message: `Daemon installed: ${paths.plistPath}\nStarted via launchd. Will run on login.`,
+        message: `${prettyName} installed: ${paths.plistPath}\nStarted via launchd. Will run on login.`,
       };
     } catch (err) {
       return {
@@ -133,16 +156,17 @@ export function installService(config: ServiceConfig): {
 
   if (platform === "linux" && paths.unitPath) {
     const unit = generateSystemdUnit(config);
+    const unitFile = systemdUnitName(name);
     mkdirSync(dirname(paths.unitPath), { recursive: true });
     mkdirSync(dirname(config.logPath), { recursive: true });
     writeFileSync(paths.unitPath, unit);
 
     try {
       execSync("systemctl --user daemon-reload", { stdio: "pipe" });
-      execSync("systemctl --user enable --now observer.service", { stdio: "pipe" });
+      execSync(`systemctl --user enable --now ${unitFile}`, { stdio: "pipe" });
       return {
         success: true,
-        message: `Daemon installed: ${paths.unitPath}\nStarted via systemd. Will run on login.`,
+        message: `${prettyName} installed: ${paths.unitPath}\nStarted via systemd. Will run on login.`,
       };
     } catch (err) {
       return {
@@ -154,19 +178,17 @@ export function installService(config: ServiceConfig): {
 
   return {
     success: false,
-    message: `Unsupported platform: ${platform}. Run "observer daemon" manually.`,
+    message: `Unsupported platform: ${platform}. Run the binary with its arguments manually.`,
   };
 }
 
-/**
- * Stop and uninstall the daemon service.
- */
-export function uninstallService(homeDir: string): {
+export function uninstallService(homeDir: string, name: string = "agent"): {
   success: boolean;
   message: string;
 } {
   const platform = process.platform;
-  const paths = getServicePaths(platform, homeDir);
+  const paths = getServicePaths(platform, homeDir, name);
+  const prettyName = name === "agent" ? "Daemon" : cap(name);
 
   if (platform === "darwin" && paths.plistPath) {
     try {
@@ -174,7 +196,7 @@ export function uninstallService(homeDir: string): {
         execSync(`launchctl unload ${paths.plistPath}`, { stdio: "pipe" });
         unlinkSync(paths.plistPath);
       }
-      return { success: true, message: "Daemon stopped and uninstalled." };
+      return { success: true, message: `${prettyName} stopped and uninstalled.` };
     } catch (err) {
       return {
         success: false,
@@ -184,13 +206,14 @@ export function uninstallService(homeDir: string): {
   }
 
   if (platform === "linux" && paths.unitPath) {
+    const unitFile = systemdUnitName(name);
     try {
-      execSync("systemctl --user disable --now observer.service", { stdio: "pipe" });
+      execSync(`systemctl --user disable --now ${unitFile}`, { stdio: "pipe" });
       if (existsSync(paths.unitPath)) {
         unlinkSync(paths.unitPath);
       }
       execSync("systemctl --user daemon-reload", { stdio: "pipe" });
-      return { success: true, message: "Daemon stopped and uninstalled." };
+      return { success: true, message: `${prettyName} stopped and uninstalled.` };
     } catch (err) {
       return {
         success: false,
@@ -203,4 +226,17 @@ export function uninstallService(homeDir: string): {
     success: false,
     message: `Unsupported platform: ${platform}`,
   };
+}
+
+function escapeXml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function cap(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }

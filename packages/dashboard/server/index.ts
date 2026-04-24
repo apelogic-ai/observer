@@ -2,11 +2,14 @@
 /**
  * Observer Dashboard API — standalone Bun server backed by DuckDB.
  *
- * Usage:
- *   bun server/index.ts [--port 3457] [--data-dir ~/.observer/traces/normalized]
+ * Config resolution lives in ./config; see --help for flags.
  */
 
-import { initDb, getDataDir } from "./db";
+import { initDb, getDataDir, getDbStats, rebuild } from "./db";
+import { closeLog, getLogSettings, initLog, log, memSnapshot } from "./log";
+import { loadDashboardConfig, parseCliArgs, type CliOverrides } from "./config";
+import { getBuildInfo } from "./build-info";
+import { createStaticHandler } from "./static";
 import {
   getStats, getActivity, getTokens, getTools,
   getProjects, getModels, getSessions, getProjectList, getModelList,
@@ -15,17 +18,6 @@ import {
   getCommitDetail, getSessionSummary, getSessionDetail,
   type Filters,
 } from "./queries";
-
-function parseArgs(): { port: number; dataDir?: string } {
-  const args = process.argv.slice(2);
-  let port = 3457;
-  let dataDir: string | undefined;
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--port" && args[i + 1]) port = parseInt(args[i + 1], 10);
-    if (args[i] === "--data-dir" && args[i + 1]) dataDir = args[i + 1];
-  }
-  return { port, dataDir };
-}
 
 /** Extract common filters from query params. */
 function filters(url: URL): Filters {
@@ -88,6 +80,18 @@ const routes: Record<string, Handler> = {
     if (!id) return { error: "id param required" };
     return getSessionDetail(id);
   },
+  "/api/refresh": async () => {
+    await rebuild("api");
+    return { ok: true, ...getDbStats() };
+  },
+  "/api/diag": async () => ({
+    ...getDbStats(),
+    ...memSnapshot(),
+    data_dir: getDataDir(),
+    uptime_s: Math.round(process.uptime()),
+    log: getLogSettings(),
+    build: getBuildInfo(),
+  }),
 };
 
 const CORS = {
@@ -106,33 +110,115 @@ function jsonResponse(data: unknown, headers: Record<string, string>): Response 
   });
 }
 
-const { port, dataDir } = parseArgs();
-await initDb(dataDir);
+// ── Startup ──────────────────────────────────────────────────────
 
-console.log(`Observer API server`);
-console.log(`  Data: ${getDataDir()}`);
-console.log(`  URL:  http://localhost:${port}`);
+/**
+ * Start the dashboard server. `overrides` are injected on top of whatever
+ * argv/env/config.yaml produce — used by the compiled binary to force the
+ * staticDir to the extracted-assets path.
+ */
+export async function start(overrides: Partial<CliOverrides> = {}): Promise<void> {
+  // overrides are defaults injected by callers (e.g. compiled-entry passes
+  // staticDir from the extracted tarball). argv still wins so the user can
+  // --static-dir a local out/ for debugging.
+  const cfg = loadDashboardConfig({ ...overrides, ...parseCliArgs(process.argv.slice(2)) });
+  initLog(cfg.log);
 
-Bun.serve({
-  port,
-  async fetch(req) {
-    const url = new URL(req.url);
+  await initDb(cfg.dataDir);
 
-    if (req.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: CORS });
-    }
+  const serveStatic = createStaticHandler(cfg.staticDir);
 
-    const handler = routes[url.pathname];
-    if (!handler) {
-      return Response.json({ error: "not found" }, { status: 404, headers: CORS });
-    }
+  console.log(`Observer Dashboard`);
+  console.log(`  Data:   ${getDataDir()}`);
+  console.log(`  Static: ${cfg.staticDir}`);
+  console.log(`  URL:    http://localhost:${cfg.port}`);
+  console.log(`  Config: ${cfg.configPath}`);
+  console.log(`  Logs:   ${cfg.log.level === "silent" ? "off" : cfg.log.file} (level=${cfg.log.level}${cfg.log.stderr ? ", stderr=on" : ""})`);
 
-    try {
-      const data = await handler(url);
-      return jsonResponse(data, CORS);
-    } catch (err) {
-      console.error(`Error: ${url.pathname}`, err);
-      return Response.json({ error: String(err) }, { status: 500, headers: CORS });
-    }
-  },
-});
+  // Periodic memory snapshot — lets us tell whether a future freeze is driven
+  // by the API server or something else. 60s is often enough to catch a climb.
+  const MEM_LOG_INTERVAL_MS = 60_000;
+  const memTimer = setInterval(() => {
+    log("proc.mem", { ...memSnapshot(), ...getDbStats() });
+  }, MEM_LOG_INTERVAL_MS);
+  memTimer.unref?.();
+
+  log("server.start", { port: cfg.port, data_dir: getDataDir(), ...getDbStats(), ...memSnapshot() });
+
+  const server = Bun.serve({
+    port: cfg.port,
+    async fetch(req) {
+      const url = new URL(req.url);
+
+      if (req.method === "OPTIONS") {
+        return new Response(null, { status: 204, headers: CORS });
+      }
+
+      const handler = routes[url.pathname];
+      const t0 = performance.now();
+
+      // /api/* → JSON handlers; everything else → static assets.
+      if (!handler) {
+        if (url.pathname.startsWith("/api/")) {
+          return Response.json({ error: "not found" }, { status: 404, headers: CORS });
+        }
+        try {
+          const res = await serveStatic(url.pathname);
+          log("http", {
+            path: url.pathname,
+            ms: Math.round(performance.now() - t0),
+            status: res.status,
+            static: true,
+          });
+          return res;
+        } catch (err) {
+          log("http.error", {
+            path: url.pathname,
+            ms: Math.round(performance.now() - t0),
+            status: 500,
+            err: String(err),
+            static: true,
+          });
+          return new Response("internal error", { status: 500 });
+        }
+      }
+
+      try {
+        const data = await handler(url);
+        const res = jsonResponse(data, CORS);
+        log("http", {
+          path: url.pathname,
+          q: url.search || undefined,
+          ms: Math.round(performance.now() - t0),
+          status: 200,
+        });
+        return res;
+      } catch (err) {
+        log("http.error", {
+          path: url.pathname,
+          ms: Math.round(performance.now() - t0),
+          status: 500,
+          err: String(err),
+        });
+        return Response.json({ error: String(err) }, { status: 500, headers: CORS });
+      }
+    },
+  });
+
+  // Clean shutdown — flush logs, stop the server, let Bun exit. Without this
+  // SIGINT/SIGTERM kills the process mid-write and log lines are truncated.
+  async function shutdown(signal: string): Promise<void> {
+    log("server.stop", { signal });
+    clearInterval(memTimer);
+    try { await server.stop(); } catch { /* ignore */ }
+    closeLog();
+    process.exit(0);
+  }
+  process.on("SIGINT",  () => { void shutdown("SIGINT"); });
+  process.on("SIGTERM", () => { void shutdown("SIGTERM"); });
+}
+
+// Script mode: running `bun server/index.ts` directly.
+if (import.meta.main) {
+  await start();
+}

@@ -1,26 +1,32 @@
 "use client";
 
-import { use } from "react";
-import { useRouter } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { useToolDetail, type DashboardFilters } from "@/hooks/use-dashboard";
 import { useFilters } from "@/hooks/use-filters";
 import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EntityList } from "@/components/entity-list";
-import { AGENT_COLORS, agentColor } from "@/lib/colors";
+import { AGENT_COLORS } from "@/lib/colors";
 import { formatDate, formatNumber } from "@/lib/format";
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer,
 } from "recharts";
 
-export default function ToolPage({ params }: { params: Promise<{ name: string }> }) {
-  const { name } = use(params);
-  const toolName = decodeURIComponent(name);
-  const router = useRouter();
+export default function ToolPage() {
+  const toolName = useSearchParams().get("name") ?? "";
   const { filters, setDays, setGranularity, buildQs } = useFilters();
   const dashFilters: DashboardFilters = { ...filters };
   const { detail, loading } = useToolDetail(toolName, dashFilters);
+
+  if (!toolName) {
+    return (
+      <main className="flex-1 p-6 max-w-[1600px] mx-auto w-full">
+        <PageHeader title="Tool" breadcrumbs={[{ label: "Overview", href: `/${buildQs()}` }]} />
+        <p className="text-muted-foreground">No tool specified.</p>
+      </main>
+    );
+  }
 
   return (
     <main className="flex-1 p-6 space-y-6 max-w-[1600px] mx-auto w-full">
@@ -146,7 +152,7 @@ export default function ToolPage({ params }: { params: Promise<{ name: string }>
               items={detail.projects.map((p) => ({
                 name: p.project,
                 count: p.count,
-                href: `/project/${encodeURIComponent(p.project)}${buildQs({ project: null })}`,
+                href: `/project?name=${encodeURIComponent(p.project)}`,
               }))}
             />
             <EntityList
@@ -154,7 +160,7 @@ export default function ToolPage({ params }: { params: Promise<{ name: string }>
               items={detail.models.map((m) => ({
                 name: m.model,
                 count: m.count,
-                href: `/model/${encodeURIComponent(m.model)}${buildQs()}`,
+                href: `/model?name=${encodeURIComponent(m.model)}`,
               }))}
             />
           </div>

@@ -1,7 +1,7 @@
 "use client";
 
-import { use, useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
@@ -27,8 +27,8 @@ const ENTRY_ICONS: Record<string, string> = {
   task_summary: "S",
 };
 
-export default function SessionPage({ params }: { params: Promise<{ id: string }> }) {
-  const { id } = use(params);
+export default function SessionPage() {
+  const id = useSearchParams().get("id") ?? "";
   const router = useRouter();
   const { buildQs } = useFilters();
   const [session, setSession] = useState<SessionDetail | null>(null);
@@ -36,6 +36,7 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!id) { setLoading(false); return; }
     fetch(`/api/session-detail?id=${id}`)
       .then((r) => r.json())
       .then((d) => {
@@ -45,6 +46,15 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
       })
       .catch((e) => { setError(String(e)); setLoading(false); });
   }, [id]);
+
+  if (!id) {
+    return (
+      <main className="flex-1 p-6 max-w-[1600px] mx-auto w-full">
+        <PageHeader title="Session" breadcrumbs={[{ label: "Overview", href: `/${buildQs()}` }]} />
+        <p className="text-muted-foreground">No session specified.</p>
+      </main>
+    );
+  }
 
   return (
     <main className="flex-1 p-6 space-y-6 max-w-[1600px] mx-auto w-full">
@@ -73,7 +83,7 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
               {session.agent.replace("_", " ")}
             </Badge>
             <Link
-              href={`/project/${encodeURIComponent(session.project)}${buildQs({ project: null })}`}
+              href={`/project?name=${encodeURIComponent(session.project)}`}
               className="text-sm text-muted-foreground hover:text-blue-400 hover:underline"
             >
               {session.project}
@@ -127,7 +137,7 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
                         <TableCell>
                           <button
                             className="font-mono text-xs text-muted-foreground hover:text-blue-400 hover:underline"
-                            onClick={() => router.push(`/commit/${c.commit_sha}`)}
+                            onClick={() => router.push(`/commit?sha=${c.commit_sha}`)}
                           >
                             {c.commit_sha.slice(0, 8)}
                           </button>

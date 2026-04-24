@@ -202,7 +202,8 @@ export interface FieldPolicy {
   reasoning: boolean;
   systemPrompt: boolean;
 
-  // HIGH RISK — always false, cannot be overridden
+  // HIGH RISK — stripped unless disclosure level is "full" (local-only).
+  // May contain sensitive command output, file contents, query results, etc.
   toolResultContent: boolean;
   fileContent: boolean;
   stdout: boolean;

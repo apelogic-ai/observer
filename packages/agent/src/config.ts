@@ -6,6 +6,24 @@ import { existsSync, readFileSync } from "node:fs";
 import YAML from "yaml";
 import type { DisclosureLevel } from "./types";
 
+export type LogLevel = "silent" | "error" | "info" | "debug";
+
+export interface DashboardConfig {
+  /** Bun API server port */
+  port: number;
+  /** Next UI port (relevant once dashboard is folded into the CLI) */
+  uiPort: number;
+  /** Normalized traces dir. null → ~/.observer/traces/normalized */
+  dataDir: string | null;
+  log: {
+    level: LogLevel;
+    /** Log file path. null → ~/.observer/logs/dashboard.log */
+    file: string | null;
+    /** Mirror log lines to stderr */
+    stderr: boolean;
+  };
+}
+
 export interface ObserverConfig {
   sources: {
     claude_code: boolean;
@@ -23,10 +41,14 @@ export interface ObserverConfig {
   };
   git: {
     enabled: boolean;
+    /** Extra repo paths to scan, keyed by project name.
+     *  e.g. { "db-mcp": ["/Users/dev/observer"] } */
+    repos: Record<string, string[]>;
   };
   privacy: {
     excludeProjects: string[];
   };
+  dashboard: DashboardConfig;
   pollIntervalMs: number;
   developer: string | null;
   machine: string | null;
@@ -49,9 +71,20 @@ export const DEFAULT_CONFIG: ObserverConfig = {
   },
   git: {
     enabled: true,
+    repos: {},
   },
   privacy: {
     excludeProjects: [],
+  },
+  dashboard: {
+    port: 3457,
+    uiPort: 3000,
+    dataDir: null,
+    log: {
+      level: "info",
+      file: null,
+      stderr: false,
+    },
   },
   pollIntervalMs: 300_000, // 5 minutes
   developer: null,
@@ -78,6 +111,8 @@ export function loadConfig(configPath: string): ObserverConfig {
   const rawShip = (raw.ship ?? {}) as Record<string, unknown>;
   const rawGit = (raw.git ?? {}) as Record<string, unknown>;
   const rawPrivacy = (raw.privacy ?? {}) as Record<string, unknown>;
+  const rawDash = (raw.dashboard ?? {}) as Record<string, unknown>;
+  const rawDashLog = (rawDash.log ?? {}) as Record<string, unknown>;
 
   return {
     sources: {
@@ -112,11 +147,24 @@ export function loadConfig(configPath: string): ObserverConfig {
       enabled: rawGit.enabled !== undefined
         ? Boolean(rawGit.enabled)
         : DEFAULT_CONFIG.git.enabled,
+      repos: (rawGit.repos as Record<string, string[]>) ?? DEFAULT_CONFIG.git.repos,
     },
     privacy: {
       excludeProjects: Array.isArray(rawPrivacy.excludeProjects)
         ? rawPrivacy.excludeProjects
         : DEFAULT_CONFIG.privacy.excludeProjects,
+    },
+    dashboard: {
+      port: typeof rawDash.port === "number" ? rawDash.port : DEFAULT_CONFIG.dashboard.port,
+      uiPort: typeof rawDash.uiPort === "number" ? rawDash.uiPort : DEFAULT_CONFIG.dashboard.uiPort,
+      dataDir: (rawDash.dataDir as string) ?? DEFAULT_CONFIG.dashboard.dataDir,
+      log: {
+        level: isLogLevel(rawDashLog.level) ? rawDashLog.level : DEFAULT_CONFIG.dashboard.log.level,
+        file: (rawDashLog.file as string) ?? DEFAULT_CONFIG.dashboard.log.file,
+        stderr: rawDashLog.stderr !== undefined
+          ? Boolean(rawDashLog.stderr)
+          : DEFAULT_CONFIG.dashboard.log.stderr,
+      },
     },
     pollIntervalMs: typeof raw.pollIntervalMs === "number"
       ? raw.pollIntervalMs
@@ -124,4 +172,8 @@ export function loadConfig(configPath: string): ObserverConfig {
     developer: (raw.developer as string) ?? DEFAULT_CONFIG.developer,
     machine: (raw.machine as string) ?? DEFAULT_CONFIG.machine,
   };
+}
+
+function isLogLevel(v: unknown): v is LogLevel {
+  return v === "silent" || v === "error" || v === "info" || v === "debug";
 }

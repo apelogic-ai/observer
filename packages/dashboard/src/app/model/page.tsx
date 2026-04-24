@@ -1,7 +1,6 @@
 "use client";
 
-import { use } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useDashboard } from "@/hooks/use-dashboard";
 import { useFilters } from "@/hooks/use-filters";
 import { PageHeader } from "@/components/page-header";
@@ -12,15 +11,23 @@ import { ToolChart } from "@/components/charts/tool-chart";
 import { EntityList } from "@/components/entity-list";
 import { SessionsTable } from "@/components/sessions-table";
 
-export default function ModelPage({ params }: { params: Promise<{ name: string }> }) {
-  const { name } = use(params);
-  const modelName = decodeURIComponent(name);
+export default function ModelPage() {
+  const modelName = useSearchParams().get("name") ?? "";
   const router = useRouter();
   const { filters, setDays, setGranularity, buildQs } = useFilters();
   const { data, loading, error, refresh } = useDashboard({
     ...filters,
     model: modelName,
   });
+
+  if (!modelName) {
+    return (
+      <main className="flex-1 p-6 max-w-[1600px] mx-auto w-full">
+        <PageHeader title="Model" breadcrumbs={[{ label: "Overview", href: `/${buildQs()}` }]} />
+        <p className="text-muted-foreground">No model specified.</p>
+      </main>
+    );
+  }
 
   return (
     <main className="flex-1 p-6 space-y-6 max-w-[1600px] mx-auto w-full">
@@ -55,7 +62,7 @@ export default function ModelPage({ params }: { params: Promise<{ name: string }
               data={data.tools}
               skills={data.skills}
               filters={{ ...filters, model: modelName }}
-              onToolClick={(tool) => router.push(`/tool/${encodeURIComponent(tool)}${buildQs()}`)}
+              onToolClick={(tool) => router.push(`/tool?name=${encodeURIComponent(tool)}`)}
             />
           </div>
           <EntityList
@@ -63,12 +70,12 @@ export default function ModelPage({ params }: { params: Promise<{ name: string }
             items={data.projects.map((p) => ({
               name: p.project,
               count: p.entries,
-              href: `/project/${encodeURIComponent(p.project)}${buildQs({ project: null })}`,
+              href: `/project?name=${encodeURIComponent(p.project)}`,
             }))}
           />
           <SessionsTable
             data={data.sessions}
-            onProjectClick={(p) => router.push(`/project/${encodeURIComponent(p)}${buildQs({ project: null })}`)}
+            onProjectClick={(p) => router.push(`/project?name=${encodeURIComponent(p)}`)}
           />
         </>
       )}

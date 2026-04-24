@@ -17,7 +17,7 @@ import { GitCommitsTable } from "@/components/git-commits-table";
 
 export default function DashboardPage() {
   const router = useRouter();
-  const { filters, setDays, setProject, setGranularity, buildQs } = useFilters();
+  const { filters, setDays, setProject, setGranularity } = useFilters();
   const { data, loading, error, refresh } = useDashboard(filters);
   const { data: gitData } = useGitData(filters);
 
@@ -55,22 +55,22 @@ export default function DashboardPage() {
               data={data.tools}
               skills={data.skills}
               filters={filters}
-              onToolClick={(tool) => router.push(`/tool/${encodeURIComponent(tool)}${buildQs()}`)}
+              onToolClick={(tool) => router.push(`/tool?name=${encodeURIComponent(tool)}`)}
             />
           </div>
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
             <ProjectChart
               data={data.projects}
-              onProjectClick={(p) => router.push(`/project/${encodeURIComponent(p)}${buildQs({ project: null })}`)}
+              onProjectClick={(p) => router.push(`/project?name=${encodeURIComponent(p)}`)}
             />
             <ModelChart
               data={data.models}
-              onModelClick={(m) => router.push(`/model/${encodeURIComponent(m)}${buildQs()}`)}
+              onModelClick={(m) => router.push(`/model?name=${encodeURIComponent(m)}`)}
             />
           </div>
           <SessionsTable
             data={data.sessions}
-            onProjectClick={(p) => router.push(`/project/${encodeURIComponent(p)}${buildQs({ project: null })}`)}
+            onProjectClick={(p) => router.push(`/project?name=${encodeURIComponent(p)}`)}
           />
         </>
       )}
@@ -84,8 +84,8 @@ export default function DashboardPage() {
           <GitActivityChart data={gitData.timeline} />
           <GitCommitsTable
             data={gitData.commits}
-            onProjectClick={(p) => router.push(`/project/${encodeURIComponent(p)}${buildQs({ project: null })}`)}
-            onCommitClick={(sha) => router.push(`/commit/${sha}`)}
+            onProjectClick={(p) => router.push(`/project?name=${encodeURIComponent(p)}`)}
+            onCommitClick={(sha) => router.push(`/commit?sha=${sha}`)}
           />
         </>
       )}

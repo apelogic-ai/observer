@@ -8,6 +8,8 @@
 import { existsSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
+export type DisclosureChoice = "basic" | "moderate" | "sensitive" | "full";
+
 export interface InitAnswers {
   developer: string;
   agents: {
@@ -19,6 +21,7 @@ export interface InitAnswers {
   endpoint: string | null;
   apiKey: string | null;
   enableDaemon: boolean;
+  disclosure: DisclosureChoice;
 }
 
 /**
@@ -50,6 +53,9 @@ ship:
   endpoint: ${answers.endpoint ?? "null"}
 ${answers.apiKey ? `  api_key: ${answers.apiKey}` : "  # api_key: null (using Ed25519 signing)"}
   redact_secrets: true
+  # Data capture level. "full" keeps tool outputs and file contents —
+  # only safe when endpoint is null (local-only).
+  disclosure: ${answers.disclosure}
 
 privacy:
   strip_secrets: true

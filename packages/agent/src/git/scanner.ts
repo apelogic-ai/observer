@@ -27,6 +27,8 @@ export interface GitScanOptions {
   developer: string;
   /** Machine identifier */
   machine: string;
+  /** Extra repos from config: project → paths */
+  extraRepos?: Record<string, string[]>;
 }
 
 interface RepoMeta {
@@ -39,11 +41,11 @@ interface RepoMeta {
  * Discover repos that had trace activity by scanning the normalized output dir.
  * Returns unique repos with their project name and local path.
  */
-function discoverActiveRepos(outputDir: string): RepoMeta[] {
+function discoverActiveRepos(outputDir: string, extraRepos?: Record<string, string[]>): RepoMeta[] {
   if (!existsSync(outputDir)) return [];
 
-  // Scan date dirs to find project names from trace files
-  const projectPaths = new Map<string, string>(); // project → localPath
+  // Collect unique project names from trace files
+  const projectNames = new Set<string>();
   const dateDirs = readdirSync(outputDir).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d));
 
   for (const dateDir of dateDirs) {
@@ -52,45 +54,54 @@ function discoverActiveRepos(outputDir: string): RepoMeta[] {
 
     for (const agentDir of agentDirs) {
       const agentPath = join(datePath, agentDir);
-      const files = readdirSync(agentPath).filter((f) => f.endsWith(".jsonl"));
+      let files: string[];
+      try { files = readdirSync(agentPath).filter((f) => f.endsWith(".jsonl")); }
+      catch { continue; }
 
       for (const file of files) {
-        // Read first line to get project
         try {
           const content = readFileSync(join(agentPath, file), "utf-8");
           const firstLine = content.split("\n")[0];
           if (!firstLine) continue;
           const entry = JSON.parse(firstLine) as Record<string, unknown>;
           const project = entry.project as string;
-          if (!project || projectPaths.has(project)) continue;
+          if (project) projectNames.add(project);
+        } catch { continue; }
+      }
+    }
+  }
 
-          // Resolve project → local repo path
-          // For Claude Code, the project name is the local path basename
-          // Try common patterns
-          const candidates = resolveProjectToPath(project);
-          for (const candidate of candidates) {
-            const repoInfo = resolveRepoFromPath(candidate);
-            if (repoInfo && repoInfo.orgName && repoInfo.repoName) {
-              projectPaths.set(project, candidate);
-              break;
-            }
-          }
-        } catch {
-          continue;
+  // For each project, find the matching repo via name-based resolution
+  const seen = new Set<string>(); // repo key (org/name) to deduplicate
+  const repos: RepoMeta[] = [];
+
+  for (const project of projectNames) {
+    const candidates = resolveProjectToPath(project);
+    for (const candidate of candidates) {
+      const repoInfo = resolveRepoFromPath(candidate);
+      if (repoInfo && repoInfo.orgName && repoInfo.repoName) {
+        const repoKey = `${repoInfo.orgName}/${repoInfo.repoName}`;
+        if (!seen.has(repoKey)) {
+          seen.add(repoKey);
+          repos.push({ project, localPath: candidate, repo: repoKey });
         }
       }
     }
   }
 
-  const repos: RepoMeta[] = [];
-  for (const [project, localPath] of projectPaths) {
-    const repoInfo = resolveRepoFromPath(localPath);
-    if (repoInfo && repoInfo.orgName && repoInfo.repoName) {
-      repos.push({
-        project,
-        localPath,
-        repo: `${repoInfo.orgName}/${repoInfo.repoName}`,
-      });
+  // Add explicitly configured extra repos
+  if (extraRepos) {
+    for (const [project, paths] of Object.entries(extraRepos)) {
+      for (const p of paths) {
+        const repoInfo = resolveRepoFromPath(p);
+        if (repoInfo && repoInfo.orgName && repoInfo.repoName) {
+          const repoKey = `${repoInfo.orgName}/${repoInfo.repoName}`;
+          if (!seen.has(repoKey)) {
+            seen.add(repoKey);
+            repos.push({ project, localPath: p, repo: repoKey });
+          }
+        }
+      }
     }
   }
 
@@ -98,15 +109,13 @@ function discoverActiveRepos(outputDir: string): RepoMeta[] {
 }
 
 /**
- * Attempt to resolve a project name to a local filesystem path.
- * Claude Code project names are often directory basenames.
+ * Attempt to resolve a project name to local filesystem paths.
+ * Tries common dev directory patterns with the project name.
  */
 function resolveProjectToPath(project: string): string[] {
   const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
   const candidates: string[] = [];
 
-  // Direct paths: the project might already be a path-like name
-  // Common dev directory patterns
   for (const prefix of ["dev", "src", "projects", "work", "code", ""]) {
     const base = prefix ? join(home, prefix, project) : join(home, project);
     candidates.push(base);
@@ -114,6 +123,7 @@ function resolveProjectToPath(project: string): string[] {
 
   return candidates;
 }
+
 
 /**
  * Get all date directories in the normalized output that have trace data.
@@ -236,7 +246,7 @@ function nextDay(date: string): string {
  * Returns total number of git events collected.
  */
 export function scanGitEvents(opts: GitScanOptions): number {
-  const repos = discoverActiveRepos(opts.outputDir);
+  const repos = discoverActiveRepos(opts.outputDir, opts.extraRepos);
   if (repos.length === 0) return 0;
 
   const cursors = new GitCursors(opts.stateDir);

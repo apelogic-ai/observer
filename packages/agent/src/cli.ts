@@ -223,12 +223,15 @@ async function scanAction(opts: ScanOpts): Promise<void> {
   // Git event collection
   if (opts.git !== false && opts.localOutput) {
     try {
+      const { loadConfig } = await import("./config");
+      const config = loadConfig(join(opts.stateDir, "config.yaml"));
       const gitCount = scanGitEvents({
         outputDir: opts.localOutput,
         stateDir: opts.stateDir,
         disclosure,
         developer: shipper.developer,
         machine: shipper.machine,
+        extraRepos: Object.keys(config.git.repos).length > 0 ? config.git.repos : undefined,
       });
       if (gitCount > 0) {
         console.log(`Git: ${gitCount} event(s) collected`);
@@ -331,6 +334,25 @@ async function initAction(): Promise<void> {
     apiKey = keyInput.trim() || null;
   }
 
+  // Disclosure — what to keep in captured traces.
+  // Local-only default is "full" (useful for the dashboard); anything being
+  // shipped to a remote endpoint defaults to "basic" to avoid leaking output.
+  const defaultDisclosure = endpoint ? "basic" : "full";
+  console.log(`
+Data capture level — how much detail to keep in each trace entry:
+  basic      tool names and counts only
+  moderate   + file paths, commands, git refs
+  sensitive  + user prompts, assistant text, thinking traces
+  full       + tool outputs, file contents   (LOCAL USE ONLY)
+`);
+  const disclosureRaw = (await ask(`Choice [basic|moderate|sensitive|full] [${defaultDisclosure}]: `)).trim().toLowerCase();
+  const disclosure = (["basic", "moderate", "sensitive", "full"].includes(disclosureRaw)
+    ? disclosureRaw
+    : defaultDisclosure) as "basic" | "moderate" | "sensitive" | "full";
+  if (disclosure === "full" && endpoint) {
+    console.log("  ! Warning: 'full' includes tool outputs and file contents. Not recommended with a remote endpoint.");
+  }
+
   // Daemon
   const daemonInput = await ask("\nStart observer on login? [Y/n] ");
   const enableDaemon = daemonInput.trim().toLowerCase() !== "n";
@@ -355,6 +377,7 @@ async function initAction(): Promise<void> {
     endpoint,
     apiKey,
     enableDaemon,
+    disclosure,
   };
   const configYaml = generateConfig(answers);
   writeConfig(DEFAULT_STATE_DIR, configYaml, true);
@@ -371,12 +394,33 @@ async function initAction(): Promise<void> {
     console.log(result.success ? `✓ ${result.message}` : `! ${result.message}`);
   }
 
-  console.log("\nDone! Commands:");
-  console.log("  observer scan      — run a one-shot scan now");
-  console.log("  observer status    — check what's being monitored");
-  if (enableDaemon) {
-    console.log("  observer start     — start the background daemon now");
+  console.log("\n✓ Done! What's next:");
+  if (!enableDaemon) {
+    console.log("  observer start          — run the collector on login");
   }
+  console.log("  observer dashboard run  — open the dashboard in your browser");
+  console.log("  observer scan           — run a one-shot scan now");
+  console.log("  observer status         — show what's being monitored");
+}
+
+/**
+ * Default action when `observer` is run with no subcommand.
+ * - If no config exists → run init (first-run experience).
+ * - Otherwise → print a short status pointer.
+ */
+async function defaultAction(): Promise<void> {
+  const configPath = join(DEFAULT_STATE_DIR, "config.yaml");
+  if (!existsSync(configPath)) {
+    console.log("Welcome to observer. No config found — let's set it up.\n");
+    await initAction();
+    return;
+  }
+  console.log("observer — AI trace collector\n");
+  console.log("Commands:");
+  console.log("  observer dashboard run  — open the dashboard");
+  console.log("  observer status         — show current state");
+  console.log("  observer start / stop   — manage the background collector");
+  console.log("  observer --help         — full reference");
 }
 
 // --- Daemon foreground ---
@@ -446,6 +490,63 @@ function startAction(): void {
 
 function stopAction(): void {
   const result = uninstallService(homedir());
+  console.log(result.success ? `✓ ${result.message}` : `! ${result.message}`);
+}
+
+// --- Dashboard ---
+
+/** Open a URL in the user's default browser. Silent on failure. */
+function openBrowser(url: string): void {
+  const cmd = process.platform === "darwin" ? "open"
+    : process.platform === "win32" ? "cmd"
+    : "xdg-open";
+  const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
+  try {
+    const { spawn } = require("node:child_process") as typeof import("node:child_process");
+    const child = spawn(cmd, args, { stdio: "ignore", detached: true });
+    child.unref();
+  } catch { /* non-fatal — user can open manually */ }
+}
+
+async function dashboardRunAction(opts: {
+  port?: string;
+  noBrowser?: boolean;
+  logLevel?: string;
+}): Promise<void> {
+  const { runDashboard } = await import("@observer/dashboard/runtime");
+  const port = opts.port ? parseInt(opts.port, 10) : undefined;
+
+  // Open browser shortly after server binds. runDashboard returns after the
+  // server is listening; Bun.serve keeps the event loop alive.
+  if (!opts.noBrowser) {
+    const url = `http://localhost:${port ?? 3457}`;
+    setTimeout(() => openBrowser(url), 500);
+  }
+
+  await runDashboard({
+    ...(port ? { port } : {}),
+    ...(opts.logLevel ? { logLevel: opts.logLevel as "silent" | "error" | "info" | "debug" } : {}),
+  });
+}
+
+function dashboardStartAction(): void {
+  const binaryPath = resolveBinaryPath();
+  const result = installService({
+    name: "dashboard",
+    description: "Observer — dashboard server",
+    args: ["dashboard", "run", "--no-browser"],
+    binaryPath,
+    homeDir: homedir(),
+    logPath: join(DEFAULT_STATE_DIR, "logs", "dashboard-service.log"),
+  });
+  console.log(result.success ? `✓ ${result.message}` : `! ${result.message}`);
+  if (result.success) {
+    console.log(`  Open http://localhost:3457 to view.`);
+  }
+}
+
+function dashboardStopAction(): void {
+  const result = uninstallService(homedir(), "dashboard");
   console.log(result.success ? `✓ ${result.message}` : `! ${result.message}`);
 }
 
@@ -541,7 +642,8 @@ const program = new Command();
 program
   .name("observer")
   .description("Local agent for AI trace collection and shipping")
-  .version("0.1.0");
+  .version("0.1.0")
+  .action(defaultAction);
 
 program
   .command("scan")
@@ -590,6 +692,28 @@ program
   .command("stop")
   .description("Stop and uninstall background service")
   .action(stopAction);
+
+const dashboard = program
+  .command("dashboard")
+  .description("Open the dashboard (serves traces + git events on localhost)");
+
+dashboard
+  .command("run", { isDefault: true })
+  .description("Run the dashboard in foreground and open the browser")
+  .option("--port <n>", "API + UI port")
+  .option("--no-browser", "Don't open the browser automatically")
+  .option("--log-level <lvl>", "silent | error | info | debug")
+  .action(dashboardRunAction);
+
+dashboard
+  .command("start")
+  .description("Install the dashboard as a background service (launchd/systemd)")
+  .action(dashboardStartAction);
+
+dashboard
+  .command("stop")
+  .description("Stop and uninstall the dashboard service")
+  .action(dashboardStopAction);
 
 program
   .command("logs")
