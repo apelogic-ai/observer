@@ -23,12 +23,18 @@ jobs:
           - os: macos-latest
             target: darwin-arm64
             bun_target: bun-darwin-arm64
-          - os: macos-13
-            target: darwin-x64
-            bun_target: bun-darwin-x64
+          # darwin-x64 (Intel Macs) disabled — macos-13 runner pool is slow
+          # to allocate. Re-enable when Intel Mac usage justifies the wait.
+          # - os: macos-13
+          #   target: darwin-x64
+          #   bun_target: bun-darwin-x64
           - os: ubuntu-latest
             target: linux-x64
             bun_target: bun-linux-x64
+          - os: windows-latest
+            target: windows-x64
+            bun_target: bun-windows-x64
+            ext: .exe
 
     steps:
       - uses: actions/checkout@v4
@@ -53,30 +59,33 @@ jobs:
 
       - name: Compile observer binary
         working-directory: packages/agent
+        shell: bash
         run: |
           bun build --compile --target=${{ matrix.bun_target }} \
-            src/cli.ts --outfile observer-${{ matrix.target }}
+            src/cli.ts --outfile observer-${{ matrix.target }}${{ matrix.ext }}
 
       - name: Verify binary runs and embeds dashboard
         working-directory: packages/agent
+        shell: bash
         run: |
-          chmod +x observer-${{ matrix.target }}
-          ./observer-${{ matrix.target }} --version
-          ./observer-${{ matrix.target }} dashboard --help | head -5
+          chmod +x observer-${{ matrix.target }}${{ matrix.ext }} || true
+          ./observer-${{ matrix.target }}${{ matrix.ext }} --version
+          ./observer-${{ matrix.target }}${{ matrix.ext }} dashboard --help | head -5
 
       - name: Generate checksum
         working-directory: packages/agent
+        shell: bash
         run: |
-          sha256sum observer-${{ matrix.target }} > observer-${{ matrix.target }}.sha256 \
-            || shasum -a 256 observer-${{ matrix.target }} > observer-${{ matrix.target }}.sha256
+          sha256sum observer-${{ matrix.target }}${{ matrix.ext }} > observer-${{ matrix.target }}${{ matrix.ext }}.sha256 \
+            || shasum -a 256 observer-${{ matrix.target }}${{ matrix.ext }} > observer-${{ matrix.target }}${{ matrix.ext }}.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: observer-${{ matrix.target }}
           path: |
-            packages/agent/observer-${{ matrix.target }}
-            packages/agent/observer-${{ matrix.target }}.sha256
+            packages/agent/observer-${{ matrix.target }}${{ matrix.ext }}
+            packages/agent/observer-${{ matrix.target }}${{ matrix.ext }}.sha256
 
   release:
     name: Create Release
@@ -115,10 +124,10 @@ jobs:
           files: |
             artifacts/observer-darwin-arm64/observer-darwin-arm64
             artifacts/observer-darwin-arm64/observer-darwin-arm64.sha256
-            artifacts/observer-darwin-x64/observer-darwin-x64
-            artifacts/observer-darwin-x64/observer-darwin-x64.sha256
             artifacts/observer-linux-x64/observer-linux-x64
             artifacts/observer-linux-x64/observer-linux-x64.sha256
+            artifacts/observer-windows-x64/observer-windows-x64.exe
+            artifacts/observer-windows-x64/observer-windows-x64.exe.sha256
           body: |
             ## Observer v${{ steps.version.outputs.version }}
 
@@ -126,19 +135,23 @@ jobs:
 
             ### Install
 
+            **macOS / Linux:**
             ```bash
             curl -fsSL https://observer.dev/install.sh | bash
             ```
 
-            Or download manually:
+            **Windows:** download `observer-windows-x64.exe` from the assets below.
+
+            ### Available downloads
             - **macOS (Apple Silicon):** `observer-darwin-arm64`
-            - **macOS (Intel):** `observer-darwin-x64`
             - **Linux (x64):** `observer-linux-x64`
+            - **Windows (x64):** `observer-windows-x64.exe`
+            - macOS Intel: not in this release — re-enable when needed.
 
             ### Quick start
 
-            ```bash
+            ```
             observer                 # first-run init wizard
-            observer start           # background daemon
+            observer start           # background daemon (macOS/Linux only)
             observer dashboard run   # open the dashboard
             ```
