@@ -55,6 +55,10 @@ jobs:
         working-directory: packages/dashboard
         run: bun run typecheck
 
+      - name: Lint
+        working-directory: packages/dashboard
+        run: bun run lint
+
       # Runs next build + scripts/bundle-static.ts. The staleness guard in
       # bundle-static will fail if out/ is out of sync with the source tree.
       - name: Build (next build + bundle-static)

@@ -16,10 +16,12 @@ export default function CommitPage() {
   const { buildQs } = useFilters();
   const [commit, setCommit] = useState<CommitDetail | null>(null);
   const [session, setSession] = useState<SessionSummary | null>(null);
-  const [loading, setLoading] = useState(true);
+  // Skip the initial "loading" state when no sha is given — avoids setting
+  // state synchronously in the guard branch of the effect.
+  const [loading, setLoading] = useState(sha !== "");
 
   useEffect(() => {
-    if (!sha) { setLoading(false); return; }
+    if (!sha) return;
     fetch(`/api/commit-detail?sha=${sha}`)
       .then((r) => r.json())
       .then((d) => {

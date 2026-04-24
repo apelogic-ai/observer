@@ -19,11 +19,13 @@ import {
   type Filters,
 } from "./queries";
 
-/** Extract common filters from query params. */
+/** Extract common filters from query params. Unparseable values are dropped
+ *  rather than passed through — prevents `NaN` from flowing into SQL
+ *  (`INTERVAL 'NaN days'` produces useless errors). */
 function filters(url: URL): Filters {
   const f: Filters = {};
-  const days = url.searchParams.get("days");
-  if (days) f.days = parseInt(days, 10);
+  const days = parsePositiveInt(url.searchParams.get("days"));
+  if (days !== null) f.days = days;
   const project = url.searchParams.get("project");
   if (project) f.project = project;
   const model = url.searchParams.get("model");
@@ -35,22 +37,22 @@ function filters(url: URL): Filters {
   return f;
 }
 
+function parsePositiveInt(raw: string | null): number | null {
+  if (!raw) return null;
+  const n = parseInt(raw, 10);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
 type Handler = (url: URL) => Promise<unknown>;
 
 const routes: Record<string, Handler> = {
   "/api/stats": async (url) => getStats(filters(url)),
   "/api/activity": async (url) => getActivity(filters(url)),
   "/api/tokens": async (url) => getTokens(filters(url)),
-  "/api/tools": async (url) => {
-    const limit = url.searchParams.get("limit");
-    return getTools(filters(url), limit ? parseInt(limit, 10) : 25);
-  },
+  "/api/tools": async (url) => getTools(filters(url), parsePositiveInt(url.searchParams.get("limit")) ?? 25),
   "/api/projects": async (url) => getProjects(filters(url)),
   "/api/models": async (url) => getModels(filters(url)),
-  "/api/sessions": async (url) => {
-    const limit = url.searchParams.get("limit");
-    return getSessions(filters(url), limit ? parseInt(limit, 10) : 50);
-  },
+  "/api/sessions": async (url) => getSessions(filters(url), parsePositiveInt(url.searchParams.get("limit")) ?? 50),
   "/api/tool-detail": async (url) => {
     const tool = url.searchParams.get("tool");
     if (!tool) return { error: "tool param required" };
@@ -61,10 +63,7 @@ const routes: Record<string, Handler> = {
   "/api/model-list": async () => getModelList(),
   "/api/git-stats": async (url) => getGitStats(filters(url)),
   "/api/git-timeline": async (url) => getGitTimeline(filters(url)),
-  "/api/git-commits": async (url) => {
-    const limit = url.searchParams.get("limit");
-    return getGitCommits(filters(url), limit ? parseInt(limit, 10) : 50);
-  },
+  "/api/git-commits": async (url) => getGitCommits(filters(url), parsePositiveInt(url.searchParams.get("limit")) ?? 50),
   "/api/commit-detail": async (url) => {
     const sha = url.searchParams.get("sha");
     if (!sha) return { error: "sha param required" };

@@ -12,7 +12,8 @@
     "dev": "bun src/server.ts",
     "test": "vitest run",
     "test:watch": "vitest watch",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "lint": "echo '(api: no dedicated lint config yet — typecheck is the gate)'"
   },
   "dependencies": {},
   "devDependencies": {

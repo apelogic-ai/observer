@@ -32,11 +32,11 @@ export default function SessionPage() {
   const router = useRouter();
   const { buildQs } = useFilters();
   const [session, setSession] = useState<SessionDetail | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(id !== "");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!id) { setLoading(false); return; }
+    if (!id) return;
     fetch(`/api/session-detail?id=${id}`)
       .then((r) => r.json())
       .then((d) => {

@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useDashboard, useGitData, useProjectList } from "@/hooks/use-dashboard";
+import { useDashboard, useGitData } from "@/hooks/use-dashboard";
 import { useFilters } from "@/hooks/use-filters";
 import { PageHeader } from "@/components/page-header";
 import { StatsCards } from "@/components/stats-cards";

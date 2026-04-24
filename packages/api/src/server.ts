@@ -9,7 +9,7 @@
  */
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
-import { createVerify, createPublicKey, verify as cryptoVerify } from "node:crypto";
+import { createPublicKey, verify as cryptoVerify } from "node:crypto";
 import { Store } from "./store";
 
 export interface IngestorConfig {
@@ -17,13 +17,29 @@ export interface IngestorConfig {
   dataDir: string;
   trustedKeys?: Record<string, string>;   // fingerprint → PEM public key
   apiKeys?: string[];                      // valid API keys
+  /** Max request body size in bytes. Defaults to 8 MiB. */
+  maxBodyBytes?: number;
 }
 
-function readBody(req: IncomingMessage): Promise<string> {
+const DEFAULT_MAX_BODY_BYTES = 8 * 1024 * 1024;
+
+/** Read the request body as a string, capped at `maxBytes`. Rejects with a
+ *  "body too large" error once the cap is exceeded so a malicious POST can't
+ *  exhaust process memory. */
+function readBody(req: IncomingMessage, maxBytes: number): Promise<string> {
   return new Promise((resolve, reject) => {
-    let body = "";
-    req.on("data", (chunk) => { body += chunk; });
-    req.on("end", () => resolve(body));
+    const chunks: Buffer[] = [];
+    let total = 0;
+    req.on("data", (chunk: Buffer) => {
+      total += chunk.length;
+      if (total > maxBytes) {
+        req.destroy();
+        reject(new Error(`body too large (>${maxBytes} bytes)`));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
     req.on("error", reject);
   });
 }
@@ -46,6 +62,7 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
   const store = new Store(config.dataDir);
   const validApiKeys = new Set(config.apiKeys ?? []);
   const trustedKeys = config.trustedKeys ?? {};
+  const maxBodyBytes = config.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
 
   const server = createServer(async (req, res) => {
     // Health check
@@ -56,7 +73,13 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
 
     // Ingest endpoint
     if (req.method === "POST" && req.url === "/api/ingest") {
-      const body = await readBody(req);
+      let body: string;
+      try {
+        body = await readBody(req, maxBodyBytes);
+      } catch (err) {
+        json(res, 413, { error: String(err) });
+        return;
+      }
 
       // --- Authentication ---
       const authHeader = req.headers["authorization"];

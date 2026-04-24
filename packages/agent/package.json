@@ -13,7 +13,8 @@
     "dev": "bun src/cli.ts",
     "test": "vitest run",
     "test:watch": "vitest watch",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "lint": "echo '(agent: no dedicated lint config yet — typecheck is the gate)'"
   },
   "dependencies": {
     "@observer/dashboard": "workspace:*",
