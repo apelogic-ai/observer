@@ -83,6 +83,30 @@ main() {
     dim "Version: $version"
   fi
 
+  local dest="${INSTALL_DIR}/${BINARY_NAME}"
+
+  # Skip download if the installed binary is already at the target version.
+  # `--version` prints just the bare semver (e.g. "0.1.2").
+  if [ -x "$dest" ]; then
+    local installed
+    installed=$("$dest" --version 2>/dev/null | head -1 | tr -d 'v ' || true)
+    local target_v
+    target_v=$(echo "$version" | tr -d 'v ')
+    if [ -n "$installed" ] && [ "$installed" = "$target_v" ]; then
+      info "Already at v${target_v} — nothing to download."
+      echo ""
+      if [ -f "${HOME}/.observer/config.yaml" ]; then
+        echo "Useful commands:"
+        echo "  observer dashboard run   — open the dashboard"
+        echo "  observer status          — show what's being collected"
+        echo "  observer start / stop    — manage the background daemon"
+        echo ""
+      fi
+      exit 0
+    fi
+    dim "Upgrading: v${installed:-?} → ${version}"
+  fi
+
   # Download URL
   local url="https://github.com/${REPO}/releases/download/${version}/observer-${target}"
   local checksum_url="${url}.sha256"
@@ -119,8 +143,7 @@ main() {
   fi
   rm -f "$tmp_checksum"
 
-  # Install
-  local dest="${INSTALL_DIR}/${BINARY_NAME}"
+  # Install (dest declared at top for early-exit version check)
   mv "$tmp_file" "$dest"
   chmod +x "$dest"
 
@@ -153,7 +176,9 @@ main() {
   elif [ "${OBSERVER_NO_INIT:-}" = "1" ]; then
     info "Next: run 'observer init' to configure"
     echo ""
-  elif [ -r /dev/tty ] && [ -w /dev/tty ]; then
+  elif [ -t 1 ] && [ -r /dev/tty ]; then
+    # stdout is a real terminal AND we can read /dev/tty for the
+    # interactive prompts. This is the rustup/nvm pattern.
     info "Running 'observer init'..."
     echo ""
     "$dest" init </dev/tty
