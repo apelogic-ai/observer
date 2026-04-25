@@ -137,10 +137,20 @@ main() {
 
   echo ""
 
-  # Run init automatically when we have a real terminal. When piped from
-  # curl stdin is the pipe, so we reattach to /dev/tty (rustup/brew pattern).
-  # Set OBSERVER_NO_INIT=1 to skip — useful for unattended provisioning.
-  if [ "${OBSERVER_NO_INIT:-}" = "1" ]; then
+  # If a config already exists, treat this as an upgrade — don't re-run
+  # init (which would overwrite the user's settings via writeConfig force=true).
+  # Fresh installs auto-launch init by reattaching stdin to /dev/tty
+  # (rustup/brew pattern) since curl-piped stdin is the pipe.
+  # Override with OBSERVER_NO_INIT=1.
+  if [ -f "${HOME}/.observer/config.yaml" ]; then
+    info "Upgraded to ${version} — existing ~/.observer/config.yaml preserved."
+    echo ""
+    echo "Useful commands:"
+    echo "  observer dashboard run   — open the dashboard"
+    echo "  observer status          — show what's being collected"
+    echo "  observer start / stop    — manage the background daemon"
+    echo ""
+  elif [ "${OBSERVER_NO_INIT:-}" = "1" ]; then
     info "Next: run 'observer init' to configure"
     echo ""
   elif [ -r /dev/tty ] && [ -w /dev/tty ]; then
