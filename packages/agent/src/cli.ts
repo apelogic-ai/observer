@@ -12,7 +12,8 @@
 import { Command } from "commander";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { closeSync, createReadStream, existsSync, openSync, readFileSync, rmSync, unlinkSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, rmSync, unlinkSync } from "node:fs";
+import { ReadStream as TtyReadStream } from "node:tty";
 import { execSync } from "node:child_process";
 import { discoverTraceSources, type TraceSource } from "./discover";
 import { Shipper, type ShippedBatch } from "./shipper";
@@ -286,11 +287,12 @@ function statusAction(opts: StatusOpts): void {
 async function initAction(): Promise<void> {
   // Open /dev/tty directly for readline input rather than relying on
   // process.stdin. When this binary is invoked from a curl-piped install
-  // script, the spawned process inherits stdin from a closed pipe — even
-  // if the parent shell did `exec </dev/tty` first, Bun's process.stdin
-  // ends up in a state where readline.question prints the prompt and
-  // then never resolves, causing the wizard to silently exit. Opening
-  // /dev/tty ourselves sidesteps the whole class of problems.
+  // script, process.stdin doesn't behave like a real interactive tty even
+  // after `exec </dev/tty` in the parent shell.
+  //
+  // Wrap the fd in node:tty.ReadStream (NOT fs.createReadStream — that
+  // uses regular file polling and ENXIOs on tty fds). tty.ReadStream is
+  // the purpose-built wrapper for terminal devices.
   let rlInputFd: number;
   try {
     rlInputFd = openSync("/dev/tty", "r");
@@ -299,10 +301,11 @@ async function initAction(): Promise<void> {
     console.error("Run `observer init` from a real shell rather than from a pipe or non-interactive session.");
     process.exit(1);
   }
-  const rlInput = createReadStream("", { fd: rlInputFd });
+  const rlInput = new TtyReadStream(rlInputFd);
   const rl = createInterface({ input: rlInput, output: process.stdout });
   const cleanupTty = (): void => {
     try { rl.close(); } catch { /* already closed */ }
+    try { rlInput.destroy(); } catch { /* already destroyed */ }
     try { closeSync(rlInputFd); } catch { /* fd already closed */ }
   };
   const ask = (q: string): Promise<string> =>
