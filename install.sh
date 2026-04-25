@@ -2,15 +2,16 @@
 # Observer install script — downloads the latest binary for your platform.
 #
 # Usage:
-#   curl -fsSL https://observer.dev/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/apelogic-ai/observer/master/install.sh | bash
 #
 # Environment variables:
 #   OBSERVER_VERSION  — specific version (default: latest)
 #   OBSERVER_DIR      — install directory (default: ~/.local/bin)
+#   OBSERVER_REPO     — owner/repo override (default: apelogic-ai/observer)
 
 set -euo pipefail
 
-REPO="observer-oss/observer"
+REPO="${OBSERVER_REPO:-apelogic-ai/observer}"
 INSTALL_DIR="${OBSERVER_DIR:-$HOME/.local/bin}"
 BINARY_NAME="observer"
 
