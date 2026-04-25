@@ -11,22 +11,19 @@
     "build": "tsc",
     "compile": "bun build --compile src/cli.ts --outfile dist/observer",
     "dev": "bun src/cli.ts",
-    "test": "vitest run",
-    "test:watch": "vitest watch",
+    "test": "bun test",
+    "test:watch": "bun test --watch",
     "typecheck": "tsc --noEmit",
     "lint": "echo '(agent: no dedicated lint config yet — typecheck is the gate)'"
   },
   "dependencies": {
     "@observer/dashboard": "workspace:*",
-    "better-sqlite3": "^12.8.0",
     "commander": "^13.1.0",
     "yaml": "^2.7.0"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
     "@types/bun": "^1.3.11",
     "@types/node": "^22",
     "typescript": "^5.7",
-    "vitest": "^3"
   }
 }

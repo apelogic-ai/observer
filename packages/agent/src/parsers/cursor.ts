@@ -3,7 +3,7 @@
  * Reads state.vscdb files and normalizes into the unified TraceEntry schema.
  */
 
-import Database from "better-sqlite3";
+import { Database } from "bun:sqlite";
 import type { TraceEntry } from "../types";
 
 function truncate(s: string, max: number): string {

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -116,7 +116,7 @@ describe("Daemon", () => {
   });
 
   it("processes Cursor SQLite when localOutputDir is set", async () => {
-    const Database = require("better-sqlite3");
+    const { Database } = require("bun:sqlite") as typeof import("bun:sqlite");
 
     // Set up a Cursor-like directory with a workspace state.vscdb
     const cursorDir = makeTmpDir();
@@ -161,7 +161,7 @@ describe("Daemon", () => {
   });
 
   it("skips Cursor when localOutputDir is not set", async () => {
-    const Database = require("better-sqlite3");
+    const { Database } = require("bun:sqlite") as typeof import("bun:sqlite");
 
     const cursorDir = makeTmpDir();
     const wsDir = join(cursorDir, "User", "workspaceStorage", "ws1");

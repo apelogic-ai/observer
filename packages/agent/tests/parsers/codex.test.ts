@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "bun:test";
 import { parseCodexEntry } from "../../src/parsers/codex"
 import type { TraceEntry } from "../../src/types";
 

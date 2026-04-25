@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "bun:test";
 import { applyGitDisclosure, gitEventId, type GitEvent } from "../../src/git/types";
 
 function makeEvent(overrides: Partial<GitEvent> = {}): GitEvent {

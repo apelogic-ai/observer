@@ -104,7 +104,7 @@ async function scanAction(opts: ScanOpts): Promise<void> {
         if (f.endsWith(".vscdb")) {
           // Cursor SQLite — count composerData keys
           try {
-            const Database = require("better-sqlite3");
+            const { Database } = require("bun:sqlite") as typeof import("bun:sqlite");
             const db = new Database(f, { readonly: true });
             const row = db.prepare(
               "SELECT COUNT(*) as cnt FROM cursorDiskKV WHERE key LIKE 'composerData:%'",
@@ -207,7 +207,9 @@ async function scanAction(opts: ScanOpts): Promise<void> {
   if (destinations.length > 0) {
     console.log(`Shipped: ${batchCount} batch(es) to ${destinations.join(" + ")}`);
     if (failCount > 0) {
-      console.log(`  ${failCount} batch(es) failed — will retry on next scan`);
+      // No persistent retry queue — running `observer scan` again re-attempts
+      // every source from scratch. The error lines above are the failures.
+      console.log(`  ${failCount} source(s) errored (see [error] lines above) — re-run after fixing.`);
     }
   } else {
     const totalEntries = shipped.reduce((sum, b) => sum + b.entries.length, 0);

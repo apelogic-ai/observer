@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "bun:test";
 import { scanForSecrets, redactSecrets, type SecretFinding } from "../../src/security/scanner";
 
 describe("scanForSecrets", () => {

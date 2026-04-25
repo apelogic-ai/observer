@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach } from "bun:test";
 import { mkdtempSync, readFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -268,7 +268,7 @@ describe("shipCursorEntries", () => {
   });
 
   function createCursorDb(bubbles: Array<{ composerId: string; bubbleId: string; type: number; text: string }>): string {
-    const Database = require("better-sqlite3");
+    const { Database } = require("bun:sqlite") as typeof import("bun:sqlite");
     const dbDir = makeTmpDir();
     const dbPath = join(dbDir, "state.vscdb");
     const db = new Database(dbPath);
@@ -361,7 +361,7 @@ describe("shipCursorEntries", () => {
 
   it("picks up new bubbles in existing sessions (multi-day)", async () => {
     const { shipCursorEntries } = await import("../src/disk-shipper");
-    const Database = require("better-sqlite3");
+    const { Database } = require("bun:sqlite") as typeof import("bun:sqlite");
 
     // Initial session with 1 bubble
     const dbPath = createCursorDb([

@@ -1,8 +1,8 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import Database from "better-sqlite3";
+import { Database } from "bun:sqlite";
 import { resolveCursorWorkspacePath } from "../src/repo-resolver";
 
 function makeTmpDir(): string {

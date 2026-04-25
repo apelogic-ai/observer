@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
 import { createHttpShipper } from "../src/http-shipper";
 import type { ShippedBatch } from "../src/shipper";

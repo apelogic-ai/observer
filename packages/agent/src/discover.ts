@@ -5,7 +5,7 @@
 
 import { existsSync, readdirSync, readFileSync, statSync, openSync, readSync, closeSync } from "node:fs";
 import { join, basename, dirname } from "node:path";
-import { resolveRepoFromClaudeProject } from "./repo-resolver";
+import { resolveRepoFromClaudeProject, resolveCursorWorkspacePath } from "./repo-resolver";
 
 export type AgentType = "claude_code" | "codex" | "cursor";
 
@@ -159,18 +159,22 @@ function discoverCursor(cursorDir: string): TraceSource[] {
     });
   }
 
-  // Per-workspace state.vscdb files
+  // Per-workspace state.vscdb files. Cursor stores workspace.json next to
+  // state.vscdb mapping the hash to a file:// folder URI; we use that to
+  // label the source with the project name (e.g. "observer") rather than
+  // the opaque hash. Falls back to the hash if no mapping exists.
   const wsDir = join(cursorDir, "User", "workspaceStorage");
   if (existsSync(wsDir)) {
     for (const entry of readdirSync(wsDir)) {
       const wsDb = join(wsDir, entry, "state.vscdb");
-      if (existsSync(wsDb)) {
-        sources.push({
-          agent: "cursor",
-          project: `workspace:${entry}`,
-          files: [wsDb],
-        });
-      }
+      if (!existsSync(wsDb)) continue;
+      const folder = resolveCursorWorkspacePath(cursorDir, entry);
+      const project = folder ? basename(folder) : `workspace:${entry}`;
+      sources.push({
+        agent: "cursor",
+        project,
+        files: [wsDb],
+      });
     }
   }
 

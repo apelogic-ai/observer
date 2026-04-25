@@ -1,8 +1,8 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach } from "bun:test";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import Database from "better-sqlite3";
+import { Database } from "bun:sqlite";
 import { parseCursorDb } from "../../src/parsers/cursor"
 import type { TraceEntry } from "../../src/types";
 
