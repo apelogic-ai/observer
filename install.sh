@@ -136,8 +136,21 @@ main() {
   fi
 
   echo ""
-  info "Next: run 'observer init' to configure"
-  echo ""
+
+  # Run init automatically when we have a real terminal. When piped from
+  # curl stdin is the pipe, so we reattach to /dev/tty (rustup/brew pattern).
+  # Set OBSERVER_NO_INIT=1 to skip — useful for unattended provisioning.
+  if [ "${OBSERVER_NO_INIT:-}" = "1" ]; then
+    info "Next: run 'observer init' to configure"
+    echo ""
+  elif [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    info "Running 'observer init'..."
+    echo ""
+    "$dest" init </dev/tty
+  else
+    info "Next: run 'observer init' to configure"
+    echo ""
+  fi
 }
 
 main
