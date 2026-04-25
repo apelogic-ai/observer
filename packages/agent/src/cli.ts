@@ -12,8 +12,7 @@
 import { Command } from "commander";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { closeSync, existsSync, openSync, readFileSync, rmSync, unlinkSync } from "node:fs";
-import { ReadStream as TtyReadStream } from "node:tty";
+import { existsSync, readFileSync, rmSync, unlinkSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { discoverTraceSources, type TraceSource } from "./discover";
 import { Shipper, type ShippedBatch } from "./shipper";
@@ -25,6 +24,30 @@ import { generateConfig, writeConfig, type InitAnswers } from "./init";
 import { installService, uninstallService, getServicePaths, type ServicePaths } from "./service";
 import { Daemon, type DaemonConfig } from "./daemon";
 import { createInterface } from "node:readline";
+
+/**
+ * Read a single line from the user's controlling terminal by shelling
+ * out to `bash`. The previous attempts (process.stdin, fs.createReadStream
+ * on /dev/tty, node:tty.ReadStream on /dev/tty) all crashed in Bun's
+ * compiled binary when the binary was spawned from a curl-piped install
+ * script — readline either never resolved (silent exit) or any later
+ * execSync would ENXIO on the inherited /dev/tty fd.
+ *
+ * Spawning bash with `read … </dev/tty` outsources the tty handling
+ * entirely and works regardless of what our parent's stdin looks like.
+ * One subprocess per question — fine for the ~6 prompts in init.
+ */
+function ttyAsk(prompt: string): string {
+  process.stdout.write(prompt);
+  const proc = Bun.spawnSync(
+    ["bash", "-c", "IFS= read -r REPLY </dev/tty || true; printf %s \"$REPLY\""],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  if (proc.exitCode !== 0) {
+    throw new Error("could not read from /dev/tty (no controlling terminal?)");
+  }
+  return new TextDecoder().decode(proc.stdout);
+}
 
 /**
  * Resolve the path to the observer binary.
@@ -285,31 +308,8 @@ function statusAction(opts: StatusOpts): void {
 // --- Init wizard ---
 
 async function initAction(): Promise<void> {
-  // Open /dev/tty directly for readline input rather than relying on
-  // process.stdin. When this binary is invoked from a curl-piped install
-  // script, process.stdin doesn't behave like a real interactive tty even
-  // after `exec </dev/tty` in the parent shell.
-  //
-  // Wrap the fd in node:tty.ReadStream (NOT fs.createReadStream — that
-  // uses regular file polling and ENXIOs on tty fds). tty.ReadStream is
-  // the purpose-built wrapper for terminal devices.
-  let rlInputFd: number;
-  try {
-    rlInputFd = openSync("/dev/tty", "r");
-  } catch {
-    console.error("observer init requires an interactive terminal.");
-    console.error("Run `observer init` from a real shell rather than from a pipe or non-interactive session.");
-    process.exit(1);
-  }
-  const rlInput = new TtyReadStream(rlInputFd);
-  const rl = createInterface({ input: rlInput, output: process.stdout });
-  const cleanupTty = (): void => {
-    try { rl.close(); } catch { /* already closed */ }
-    try { rlInput.destroy(); } catch { /* already destroyed */ }
-    try { closeSync(rlInputFd); } catch { /* fd already closed */ }
-  };
-  const ask = (q: string): Promise<string> =>
-    new Promise((resolve) => rl.question(q, resolve));
+  const ask = (q: string): Promise<string> => Promise.resolve(ttyAsk(q));
+  const cleanupTty = (): void => { /* no readline state to clean up */ };
 
   console.log("Observer — AI agent trace collection\n");
 
@@ -452,7 +452,6 @@ Data capture level — how much detail to keep in each trace entry:
   }
   console.log("  observer dashboard run  — open the dashboard in your browser");
   console.log("");
-  console.log("  observer status         — show what's being monitored");
 }
 
 /**
