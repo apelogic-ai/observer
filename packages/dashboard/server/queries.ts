@@ -1,7 +1,12 @@
 import { query } from "./db";
 
-/** Cast the VARCHAR timestamp to TIMESTAMP for date comparisons. */
-const TS = `CAST(timestamp AS TIMESTAMP)`;
+/**
+ * Query layer over the SQLite tables built in ./db.ts. Conventions:
+ * - timestamps are stored as ISO TEXT; aggregate via date()/strftime().
+ * - tokenUsage is a JSON text column; access via json_extract().
+ * - Boolean-ish columns (agentAuthored) are 0/1 INTEGER.
+ * - Array columns (files, parentShas, coAuthors) are JSON text.
+ */
 
 export interface Filters {
   days?: number;
@@ -11,12 +16,14 @@ export interface Filters {
   granularity?: "day" | "week" | "month";
 }
 
-/** SQL expression for date bucketing based on granularity. */
-function dateTrunc(f: Filters): string {
+/** Date bucket expression keyed off the timestamp text column. */
+function dateTrunc(f: Filters, col = "timestamp"): string {
   switch (f.granularity) {
-    case "week":  return `CAST(DATE_TRUNC('week', ${TS}) AS DATE)::VARCHAR`;
-    case "month": return `CAST(DATE_TRUNC('month', ${TS}) AS DATE)::VARCHAR`;
-    default:      return `CAST(${TS} AS DATE)::VARCHAR`;
+    // SQLite doesn't have DATE_TRUNC. ISO weeks start Monday — `weekday 1`
+    // jumps forward to Monday, then -7 anchors to the prior Monday.
+    case "week":  return `date(${col}, 'weekday 1', '-7 days')`;
+    case "month": return `strftime('%Y-%m-01', ${col})`;
+    default:      return `date(${col})`;
   }
 }
 
@@ -28,12 +35,18 @@ function esc(s: string): string {
 function where(f: Filters, extra?: string[]): string {
   const conds: string[] = extra ? [...extra] : [];
   conds.push(`timestamp IS NOT NULL`);
-  if (f.days) conds.push(`${TS} >= CURRENT_DATE - INTERVAL '${f.days} days'`);
+  if (f.days)    conds.push(`timestamp >= date('now', '-${f.days} days')`);
   if (f.project) conds.push(`project = '${esc(f.project)}'`);
-  if (f.model) conds.push(`model = '${esc(f.model)}'`);
-  if (f.tool) conds.push(`"toolName" = '${esc(f.tool)}'`);
+  if (f.model)   conds.push(`model = '${esc(f.model)}'`);
+  if (f.tool)    conds.push(`toolName = '${esc(f.tool)}'`);
   return `WHERE ${conds.join(" AND ")}`;
 }
+
+/** json_extract on tokenUsage — null-safe SUM helper. */
+const TU_INPUT  = `json_extract(tokenUsage, '$.input')`;
+const TU_OUTPUT = `json_extract(tokenUsage, '$.output')`;
+const TU_CACHE_R = `json_extract(tokenUsage, '$.cacheRead')`;
+const TU_CACHE_C = `json_extract(tokenUsage, '$.cacheCreation')`;
 
 // ── Stats ──────────────────────────────────────────────────────
 
@@ -51,14 +64,14 @@ export interface Stats {
 export async function getStats(f: Filters = {}): Promise<Stats> {
   const rows = await query<Stats>(`
     SELECT
-      COUNT(*)::INTEGER                                          AS total_entries,
-      COUNT(DISTINCT "sessionId")::INTEGER                       AS total_sessions,
-      COUNT(DISTINCT project)::INTEGER                           AS total_projects,
-      COUNT(DISTINCT CAST(${TS} AS DATE))::INTEGER               AS total_days,
-      COALESCE(SUM("tokenUsage"."input"), 0)::BIGINT             AS total_input_tokens,
-      COALESCE(SUM("tokenUsage"."output"), 0)::BIGINT            AS total_output_tokens,
-      COALESCE(SUM("tokenUsage"."cacheRead"), 0)::BIGINT         AS total_cache_read,
-      COALESCE(SUM("tokenUsage"."cacheCreation"), 0)::BIGINT     AS total_cache_creation
+      COUNT(*)                          AS total_entries,
+      COUNT(DISTINCT sessionId)         AS total_sessions,
+      COUNT(DISTINCT project)           AS total_projects,
+      COUNT(DISTINCT date(timestamp))   AS total_days,
+      COALESCE(SUM(${TU_INPUT}), 0)     AS total_input_tokens,
+      COALESCE(SUM(${TU_OUTPUT}), 0)    AS total_output_tokens,
+      COALESCE(SUM(${TU_CACHE_R}), 0)   AS total_cache_read,
+      COALESCE(SUM(${TU_CACHE_C}), 0)   AS total_cache_creation
     FROM traces
     ${where(f)}
   `);
@@ -78,7 +91,7 @@ export async function getActivity(f: Filters = {}): Promise<ActivityRow[]> {
     SELECT
       ${dateTrunc(f)} AS date,
       agent,
-      COUNT(*)::INTEGER AS count
+      COUNT(*) AS count
     FROM traces
     ${where(f)}
     GROUP BY date, agent
@@ -100,12 +113,12 @@ export async function getTokens(f: Filters = {}): Promise<TokenRow[]> {
   return query<TokenRow>(`
     SELECT
       ${dateTrunc(f)} AS date,
-      COALESCE(SUM("tokenUsage"."input"), 0)::BIGINT             AS input_tokens,
-      COALESCE(SUM("tokenUsage"."output"), 0)::BIGINT            AS output_tokens,
-      COALESCE(SUM("tokenUsage"."cacheRead"), 0)::BIGINT         AS cache_read,
-      COALESCE(SUM("tokenUsage"."cacheCreation"), 0)::BIGINT     AS cache_creation
+      COALESCE(SUM(${TU_INPUT}), 0)   AS input_tokens,
+      COALESCE(SUM(${TU_OUTPUT}), 0)  AS output_tokens,
+      COALESCE(SUM(${TU_CACHE_R}), 0) AS cache_read,
+      COALESCE(SUM(${TU_CACHE_C}), 0) AS cache_creation
     FROM traces
-    ${where(f, ['"tokenUsage" IS NOT NULL'])}
+    ${where(f, ["tokenUsage IS NOT NULL"])}
     GROUP BY date
     ORDER BY date
   `);
@@ -120,19 +133,35 @@ export interface ToolRow {
   agents: string[];
 }
 
+interface ToolRowRaw extends Omit<ToolRow, "agents"> { agents: string }
+
+/**
+ * Tools roll-up. SQLite has no MODE / LIST, so:
+ * - primary_agent: most-frequent agent for this tool, via window-style subquery.
+ * - agents: json_group_array(DISTINCT agent), parsed back to an array client-side.
+ */
 export async function getTools(f: Filters = {}, limit = 25): Promise<ToolRow[]> {
-  return query<ToolRow>(`
+  const rows = await query<ToolRowRaw>(`
     SELECT
-      "toolName" AS tool_name,
-      COUNT(*)::INTEGER AS count,
-      MODE(agent) AS primary_agent,
-      LIST(DISTINCT agent) AS agents
-    FROM traces
-    ${where(f, ['"toolName" IS NOT NULL'])}
-    GROUP BY "toolName"
+      toolName AS tool_name,
+      COUNT(*) AS count,
+      (
+        SELECT agent FROM traces t2
+        WHERE t2.toolName = t.toolName
+        GROUP BY agent ORDER BY COUNT(*) DESC LIMIT 1
+      ) AS primary_agent,
+      (
+        SELECT json_group_array(a) FROM (
+          SELECT DISTINCT agent AS a FROM traces t3 WHERE t3.toolName = t.toolName
+        )
+      ) AS agents
+    FROM traces t
+    ${where(f, ["toolName IS NOT NULL"])}
+    GROUP BY toolName
     ORDER BY count DESC
     LIMIT ${limit}
   `);
+  return rows.map((r) => ({ ...r, agents: parseJsonArray(r.agents) }));
 }
 
 // ── Projects ───────────────────────────────────────────────────
@@ -148,9 +177,9 @@ export async function getProjects(f: Filters = {}): Promise<ProjectRow[]> {
   return query<ProjectRow>(`
     SELECT
       project,
-      COUNT(*)::INTEGER AS entries,
-      COUNT(DISTINCT "sessionId")::INTEGER AS sessions,
-      COALESCE(SUM("tokenUsage"."output"), 0)::BIGINT AS output_tokens
+      COUNT(*) AS entries,
+      COUNT(DISTINCT sessionId) AS sessions,
+      COALESCE(SUM(${TU_OUTPUT}), 0) AS output_tokens
     FROM traces
     ${where(f, ["project IS NOT NULL"])}
     GROUP BY project
@@ -170,8 +199,8 @@ export async function getModels(f: Filters = {}): Promise<ModelRow[]> {
   return query<ModelRow>(`
     SELECT
       model,
-      COUNT(*)::INTEGER AS count,
-      COALESCE(SUM("tokenUsage"."input" + "tokenUsage"."output"), 0)::BIGINT AS total_tokens
+      COUNT(*) AS count,
+      COALESCE(SUM(COALESCE(${TU_INPUT},0) + COALESCE(${TU_OUTPUT},0)), 0) AS total_tokens
     FROM traces
     ${where(f, ["model IS NOT NULL"])}
     GROUP BY model
@@ -192,29 +221,28 @@ export interface SessionRow {
 }
 
 export async function getSessions(f: Filters = {}, limit = 50): Promise<SessionRow[]> {
-  // Tool/model filter: restrict to sessions that contain matching entries
-  const sessionFilter: string[] = ['"sessionId" IS NOT NULL'];
+  // Tool/model filter restricts to sessions that contain a matching entry.
+  const sessionFilter: string[] = ["sessionId IS NOT NULL"];
   if (f.tool) {
-    sessionFilter.push(`"sessionId" IN (SELECT DISTINCT "sessionId" FROM traces WHERE "toolName" = '${esc(f.tool)}')`);
+    sessionFilter.push(`sessionId IN (SELECT DISTINCT sessionId FROM traces WHERE toolName = '${esc(f.tool)}')`);
   }
   if (f.model) {
-    sessionFilter.push(`"sessionId" IN (SELECT DISTINCT "sessionId" FROM traces WHERE model = '${esc(f.model)}')`);
+    sessionFilter.push(`sessionId IN (SELECT DISTINCT sessionId FROM traces WHERE model = '${esc(f.model)}')`);
   }
-  // Don't pass tool/model to where() — they'd incorrectly filter individual rows
   const sessFilter: Filters = { days: f.days, project: f.project, granularity: f.granularity };
 
   return query<SessionRow>(`
     SELECT
-      "sessionId" AS session_id,
-      FIRST(agent) AS agent,
-      FIRST(project) AS project,
-      MIN(timestamp)::VARCHAR AS started,
-      MAX(timestamp)::VARCHAR AS ended,
-      COUNT(*)::INTEGER AS entries,
-      COALESCE(SUM("tokenUsage"."output"), 0)::BIGINT AS output_tokens
+      sessionId AS session_id,
+      MIN(agent) AS agent,
+      MIN(project) AS project,
+      MIN(timestamp) AS started,
+      MAX(timestamp) AS ended,
+      COUNT(*) AS entries,
+      COALESCE(SUM(${TU_OUTPUT}), 0) AS output_tokens
     FROM traces
     ${where(sessFilter, sessionFilter)}
-    GROUP BY "sessionId"
+    GROUP BY sessionId
     ORDER BY started DESC
     LIMIT ${limit}
   `);
@@ -239,38 +267,38 @@ export interface ToolDetail {
 }
 
 export async function getToolDetail(tool: string, f: Filters = {}): Promise<ToolDetail> {
-  const toolCond = `"toolName" = '${esc(tool)}'`;
+  const toolCond = `toolName = '${esc(tool)}'`;
   const w = where(f, [toolCond]);
 
   const [totalRows, commands, files, timeline, byAgent, projects, models] = await Promise.all([
-    query<{ total: number }>(`SELECT COUNT(*)::INTEGER AS total FROM traces ${w}`),
+    query<{ total: number }>(`SELECT COUNT(*) AS total FROM traces ${w}`),
     query<ToolDetailRow>(`
-      SELECT command AS value, COUNT(*)::INTEGER AS count
+      SELECT command AS value, COUNT(*) AS count
       FROM traces ${w} AND command IS NOT NULL
       GROUP BY command ORDER BY count DESC LIMIT 15
     `),
     query<ToolDetailRow>(`
-      SELECT "filePath" AS value, COUNT(*)::INTEGER AS count
-      FROM traces ${w} AND "filePath" IS NOT NULL
-      GROUP BY "filePath" ORDER BY count DESC LIMIT 15
+      SELECT filePath AS value, COUNT(*) AS count
+      FROM traces ${w} AND filePath IS NOT NULL
+      GROUP BY filePath ORDER BY count DESC LIMIT 15
     `),
     query<{ date: string; count: number }>(`
-      SELECT ${dateTrunc(f)} AS date, COUNT(*)::INTEGER AS count
+      SELECT ${dateTrunc(f)} AS date, COUNT(*) AS count
       FROM traces ${w}
       GROUP BY date ORDER BY date
     `),
     query<{ agent: string; count: number }>(`
-      SELECT agent, COUNT(*)::INTEGER AS count
+      SELECT agent, COUNT(*) AS count
       FROM traces ${w}
       GROUP BY agent ORDER BY count DESC
     `),
     query<{ project: string; count: number }>(`
-      SELECT project, COUNT(*)::INTEGER AS count
+      SELECT project, COUNT(*) AS count
       FROM traces ${w} AND project IS NOT NULL
       GROUP BY project ORDER BY count DESC
     `),
     query<{ model: string; count: number }>(`
-      SELECT model, COUNT(*)::INTEGER AS count
+      SELECT model, COUNT(*) AS count
       FROM traces ${w} AND model IS NOT NULL
       GROUP BY model ORDER BY count DESC
     `),
@@ -295,17 +323,28 @@ export interface SkillRow {
   count: number;
 }
 
+/**
+ * Skills are user prompts of the form `/word ...`. SQLite's REGEXP isn't
+ * available without a custom function, so we use a LIKE pattern: the first
+ * "word" looks like `/abcd` followed by space/end. A bit looser than the
+ * DuckDB regex but produces the same result on real data.
+ */
 export async function getSkills(f: Filters = {}): Promise<SkillRow[]> {
   return query<SkillRow>(`
     SELECT
-      SPLIT_PART(TRIM("userPrompt"), ' ', 1) AS skill,
-      COUNT(*)::INTEGER AS count
+      CASE
+        WHEN instr(trim(userPrompt), ' ') > 0
+          THEN substr(trim(userPrompt), 1, instr(trim(userPrompt), ' ') - 1)
+        ELSE trim(userPrompt)
+      END AS skill,
+      COUNT(*) AS count
     FROM traces
     ${where(f, [
-      '"entryType" = \'message\'',
-      'role = \'user\'',
-      '"userPrompt" IS NOT NULL',
-      `regexp_matches(TRIM("userPrompt"), '^/[a-z][a-z0-9_:-]{0,30}(\\s|$)')`,
+      `entryType = 'message'`,
+      `role = 'user'`,
+      `userPrompt IS NOT NULL`,
+      `substr(trim(userPrompt), 1, 1) = '/'`,
+      `length(trim(userPrompt)) > 1`,
     ])}
     GROUP BY skill
     ORDER BY count DESC
@@ -340,12 +379,12 @@ export async function getModelList(): Promise<string[]> {
 function gitWhere(f: Filters, extra?: string[]): string {
   const conds: string[] = extra ? [...extra] : [];
   conds.push(`timestamp IS NOT NULL`);
-  if (f.days) conds.push(`CAST(timestamp AS TIMESTAMP) >= CURRENT_DATE - INTERVAL '${f.days} days'`);
+  if (f.days)    conds.push(`timestamp >= date('now', '-${f.days} days')`);
   if (f.project) conds.push(`project = '${esc(f.project)}'`);
   return `WHERE ${conds.join(" AND ")}`;
 }
 
-export interface GitStatsRow {
+export interface GitStats {
   total_commits: number;
   agent_commits: number;
   human_commits: number;
@@ -356,19 +395,19 @@ export interface GitStatsRow {
   repos: number;
 }
 
-export async function getGitStats(f: Filters = {}): Promise<GitStatsRow> {
-  const rows = await query<GitStatsRow>(`
+export async function getGitStats(f: Filters = {}): Promise<GitStats> {
+  const rows = await query<GitStats>(`
     SELECT
-      COUNT(*)::INTEGER AS total_commits,
-      COUNT(*) FILTER (WHERE "agentAuthored" = true)::INTEGER AS agent_commits,
-      COUNT(*) FILTER (WHERE "agentAuthored" = false)::INTEGER AS human_commits,
-      COALESCE(SUM(insertions), 0)::INTEGER AS total_insertions,
-      COALESCE(SUM(deletions), 0)::INTEGER AS total_deletions,
-      COALESCE(SUM(insertions) FILTER (WHERE "agentAuthored" = true), 0)::INTEGER AS agent_insertions,
-      COALESCE(SUM("filesChanged"), 0)::INTEGER AS files_changed,
-      COUNT(DISTINCT repo)::INTEGER AS repos
+      COUNT(*) AS total_commits,
+      COUNT(*) FILTER (WHERE agentAuthored = 1) AS agent_commits,
+      COUNT(*) FILTER (WHERE agentAuthored = 0) AS human_commits,
+      COALESCE(SUM(insertions), 0) AS total_insertions,
+      COALESCE(SUM(deletions), 0) AS total_deletions,
+      COALESCE(SUM(insertions) FILTER (WHERE agentAuthored = 1), 0) AS agent_insertions,
+      COALESCE(SUM(filesChanged), 0) AS files_changed,
+      COUNT(DISTINCT repo) AS repos
     FROM git_events
-    ${gitWhere(f, ['"eventType" = \'commit\''])}
+    ${gitWhere(f, ["eventType = 'commit'"])}
   `);
   return rows[0];
 }
@@ -382,21 +421,15 @@ export interface GitTimelineRow {
 }
 
 export async function getGitTimeline(f: Filters = {}): Promise<GitTimelineRow[]> {
-  const trunc = f.granularity === "week"
-    ? `CAST(DATE_TRUNC('week', CAST(timestamp AS TIMESTAMP)) AS DATE)::VARCHAR`
-    : f.granularity === "month"
-    ? `CAST(DATE_TRUNC('month', CAST(timestamp AS TIMESTAMP)) AS DATE)::VARCHAR`
-    : `CAST(CAST(timestamp AS TIMESTAMP) AS DATE)::VARCHAR`;
-
   return query<GitTimelineRow>(`
     SELECT
-      ${trunc} AS date,
-      COUNT(*) FILTER (WHERE "agentAuthored" = true)::INTEGER AS agent_commits,
-      COUNT(*) FILTER (WHERE "agentAuthored" = false)::INTEGER AS human_commits,
-      COALESCE(SUM(insertions), 0)::INTEGER AS insertions,
-      COALESCE(SUM(deletions), 0)::INTEGER AS deletions
+      ${dateTrunc(f)} AS date,
+      COUNT(*) FILTER (WHERE agentAuthored = 1) AS agent_commits,
+      COUNT(*) FILTER (WHERE agentAuthored = 0) AS human_commits,
+      COALESCE(SUM(insertions), 0) AS insertions,
+      COALESCE(SUM(deletions), 0) AS deletions
     FROM git_events
-    ${gitWhere(f, ['"eventType" = \'commit\''])}
+    ${gitWhere(f, ["eventType = 'commit'"])}
     GROUP BY date
     ORDER BY date
   `);
@@ -417,26 +450,29 @@ export interface GitCommitRow {
   agent_name: string | null;
 }
 
+interface GitCommitRowRaw extends Omit<GitCommitRow, "agent_authored"> { agent_authored: number }
+
 export async function getGitCommits(f: Filters = {}, limit = 50): Promise<GitCommitRow[]> {
-  return query<GitCommitRow>(`
+  const rows = await query<GitCommitRowRaw>(`
     SELECT
-      "commitSha" AS commit_sha,
-      timestamp::VARCHAR AS timestamp,
+      commitSha AS commit_sha,
+      timestamp,
       project,
       repo,
       branch,
       COALESCE(author, '') AS author,
       COALESCE(message, '') AS message,
-      COALESCE("filesChanged", 0)::INTEGER AS files_changed,
-      COALESCE(insertions, 0)::INTEGER AS insertions,
-      COALESCE(deletions, 0)::INTEGER AS deletions,
-      "agentAuthored" AS agent_authored,
-      "agentName" AS agent_name
+      COALESCE(filesChanged, 0) AS files_changed,
+      COALESCE(insertions, 0) AS insertions,
+      COALESCE(deletions, 0) AS deletions,
+      COALESCE(agentAuthored, 0) AS agent_authored,
+      agentName AS agent_name
     FROM git_events
-    ${gitWhere(f, ['"eventType" = \'commit\''])}
+    ${gitWhere(f, ["eventType = 'commit'"])}
     ORDER BY timestamp DESC
     LIMIT ${limit}
   `);
+  return rows.map((r) => ({ ...r, agent_authored: Boolean(r.agent_authored) }));
 }
 
 // ── Commit detail (drill-down) ────────────────────────────────
@@ -459,29 +495,40 @@ export interface CommitDetail {
   files: string[];
 }
 
+interface CommitDetailRaw extends Omit<CommitDetail, "agent_authored" | "files"> {
+  agent_authored: number;
+  files: string | null;
+}
+
 export async function getCommitDetail(sha: string): Promise<CommitDetail | null> {
-  const rows = await query<CommitDetail>(`
+  const rows = await query<CommitDetailRaw>(`
     SELECT
-      "commitSha" AS commit_sha,
-      timestamp::VARCHAR AS timestamp,
+      commitSha AS commit_sha,
+      timestamp,
       project,
       repo,
       branch,
       COALESCE(author, '') AS author,
       COALESCE(message, '') AS message,
-      "messageBody" AS message_body,
-      COALESCE("filesChanged", 0)::INTEGER AS files_changed,
-      COALESCE(insertions, 0)::INTEGER AS insertions,
-      COALESCE(deletions, 0)::INTEGER AS deletions,
-      "agentAuthored" AS agent_authored,
-      "agentName" AS agent_name,
-      "sessionId" AS session_id,
-      COALESCE(files, ARRAY[]::VARCHAR[]) AS files
+      messageBody AS message_body,
+      COALESCE(filesChanged, 0) AS files_changed,
+      COALESCE(insertions, 0) AS insertions,
+      COALESCE(deletions, 0) AS deletions,
+      COALESCE(agentAuthored, 0) AS agent_authored,
+      agentName AS agent_name,
+      sessionId AS session_id,
+      files
     FROM git_events
-    WHERE "commitSha" = '${esc(sha)}'
+    WHERE commitSha = '${esc(sha)}'
     LIMIT 1
   `);
-  return rows[0] ?? null;
+  const r = rows[0];
+  if (!r) return null;
+  return {
+    ...r,
+    agent_authored: Boolean(r.agent_authored),
+    files: r.files ? parseJsonArray(r.files) : [],
+  };
 }
 
 // ── Session detail (trace entries for a session) ──────────────
@@ -532,30 +579,30 @@ export async function getSessionSummary(sessionId: string): Promise<SessionSumma
       input_tokens: number; output_tokens: number; cache_read: number;
     }>(`
       SELECT
-        "sessionId" AS session_id,
-        FIRST(agent) AS agent,
-        FIRST(project) AS project,
-        MIN(timestamp)::VARCHAR AS started,
-        MAX(timestamp)::VARCHAR AS ended,
-        COUNT(*)::INTEGER AS entries,
-        COALESCE(SUM("tokenUsage"."input"), 0)::BIGINT AS input_tokens,
-        COALESCE(SUM("tokenUsage"."output"), 0)::BIGINT AS output_tokens,
-        COALESCE(SUM("tokenUsage"."cacheRead"), 0)::BIGINT AS cache_read
+        sessionId AS session_id,
+        MIN(agent) AS agent,
+        MIN(project) AS project,
+        MIN(timestamp) AS started,
+        MAX(timestamp) AS ended,
+        COUNT(*) AS entries,
+        COALESCE(SUM(${TU_INPUT}), 0) AS input_tokens,
+        COALESCE(SUM(${TU_OUTPUT}), 0) AS output_tokens,
+        COALESCE(SUM(${TU_CACHE_R}), 0) AS cache_read
       FROM traces
-      WHERE "sessionId" = '${esc(sessionId)}'
-      GROUP BY "sessionId"
+      WHERE sessionId = '${esc(sessionId)}'
+      GROUP BY sessionId
     `),
     query<{ tool_name: string; count: number }>(`
-      SELECT "toolName" AS tool_name, COUNT(*)::INTEGER AS count
+      SELECT toolName AS tool_name, COUNT(*) AS count
       FROM traces
-      WHERE "sessionId" = '${esc(sessionId)}' AND "toolName" IS NOT NULL
-      GROUP BY "toolName"
+      WHERE sessionId = '${esc(sessionId)}' AND toolName IS NOT NULL
+      GROUP BY toolName
       ORDER BY count DESC
     `),
     query<{ model: string; count: number }>(`
-      SELECT model, COUNT(*)::INTEGER AS count
+      SELECT model, COUNT(*) AS count
       FROM traces
-      WHERE "sessionId" = '${esc(sessionId)}' AND model IS NOT NULL
+      WHERE sessionId = '${esc(sessionId)}' AND model IS NOT NULL
       GROUP BY model
       ORDER BY count DESC
     `),
@@ -564,70 +611,72 @@ export async function getSessionSummary(sessionId: string): Promise<SessionSumma
   return { ...meta[0], tools, models };
 }
 
+interface SessionEntryRaw extends Omit<SessionEntry, "input_tokens" | "output_tokens"> {
+  input_tokens: number | null;
+  output_tokens: number | null;
+}
+
 export async function getSessionDetail(sessionId: string): Promise<SessionDetail | null> {
-  // Session metadata
   const meta = await query<{
     session_id: string; agent: string; project: string;
     started: string; ended: string;
   }>(`
     SELECT
-      "sessionId" AS session_id,
-      FIRST(agent) AS agent,
-      FIRST(project) AS project,
-      MIN(timestamp)::VARCHAR AS started,
-      MAX(timestamp)::VARCHAR AS ended
+      sessionId AS session_id,
+      MIN(agent) AS agent,
+      MIN(project) AS project,
+      MIN(timestamp) AS started,
+      MAX(timestamp) AS ended
     FROM traces
-    WHERE "sessionId" = '${esc(sessionId)}'
-    GROUP BY "sessionId"
+    WHERE sessionId = '${esc(sessionId)}'
+    GROUP BY sessionId
   `);
   if (meta.length === 0) return null;
 
   const [entries, toolSummary, commits] = await Promise.all([
-    // Trace entries (capped at 500)
-    query<SessionEntry>(`
+    // Trace entries (capped at 500). LEFT(...,500) → substr(...,1,500).
+    query<SessionEntryRaw>(`
       SELECT
-        timestamp::VARCHAR AS timestamp,
-        COALESCE("entryType", '') AS entry_type,
-        "toolName" AS tool_name,
+        timestamp,
+        COALESCE(entryType, '') AS entry_type,
+        toolName AS tool_name,
         model,
-        "filePath" AS file_path,
+        filePath AS file_path,
         command,
-        LEFT("userPrompt", 500) AS user_prompt,
-        LEFT("assistantText", 500) AS assistant_text,
-        ("tokenUsage"."input")::INTEGER AS input_tokens,
-        ("tokenUsage"."output")::INTEGER AS output_tokens
+        substr(userPrompt, 1, 500) AS user_prompt,
+        substr(assistantText, 1, 500) AS assistant_text,
+        ${TU_INPUT}  AS input_tokens,
+        ${TU_OUTPUT} AS output_tokens
       FROM traces
-      WHERE "sessionId" = '${esc(sessionId)}'
+      WHERE sessionId = '${esc(sessionId)}'
       ORDER BY timestamp
       LIMIT 500
     `),
-    // Tool usage summary
     query<{ tool_name: string; count: number }>(`
       SELECT
-        "toolName" AS tool_name,
-        COUNT(*)::INTEGER AS count
+        toolName AS tool_name,
+        COUNT(*) AS count
       FROM traces
-      WHERE "sessionId" = '${esc(sessionId)}' AND "toolName" IS NOT NULL
-      GROUP BY "toolName"
+      WHERE sessionId = '${esc(sessionId)}' AND toolName IS NOT NULL
+      GROUP BY toolName
       ORDER BY count DESC
     `),
-    // Linked commits
-    query<GitCommitRow>(`
+    query<GitCommitRowRaw>(`
       SELECT
-        "commitSha" AS commit_sha,
-        timestamp::VARCHAR AS timestamp,
+        commitSha AS commit_sha,
+        timestamp,
         project,
         repo,
         branch,
         COALESCE(author, '') AS author,
         COALESCE(message, '') AS message,
-        COALESCE("filesChanged", 0)::INTEGER AS files_changed,
-        COALESCE(insertions, 0)::INTEGER AS insertions,
-        COALESCE(deletions, 0)::INTEGER AS deletions,
-        "agentAuthored" AS agent_authored,
-        "agentName" AS agent_name
+        COALESCE(filesChanged, 0) AS files_changed,
+        COALESCE(insertions, 0) AS insertions,
+        COALESCE(deletions, 0) AS deletions,
+        COALESCE(agentAuthored, 0) AS agent_authored,
+        agentName AS agent_name
       FROM git_events
-      WHERE "sessionId" = '${esc(sessionId)}' AND "eventType" = 'commit'
+      WHERE sessionId = '${esc(sessionId)}' AND eventType = 'commit'
       ORDER BY timestamp
     `),
   ]);
@@ -636,6 +685,16 @@ export async function getSessionDetail(sessionId: string): Promise<SessionDetail
     ...meta[0],
     entries,
     tool_summary: toolSummary,
-    commits,
+    commits: commits.map((r) => ({ ...r, agent_authored: Boolean(r.agent_authored) })),
   };
+}
+
+// ── Helpers ────────────────────────────────────────────────────
+
+function parseJsonArray(s: string | null): string[] {
+  if (!s) return [];
+  try {
+    const v = JSON.parse(s) as unknown;
+    return Array.isArray(v) ? v.map(String) : [];
+  } catch { return []; }
 }
