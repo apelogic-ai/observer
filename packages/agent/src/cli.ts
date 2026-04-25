@@ -12,7 +12,7 @@
 import { Command } from "commander";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, unlinkSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { discoverTraceSources, type TraceSource } from "./discover";
 import { Shipper, type ShippedBatch } from "./shipper";
@@ -21,7 +21,7 @@ import { createDiskShipper, shipCursorEntries } from "./disk-shipper";
 import { scanGitEvents } from "./git/scanner";
 import { generateKeypair, loadKeypair, getPublicKeyFingerprint } from "./identity";
 import { generateConfig, writeConfig, type InitAnswers } from "./init";
-import { installService, uninstallService, getServicePaths } from "./service";
+import { installService, uninstallService, getServicePaths, type ServicePaths } from "./service";
 import { Daemon, type DaemonConfig } from "./daemon";
 import { createInterface } from "node:readline";
 
@@ -284,6 +284,17 @@ function statusAction(opts: StatusOpts): void {
 // --- Init wizard ---
 
 async function initAction(): Promise<void> {
+  // Bail clearly when stdin isn't a real terminal — the wizard is fully
+  // interactive, and node:readline crashes obscurely with ERR_USE_AFTER_CLOSE
+  // when its input EOFs after the first question (which is what happens
+  // when stdin is a pipe or a closed file).
+  if (!process.stdin.isTTY) {
+    console.error("observer init requires an interactive terminal.");
+    console.error("If you ran this via `curl … | bash`, the installer should reattach");
+    console.error("stdin to /dev/tty automatically. Try running `observer init` directly.");
+    process.exit(1);
+  }
+
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   const ask = (q: string): Promise<string> =>
     new Promise((resolve) => rl.question(q, resolve));
@@ -396,12 +407,39 @@ Data capture level — how much detail to keep in each trace entry:
     console.log(result.success ? `✓ ${result.message}` : `! ${result.message}`);
   }
 
+  // Run an initial scan so the dashboard isn't empty on first open.
+  // Otherwise users wait up to one daemon poll interval (5 min default)
+  // before any data appears. Errors here are non-fatal.
+  const localOutput = join(homedir(), ".observer", "traces", "normalized");
+  console.log(`\nRunning initial scan...`);
+  try {
+    await scanAction({
+      claudeDir: DEFAULT_CLAUDE_DIR,
+      codexDir: DEFAULT_CODEX_DIR,
+      cursorDir: DEFAULT_CURSOR_DIR,
+      stateDir: DEFAULT_STATE_DIR,
+      redactSecrets: true,
+      dryRun: false,
+      developer,
+      endpoint: endpoint ?? undefined,
+      apiKey: apiKey ?? undefined,
+      localOutput,
+      disclosure,
+      localTime: false,
+    });
+  } catch (err) {
+    console.log(`  ! initial scan failed: ${err instanceof Error ? err.message : err}`);
+    console.log(`    (the daemon will retry on its next poll)`);
+  }
+
   console.log("\n✓ Done! What's next:");
   if (!enableDaemon) {
     console.log("  observer start          — run the collector on login");
+  } else {
+    console.log("  observer status         — confirm collector is healthy");
   }
   console.log("  observer dashboard run  — open the dashboard in your browser");
-  console.log("  observer scan           — run a one-shot scan now");
+  console.log("");
   console.log("  observer status         — show what's being monitored");
 }
 
@@ -493,6 +531,92 @@ function startAction(): void {
 function stopAction(): void {
   const result = uninstallService(homedir());
   console.log(result.success ? `✓ ${result.message}` : `! ${result.message}`);
+}
+
+// --- Uninstall ---
+
+interface UninstallOpts {
+  keepData?: boolean;
+  yes?: boolean;
+}
+
+async function uninstallAction(opts: UninstallOpts): Promise<void> {
+  const binaryPath = resolveBinaryPath();
+  const stateDir = DEFAULT_STATE_DIR;
+  const keepData = !!opts.keepData;
+
+  console.log("This will:");
+  console.log(`  • Stop and uninstall the daemon service (if installed)`);
+  console.log(`  • Stop and uninstall the dashboard service (if installed)`);
+  if (!keepData) {
+    console.log(`  • Remove ${stateDir}`);
+    console.log(`    (config, Ed25519 keypair, normalized traces, dashboard cache, logs)`);
+  }
+  console.log(`  • Remove the binary at ${binaryPath}`);
+  console.log("");
+  console.log("It will NOT touch:");
+  console.log(`  • ~/.claude/ — Claude Code's own session logs`);
+  console.log(`  • ~/.codex/ — Codex's own session logs`);
+  console.log(`  • Cursor's data under ~/Library/Application Support/Cursor/`);
+  console.log("");
+
+  if (!opts.yes) {
+    if (!process.stdin.isTTY) {
+      console.error("observer uninstall needs --yes when stdin isn't a terminal.");
+      process.exit(1);
+    }
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    const answer = await new Promise<string>((resolve) =>
+      rl.question("Proceed? [y/N] ", resolve),
+    );
+    rl.close();
+    if (answer.trim().toLowerCase() !== "y") {
+      console.log("Aborted.");
+      return;
+    }
+  }
+
+  console.log("");
+
+  // 1. Services first — leaves no orphan launchd/systemd units pointing at
+  //    a binary we're about to delete. Pre-check the unit file so we don't
+  //    falsely report "uninstalled" when nothing was installed.
+  for (const name of ["agent", "dashboard"] as const) {
+    const paths: ServicePaths = getServicePaths(process.platform, homedir(), name);
+    const installed = Boolean(
+      (paths.plistPath && existsSync(paths.plistPath)) ||
+      (paths.unitPath  && existsSync(paths.unitPath)),
+    );
+    if (!installed) continue;
+    const r = uninstallService(homedir(), name);
+    console.log(r.success ? `  ✓ ${r.message}` : `  ! ${r.message}`);
+  }
+
+  // 2. State dir.
+  if (!keepData && existsSync(stateDir)) {
+    try {
+      rmSync(stateDir, { recursive: true, force: true });
+      console.log(`  ✓ removed ${stateDir}`);
+    } catch (err) {
+      console.log(`  ! could not remove ${stateDir}: ${err instanceof Error ? err.message : err}`);
+    }
+  } else if (keepData) {
+    console.log(`  • kept ${stateDir} (--keep-data)`);
+  }
+
+  // 3. Binary last. The kernel keeps the file open until our process
+  //    exits, so this works even on the running binary itself.
+  if (existsSync(binaryPath)) {
+    try {
+      unlinkSync(binaryPath);
+      console.log(`  ✓ removed ${binaryPath}`);
+    } catch (err) {
+      console.log(`  ! could not remove ${binaryPath}: ${err instanceof Error ? err.message : err}`);
+      console.log(`    (try: sudo rm ${binaryPath})`);
+    }
+  }
+
+  console.log("\nDone.");
 }
 
 // --- Dashboard ---
@@ -728,5 +852,12 @@ program
   .command("update")
   .description("Update observer to the latest version")
   .action(updateAction);
+
+program
+  .command("uninstall")
+  .description("Stop services, remove ~/.observer/, delete the binary")
+  .option("--keep-data", "Keep ~/.observer/ (config, keypair, traces, logs)")
+  .option("-y, --yes", "Skip the confirmation prompt")
+  .action(uninstallAction);
 
 program.parse();

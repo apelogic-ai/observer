@@ -181,7 +181,12 @@ main() {
     # interactive prompts. This is the rustup/nvm pattern.
     info "Running 'observer init'..."
     echo ""
-    "$dest" init </dev/tty
+    # `exec </dev/tty` reattaches THIS shell's stdin to the terminal so
+    # the spawned `observer init` inherits a real tty. A per-command
+    # `</dev/tty` redirect isn't enough — node:readline still gets EOF
+    # from the closed curl pipe and bails after the first question.
+    exec </dev/tty
+    "$dest" init
   else
     info "Next: run 'observer init' to configure"
     echo ""
