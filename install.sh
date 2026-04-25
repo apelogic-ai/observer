@@ -160,11 +160,11 @@ main() {
 
   echo ""
 
-  # If a config already exists, treat this as an upgrade — don't re-run
-  # init (which would overwrite the user's settings via writeConfig force=true).
-  # Fresh installs auto-launch init by reattaching stdin to /dev/tty
-  # (rustup/brew pattern) since curl-piped stdin is the pipe.
-  # Override with OBSERVER_NO_INIT=1.
+  # We don't auto-launch `observer init` from this script. Bun's readline
+  # behavior is subtly different from Node's when stdin is reattached
+  # to /dev/tty inside a curl-piped bash, and the wizard exits silently
+  # after the first prompt. The init wizard works reliably in the user's
+  # own shell where stdin is naturally an interactive tty.
   if [ -f "${HOME}/.observer/config.yaml" ]; then
     info "Upgraded to ${version} — existing ~/.observer/config.yaml preserved."
     echo ""
@@ -173,22 +173,11 @@ main() {
     echo "  observer status          — show what's being collected"
     echo "  observer start / stop    — manage the background daemon"
     echo ""
-  elif [ "${OBSERVER_NO_INIT:-}" = "1" ]; then
-    info "Next: run 'observer init' to configure"
-    echo ""
-  elif [ -t 1 ] && [ -r /dev/tty ]; then
-    # stdout is a real terminal AND we can read /dev/tty for the
-    # interactive prompts. This is the rustup/nvm pattern.
-    info "Running 'observer init'..."
-    echo ""
-    # `exec </dev/tty` reattaches THIS shell's stdin to the terminal so
-    # the spawned `observer init` inherits a real tty. A per-command
-    # `</dev/tty` redirect isn't enough — node:readline still gets EOF
-    # from the closed curl pipe and bails after the first question.
-    exec </dev/tty
-    "$dest" init
   else
-    info "Next: run 'observer init' to configure"
+    info "Next: run 'observer init' to set up"
+    echo ""
+    echo "  observer init            — interactive setup wizard"
+    echo "  observer dashboard run   — open the dashboard once configured"
     echo ""
   fi
 }
