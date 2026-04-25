@@ -12,7 +12,7 @@
 import { Command } from "commander";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { existsSync, readFileSync, rmSync, unlinkSync } from "node:fs";
+import { closeSync, createReadStream, existsSync, openSync, readFileSync, rmSync, unlinkSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { discoverTraceSources, type TraceSource } from "./discover";
 import { Shipper, type ShippedBatch } from "./shipper";
@@ -284,18 +284,27 @@ function statusAction(opts: StatusOpts): void {
 // --- Init wizard ---
 
 async function initAction(): Promise<void> {
-  // Bail clearly when stdin isn't a real terminal — the wizard is fully
-  // interactive, and node:readline crashes obscurely with ERR_USE_AFTER_CLOSE
-  // when its input EOFs after the first question (which is what happens
-  // when stdin is a pipe or a closed file).
-  if (!process.stdin.isTTY) {
+  // Open /dev/tty directly for readline input rather than relying on
+  // process.stdin. When this binary is invoked from a curl-piped install
+  // script, the spawned process inherits stdin from a closed pipe — even
+  // if the parent shell did `exec </dev/tty` first, Bun's process.stdin
+  // ends up in a state where readline.question prints the prompt and
+  // then never resolves, causing the wizard to silently exit. Opening
+  // /dev/tty ourselves sidesteps the whole class of problems.
+  let rlInputFd: number;
+  try {
+    rlInputFd = openSync("/dev/tty", "r");
+  } catch {
     console.error("observer init requires an interactive terminal.");
-    console.error("If you ran this via `curl … | bash`, the installer should reattach");
-    console.error("stdin to /dev/tty automatically. Try running `observer init` directly.");
+    console.error("Run `observer init` from a real shell rather than from a pipe or non-interactive session.");
     process.exit(1);
   }
-
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const rlInput = createReadStream("", { fd: rlInputFd });
+  const rl = createInterface({ input: rlInput, output: process.stdout });
+  const cleanupTty = (): void => {
+    try { rl.close(); } catch { /* already closed */ }
+    try { closeSync(rlInputFd); } catch { /* fd already closed */ }
+  };
   const ask = (q: string): Promise<string> =>
     new Promise((resolve) => rl.question(q, resolve));
 
@@ -370,7 +379,7 @@ Data capture level — how much detail to keep in each trace entry:
   const daemonInput = await ask("\nStart observer on login? [Y/n] ");
   const enableDaemon = daemonInput.trim().toLowerCase() !== "n";
 
-  rl.close();
+  cleanupTty();
 
   // Generate keypair
   console.log("\nGenerating Ed25519 keypair...");

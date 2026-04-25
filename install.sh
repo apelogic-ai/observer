@@ -160,11 +160,10 @@ main() {
 
   echo ""
 
-  # We don't auto-launch `observer init` from this script. Bun's readline
-  # behavior is subtly different from Node's when stdin is reattached
-  # to /dev/tty inside a curl-piped bash, and the wizard exits silently
-  # after the first prompt. The init wizard works reliably in the user's
-  # own shell where stdin is naturally an interactive tty.
+  # Auto-launch `observer init` on fresh installs. The binary opens
+  # /dev/tty itself for readline input (see initAction in cli.ts), so we
+  # don't need stdin redirection tricks here.
+  # Override with OBSERVER_NO_INIT=1 for unattended provisioning.
   if [ -f "${HOME}/.observer/config.yaml" ]; then
     info "Upgraded to ${version} — existing ~/.observer/config.yaml preserved."
     echo ""
@@ -173,11 +172,15 @@ main() {
     echo "  observer status          — show what's being collected"
     echo "  observer start / stop    — manage the background daemon"
     echo ""
-  else
-    info "Next: run 'observer init' to set up"
+  elif [ "${OBSERVER_NO_INIT:-}" = "1" ]; then
+    info "Next: run 'observer init' to configure"
     echo ""
-    echo "  observer init            — interactive setup wizard"
-    echo "  observer dashboard run   — open the dashboard once configured"
+  elif [ -t 1 ] && [ -r /dev/tty ]; then
+    info "Running 'observer init'..."
+    echo ""
+    "$dest" init
+  else
+    info "Next: run 'observer init' to configure"
     echo ""
   fi
 }
