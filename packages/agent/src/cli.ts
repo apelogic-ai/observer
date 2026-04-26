@@ -217,10 +217,8 @@ async function scanAction(opts: ScanOpts): Promise<void> {
         }
         continue;
       }
-      const ok = await shipper.processFile(file, source.agent, source.project);
-      if (ok) {
-        batchCount++;
-      }
+      const n = await shipper.processFile(file, source.agent, source.project);
+      batchCount += n;
     }
   }
 
@@ -647,6 +645,7 @@ function openBrowser(url: string): void {
 
 async function dashboardRunAction(opts: {
   port?: string;
+  bind?: string;
   noBrowser?: boolean;
   logLevel?: string;
 }): Promise<void> {
@@ -662,6 +661,7 @@ async function dashboardRunAction(opts: {
 
   await runDashboard({
     ...(port ? { port } : {}),
+    ...(opts.bind ? { bind: opts.bind } : {}),
     ...(opts.logLevel ? { logLevel: opts.logLevel as "silent" | "error" | "info" | "debug" } : {}),
   });
 }
@@ -706,69 +706,113 @@ function logsAction(opts: { stateDir: string; lines: string }): void {
 
 async function updateAction(): Promise<void> {
   const currentPath = resolveBinaryPath();
-  const os = process.platform === "darwin" ? "darwin" : "linux";
+  const platform = process.platform === "darwin" ? "darwin"
+    : process.platform === "win32" ? "windows"
+    : "linux";
   const arch = process.arch === "arm64" ? "arm64" : "x64";
-  const target = `${os}-${arch}`;
+  const target = `${platform}-${arch}`;
+  const ext = platform === "windows" ? ".exe" : "";
 
   console.log(`Current binary: ${currentPath}`);
   console.log(`Platform: ${target}`);
   console.log();
 
-  // Fetch latest version from GitHub
+  // Tag scheme matches what release.yml publishes (`v<version>`). Allow an
+  // OBSERVER_REPO override so forks/test releases can repoint without a
+  // recompile.
+  const repo = process.env.OBSERVER_REPO ?? "apelogic-ai/observer";
   console.log("Checking for updates...");
-  const repo = "observer-oss/observer";
   let latestTag: string;
   try {
-    const res = await fetch(`https://api.github.com/repos/${repo}/releases`);
-    const releases = (await res.json()) as Array<{ tag_name: string }>;
-    const observerRelease = releases.find((r) => r.tag_name.startsWith("observer-v"));
-    if (!observerRelease) {
-      console.log("No observer releases found. You may be running a dev build.");
+    const res = await fetch(`https://api.github.com/repos/${repo}/releases/latest`);
+    if (!res.ok) {
+      console.log(`No releases found at ${repo} (HTTP ${res.status}).`);
       return;
     }
-    latestTag = observerRelease.tag_name;
+    const release = (await res.json()) as { tag_name: string };
+    if (!release.tag_name) {
+      console.log("Latest release has no tag_name. Aborting.");
+      return;
+    }
+    latestTag = release.tag_name;
   } catch (err) {
     console.error("Failed to check for updates:", err instanceof Error ? err.message : err);
     return;
   }
 
-  const latestVersion = latestTag.replace("observer-v", "");
+  const latestVersion = latestTag.replace(/^v/, "");
   console.log(`Latest version: ${latestVersion}`);
 
-  // Download
-  const url = `https://github.com/${repo}/releases/download/${latestTag}/observer-${target}`;
-  console.log(`Downloading observer-${target}...`);
+  const baseUrl = `https://github.com/${repo}/releases/download/${latestTag}`;
+  const binaryUrl = `${baseUrl}/observer-${target}${ext}`;
+  const checksumUrl = `${binaryUrl}.sha256`;
 
+  // Download checksum FIRST so we never write an unverified binary to disk.
+  // Mirrors install.sh; without this the updater is the soft underbelly of
+  // the supply chain.
+  let expectedSha: string;
   try {
-    const res = await fetch(url);
+    const res = await fetch(checksumUrl);
+    if (!res.ok) {
+      console.error(`Checksum file missing at ${checksumUrl} (HTTP ${res.status}).`);
+      console.error(`Refusing to install an unverified binary.`);
+      return;
+    }
+    const text = await res.text();
+    expectedSha = text.trim().split(/\s+/)[0] ?? "";
+    if (!/^[0-9a-f]{64}$/i.test(expectedSha)) {
+      console.error(`Invalid checksum format from ${checksumUrl}: ${expectedSha.slice(0, 16)}…`);
+      return;
+    }
+  } catch (err) {
+    console.error("Checksum fetch failed:", err instanceof Error ? err.message : err);
+    return;
+  }
+
+  console.log(`Downloading observer-${target}${ext}...`);
+  let bytes: Uint8Array;
+  try {
+    const res = await fetch(binaryUrl);
     if (!res.ok) {
       console.error(`Download failed: ${res.status} ${res.statusText}`);
       return;
     }
-    const data = await res.arrayBuffer();
-
-    // Write to temp file, then rename (atomic replace)
-    const tmpPath = currentPath + ".tmp";
-    const { writeFileSync, renameSync, chmodSync } = require("node:fs");
-    writeFileSync(tmpPath, Buffer.from(data));
-    chmodSync(tmpPath, 0o755);
-    renameSync(tmpPath, currentPath);
-
-    console.log(`✓ Updated to ${latestVersion}`);
-    console.log(`  Binary: ${currentPath}`);
-
-    // Restart daemon if running
-    const paths = getServicePaths(process.platform, homedir());
-    if (paths.plistPath && existsSync(paths.plistPath)) {
-      console.log("  Restarting daemon...");
-      try {
-        execSync(`launchctl unload ${paths.plistPath}`, { stdio: "pipe" });
-        execSync(`launchctl load ${paths.plistPath}`, { stdio: "pipe" });
-        console.log("  ✓ Daemon restarted");
-      } catch { /* manual restart needed */ }
-    }
+    bytes = new Uint8Array(await res.arrayBuffer());
   } catch (err) {
-    console.error("Update failed:", err instanceof Error ? err.message : err);
+    console.error("Download failed:", err instanceof Error ? err.message : err);
+    return;
+  }
+
+  // Verify against the published sha256 BEFORE we touch the install path.
+  const { createHash } = require("node:crypto") as typeof import("node:crypto");
+  const actualSha = createHash("sha256").update(bytes).digest("hex");
+  if (actualSha !== expectedSha) {
+    console.error(`Checksum mismatch — refusing to install.`);
+    console.error(`  expected: ${expectedSha}`);
+    console.error(`  got:      ${actualSha}`);
+    return;
+  }
+
+  // Atomic replace: write to sibling path, chmod, rename onto target.
+  const tmpPath = currentPath + ".tmp";
+  const { writeFileSync, renameSync, chmodSync } = require("node:fs") as typeof import("node:fs");
+  writeFileSync(tmpPath, bytes);
+  chmodSync(tmpPath, 0o755);
+  renameSync(tmpPath, currentPath);
+
+  console.log(`✓ Updated to ${latestVersion}`);
+  console.log(`  Binary:   ${currentPath}`);
+  console.log(`  Checksum: ${actualSha.slice(0, 16)}… (verified)`);
+
+  // Restart daemon if running.
+  const paths = getServicePaths(process.platform, homedir());
+  if (paths.plistPath && existsSync(paths.plistPath)) {
+    console.log("  Restarting daemon...");
+    try {
+      execSync(`launchctl unload ${paths.plistPath}`, { stdio: "pipe" });
+      execSync(`launchctl load ${paths.plistPath}`, { stdio: "pipe" });
+      console.log("  ✓ Daemon restarted");
+    } catch { /* manual restart needed */ }
   }
 }
 
@@ -838,6 +882,7 @@ dashboard
   .command("run", { isDefault: true })
   .description("Run the dashboard in foreground and open the browser")
   .option("--port <n>", "API + UI port")
+  .option("--bind <host>", "Bind hostname (default 127.0.0.1; use 0.0.0.0 to expose on LAN)")
   .option("--no-browser", "Don't open the browser automatically")
   .option("--log-level <lvl>", "silent | error | info | debug")
   .action(dashboardRunAction);

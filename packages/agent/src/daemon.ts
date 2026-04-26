@@ -79,8 +79,8 @@ export class Daemon {
           }
           continue;
         }
-        const ok = await this.shipper.processFile(file, source.agent, source.project);
-        if (ok) shipped++;
+        const n = await this.shipper.processFile(file, source.agent, source.project);
+        shipped += n;
       }
     }
 

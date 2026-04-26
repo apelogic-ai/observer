@@ -15,6 +15,7 @@
     "start": "bun server/index.ts",
     "compile": "bun run build && bun build --compile server/compiled-entry.ts --outfile dist/observer-dashboard",
     "typecheck": "bun scripts/ensure-stubs.ts && bunx tsc --noEmit && bunx tsc --noEmit -p tsconfig.server.json",
+    "test": "bun test tests/server",
     "lint": "eslint"
   },
   "dependencies": {

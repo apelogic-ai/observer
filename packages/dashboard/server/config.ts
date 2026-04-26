@@ -23,6 +23,9 @@ export interface DashboardConfig {
   port: number;
   uiPort: number;
   dataDir: string;
+  /** Hostname Bun.serve binds to. Defaults to 127.0.0.1 — set to 0.0.0.0
+   *  to expose on LAN (no auth! make sure you mean it). */
+  bind: string;
   /** Static assets (out/ from `next build`) served at non-/api/* paths. */
   staticDir: string;
   configPath: string;
@@ -44,6 +47,10 @@ const DEFAULTS = {
   port: 3457,
   uiPort: 3000,
   dataDir: DEFAULT_DATA_DIR,
+  // Bind to localhost by default — the dashboard has no auth and CORS:* set,
+  // so LAN exposure would be a real security hole. Override with --bind
+  // 0.0.0.0 if you actually want it reachable from other hosts.
+  bind: "127.0.0.1",
   log: { level: "info" as LogLevel, file: DEFAULT_LOG_FILE, stderr: false },
 };
 
@@ -52,6 +59,7 @@ export interface CliOverrides {
   port?: number;
   uiPort?: number;
   dataDir?: string;
+  bind?: string;
   staticDir?: string;
   configPath?: string;
   logLevel?: LogLevel;
@@ -97,12 +105,17 @@ export function loadDashboardConfig(cli: CliOverrides = {}): DashboardConfig {
     ?? fileCfg.dataDir
     ?? DEFAULTS.dataDir;
 
+  const bind = cli.bind
+    ?? process.env.OBSERVER_BIND
+    ?? fileCfg.bind
+    ?? DEFAULTS.bind;
+
   const staticDir = cli.staticDir
     ?? process.env.OBSERVER_STATIC_DIR
     ?? DEFAULT_STATIC_DIR;
 
   return {
-    port, uiPort, dataDir, staticDir, configPath,
+    port, uiPort, dataDir, bind, staticDir, configPath,
     log: { level, file: logFile, stderr: logStderr },
   };
 }
@@ -111,6 +124,7 @@ interface FileCfg {
   port?: number;
   uiPort?: number;
   dataDir?: string;
+  bind?: string;
   level?: LogLevel;
   logFile?: string;
   logStderr?: boolean;
@@ -127,12 +141,13 @@ function readDashboardSection(path: string): FileCfg {
   const dash = (raw.dashboard ?? {}) as Record<string, unknown>;
   const log  = (dash.log ?? {}) as Record<string, unknown>;
   return {
-    port:      typeof dash.port === "number"   ? dash.port   : undefined,
-    uiPort:    typeof dash.uiPort === "number" ? dash.uiPort : undefined,
+    port:      typeof dash.port === "number"    ? dash.port    : undefined,
+    uiPort:    typeof dash.uiPort === "number"  ? dash.uiPort  : undefined,
     dataDir:   typeof dash.dataDir === "string" ? dash.dataDir : undefined,
+    bind:      typeof dash.bind === "string"    ? dash.bind    : undefined,
     level:     parseLogLevel(log.level),
-    logFile:   typeof log.file === "string" ? log.file : undefined,
-    logStderr: typeof log.stderr === "boolean" ? log.stderr : undefined,
+    logFile:   typeof log.file === "string"     ? log.file     : undefined,
+    logStderr: typeof log.stderr === "boolean"  ? log.stderr   : undefined,
   };
 }
 
@@ -156,6 +171,7 @@ export function parseCliArgs(argv: string[]): CliOverrides {
       case "--port":        { const n = parseInt(next(i) ?? "", 10); if (Number.isFinite(n)) out.port = n; i++; break; }
       case "--ui-port":     { const n = parseInt(next(i) ?? "", 10); if (Number.isFinite(n)) out.uiPort = n; i++; break; }
       case "--data-dir":    { out.dataDir = next(i); i++; break; }
+      case "--bind":        { out.bind = next(i); i++; break; }
       case "--static-dir":  { out.staticDir = next(i); i++; break; }
       case "--config":      { out.configPath = next(i); i++; break; }
       case "--log-level":   { const lvl = parseLogLevel(next(i)); if (lvl) out.logLevel = lvl; i++; break; }
@@ -179,6 +195,8 @@ Flags:
   --port <n>           API server port (env: OBSERVER_PORT)
   --ui-port <n>        Next UI port (env: OBSERVER_UI_PORT)
   --data-dir <path>    Normalized traces dir (env: OBSERVER_DATA_DIR)
+  --bind <host>        Hostname to bind to. Default 127.0.0.1; set 0.0.0.0
+                       to expose on LAN. (env: OBSERVER_BIND)
   --static-dir <path>  Dashboard static assets (env: OBSERVER_STATIC_DIR)
   --config <path>      Config file (env: OBSERVER_CONFIG)
   --log-level <lvl>    silent | error | info | debug (env: OBSERVER_LOG_LEVEL)

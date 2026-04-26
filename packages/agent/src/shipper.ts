@@ -2,16 +2,26 @@
  * Shipper — offset-based idempotent trace shipping.
  *
  * Tracks the last-shipped byte offset per file. On each processFile()
- * call, reads only new lines, optionally redacts secrets, and calls
- * the ship callback with a batch of raw (redacted) JSONL lines.
+ * call, streams new bytes since that offset, validates each line as JSON,
+ * optionally redacts secrets, and ships in chunks (one batch per ~5000
+ * entries). Offset only advances after a chunk is successfully shipped,
+ * so a mid-stream failure leaves later bytes unread for the next poll.
+ *
+ * Streaming (vs the old slurp-then-skip-if->200MB approach) means:
+ *   - Huge JSONL files are no longer skipped permanently.
+ *   - Peak memory stays bounded (one chunk + one batch's entries) instead
+ *     of allocating ~2x the file size as strings.
+ *   - Partial trailing lines (file being appended to) are held back; offset
+ *     only advances to the last complete newline.
  */
 
 import {
+  createReadStream,
   existsSync,
   mkdirSync,
   readFileSync,
-  writeFileSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -20,7 +30,7 @@ import { execSync } from "node:child_process";
 import { redactSecrets } from "./security/scanner";
 
 export interface ShippedBatch {
-  batchId: string;      // deterministic: hash(filePath + offset + entryCount)
+  batchId: string;      // deterministic: hash(filePath + offsetStart + offsetEnd + entryCount)
   developer: string;
   machine: string;
   agent: string;
@@ -35,10 +45,16 @@ export interface ShipperConfig {
   machine?: string;    // machine identifier; defaults to os.hostname()
   stateDir: string;
   redactSecrets?: boolean;
+  /** Max entries per shipped batch. Lower → smaller per-batch memory and
+   *  HTTP payloads, more batches per file. Default 5000. */
+  maxBatchEntries?: number;
   ship: (batch: ShippedBatch) => Promise<void>;
 }
 
 type OffsetMap = Record<string, number>; // fileHash → byte offset
+
+const DEFAULT_MAX_BATCH_ENTRIES = 5000;
+const NEWLINE = 0x0a;
 
 function fileHash(path: string): string {
   return createHash("sha256").update(path).digest("hex").slice(0, 16);
@@ -74,6 +90,7 @@ export class Shipper {
   private config: ShipperConfig;
   private offsets: OffsetMap;
   private offsetFile: string;
+  private maxBatchEntries: number;
   readonly developer: string;
   readonly machine: string;
 
@@ -83,6 +100,7 @@ export class Shipper {
     this.machine = config.machine ?? hostname();
     this.offsetFile = join(config.stateDir, "shipper-offsets.json");
     this.offsets = this.loadOffsets();
+    this.maxBatchEntries = config.maxBatchEntries ?? DEFAULT_MAX_BATCH_ENTRIES;
   }
 
   private loadOffsets(): OffsetMap {
@@ -101,63 +119,18 @@ export class Shipper {
     writeFileSync(this.offsetFile, JSON.stringify(this.offsets, null, 2));
   }
 
-  /**
-   * Process a trace file — read new lines since last offset, redact
-   * secrets if configured, ship the batch, and advance offset only
-   * on successful shipment.
-   */
-  async processFile(filePath: string, agent: string, project: string): Promise<boolean> {
-    if (!existsSync(filePath)) return false;
-
-    const key = fileHash(filePath);
-    const offset = this.offsets[key] ?? 0;
-    const stat = statSync(filePath);
-
-    if (stat.size <= offset) return false; // nothing new
-
-    // Skip files larger than 200MB to avoid V8 string length limit
-    const MAX_FILE_SIZE = 200 * 1024 * 1024;
-    if (stat.size > MAX_FILE_SIZE) {
-      console.log(`  [skip] ${filePath}: ${(stat.size / 1024 / 1024).toFixed(0)}MB exceeds 200MB limit`);
-      this.offsets[key] = stat.size;
-      this.saveOffsets();
-      return false;
-    }
-
-    // Read from offset to end
-    const content = readFileSync(filePath, "utf-8");
-    const newContent = content.slice(offset);
-    const lines = newContent.split("\n").filter((l) => l.trim());
-
-    if (lines.length === 0) {
-      this.offsets[key] = stat.size;
-      this.saveOffsets();
-      return false;
-    }
-
-    // Validate JSON + optionally redact
-    const validEntries: string[] = [];
-    for (const line of lines) {
-      try {
-        JSON.parse(line); // validate
-        const processed = this.config.redactSecrets
-          ? redactSecrets(line)
-          : line;
-        validEntries.push(processed);
-      } catch {
-        // Skip invalid JSON lines
-      }
-    }
-
-    if (validEntries.length === 0) {
-      this.offsets[key] = stat.size;
-      this.saveOffsets();
-      return false;
-    }
-
-    // Deterministic batch ID for ingestor-side dedup
+  private async shipBatch(
+    filePath: string,
+    agent: string,
+    project: string,
+    entries: string[],
+    offsetStart: number,
+    offsetEnd: number,
+  ): Promise<boolean> {
+    // Deterministic batch ID for ingestor-side dedup; based on the byte
+    // range, not entry contents, so re-shipping the same range is idempotent.
     const batchId = createHash("sha256")
-      .update(`${filePath}:${offset}:${stat.size}:${validEntries.length}`)
+      .update(`${filePath}:${offsetStart}:${offsetEnd}:${entries.length}`)
       .digest("hex")
       .slice(0, 16);
 
@@ -169,18 +142,120 @@ export class Shipper {
       project,
       sourceFile: filePath,
       shippedAt: new Date().toISOString(),
-      entries: validEntries,
+      entries,
     };
 
-    // Ship — only advance offset on success
     try {
       await this.config.ship(batch);
-      this.offsets[key] = stat.size;
-      this.saveOffsets();
       return true;
     } catch {
-      // Ship failed — offset NOT advanced, will retry on next poll
       return false;
     }
+  }
+
+  /**
+   * Stream a trace file from its last-shipped offset, ship in chunks of
+   * up to `maxBatchEntries`, and advance the offset after each successful
+   * chunk. Returns the number of batches actually shipped.
+   *
+   * No file size limit: large files are processed line by line. A trailing
+   * partial line (file is being appended to mid-poll) is left for the next
+   * call — offset only advances to the last full newline.
+   */
+  async processFile(filePath: string, agent: string, project: string): Promise<number> {
+    if (!existsSync(filePath)) return 0;
+
+    const key = fileHash(filePath);
+    const startOffset = this.offsets[key] ?? 0;
+    const stat = statSync(filePath);
+    if (stat.size <= startOffset) return 0;
+
+    const stream = createReadStream(filePath, { start: startOffset });
+
+    // Bytes received from the stream so far. Position relative to startOffset.
+    let cumulativeBytes = 0;
+    // Buffer carrying any bytes from the most recent chunks that haven't
+    // been flushed as a complete line yet. Typed loosely so the per-chunk
+    // concat with stream-emitted Buffers (Buffer<ArrayBufferLike>) doesn't
+    // fight the alloc(0) seed type (Buffer<ArrayBuffer>).
+    let pendingBuf: Buffer = Buffer.alloc(0);
+    // Position (relative to startOffset) up through the last \n we've
+    // emitted. Offset will be advanced to startOffset + lastSafeBytes.
+    let lastSafeBytes = 0;
+
+    let entries: string[] = [];
+    let batchStartOffset = startOffset;
+    let batchesShipped = 0;
+    let aborted = false;
+
+    const tryFlush = async (force: boolean): Promise<boolean> => {
+      if (!force && entries.length < this.maxBatchEntries) return true;
+      if (entries.length === 0) return true;
+      const batchEndOffset = startOffset + lastSafeBytes;
+      const ok = await this.shipBatch(
+        filePath, agent, project, entries, batchStartOffset, batchEndOffset,
+      );
+      if (!ok) return false;
+      this.offsets[key] = batchEndOffset;
+      this.saveOffsets();
+      batchStartOffset = batchEndOffset;
+      entries = [];
+      batchesShipped++;
+      return true;
+    };
+
+    for await (const chunk of stream) {
+      const buf = chunk as Buffer;
+      pendingBuf = pendingBuf.length === 0 ? buf : Buffer.concat([pendingBuf, buf]);
+      cumulativeBytes += buf.length;
+
+      // Walk pendingBuf looking for newlines; emit each complete line.
+      let lineStart = 0;
+      let nlIdx: number;
+      while ((nlIdx = pendingBuf.indexOf(NEWLINE, lineStart)) !== -1) {
+        const line = pendingBuf.subarray(lineStart, nlIdx).toString("utf-8").trim();
+        lineStart = nlIdx + 1;
+        // Update lastSafeBytes after each complete line.
+        lastSafeBytes = cumulativeBytes - (pendingBuf.length - lineStart);
+
+        if (!line) continue;
+        try {
+          JSON.parse(line);
+          const processed = this.config.redactSecrets ? redactSecrets(line) : line;
+          entries.push(processed);
+        } catch { /* invalid JSON line — skip but still advance past it */ }
+
+        if (entries.length >= this.maxBatchEntries) {
+          if (!(await tryFlush(true))) {
+            aborted = true;
+            break;
+          }
+        }
+      }
+
+      // Drop already-processed bytes from pendingBuf.
+      pendingBuf = pendingBuf.subarray(lineStart);
+
+      if (aborted) {
+        stream.destroy();
+        return batchesShipped;
+      }
+    }
+
+    // Stream EOF. Flush remaining entries (if any).
+    if (entries.length > 0) {
+      if (!(await tryFlush(true))) return batchesShipped;
+    }
+
+    // If the file ends with a newline we've consumed everything (pendingBuf
+    // is empty). If not, pendingBuf holds an incomplete trailing line that
+    // we deliberately don't advance past — it'll be re-read on the next
+    // poll once it (presumably) completes.
+    if (pendingBuf.length === 0 && this.offsets[key] !== stat.size) {
+      this.offsets[key] = stat.size;
+      this.saveOffsets();
+    }
+
+    return batchesShipped;
   }
 }

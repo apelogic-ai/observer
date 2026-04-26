@@ -31,7 +31,8 @@ export interface GitScanOptions {
   extraRepos?: Record<string, string[]>;
 }
 
-interface RepoMeta {
+/** @internal — exported for tests. */
+export interface RepoMeta {
   project: string;
   localPath: string;
   repo: string;       // owner/repo
@@ -40,8 +41,10 @@ interface RepoMeta {
 /**
  * Discover repos that had trace activity by scanning the normalized output dir.
  * Returns unique repos with their project name and local path.
+ *
+ * @internal — exported for tests.
  */
-function discoverActiveRepos(outputDir: string, extraRepos?: Record<string, string[]>): RepoMeta[] {
+export function discoverActiveRepos(outputDir: string, extraRepos?: Record<string, string[]>): RepoMeta[] {
   if (!existsSync(outputDir)) return [];
 
   // Collect unique project names from trace files
@@ -139,7 +142,8 @@ function getTraceDates(outputDir: string): string[] {
 // Session-based agent attribution
 // ---------------------------------------------------------------------------
 
-interface SessionWindow {
+/** @internal — exported for tests. */
+export interface SessionWindow {
   agent: string;
   sessionId: string;
   start: number;  // epoch ms
@@ -150,7 +154,8 @@ interface SessionWindow {
  * Read trace files for a project on a given date and extract session windows.
  * A session window is [min(timestamp), max(timestamp)] for each sessionId.
  */
-function getSessionWindows(outputDir: string, date: string, project: string): SessionWindow[] {
+/** @internal — exported for tests. */
+export function getSessionWindows(outputDir: string, date: string, project: string): SessionWindow[] {
   const datePath = join(outputDir, date);
   if (!existsSync(datePath)) return [];
 
@@ -210,7 +215,8 @@ function getSessionWindows(outputDir: string, date: string, project: string): Se
  * If a commit isn't already agent-attributed (via Co-Authored-By),
  * check if it falls within any agent session window for the same project.
  */
-function attributeFromSessions(events: GitEvent[], sessions: SessionWindow[]): void {
+/** @internal — exported for tests. */
+export function attributeFromSessions(events: GitEvent[], sessions: SessionWindow[]): void {
   if (sessions.length === 0) return;
 
   for (const event of events) {

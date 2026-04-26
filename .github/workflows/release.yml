@@ -47,9 +47,32 @@ jobs:
       - name: Install workspace dependencies
         run: bun install
 
-      - name: Run agent tests
+      # Quality gates — anything green on CI must stay green at release.
+      # Without these the release path could ship regressions outside the
+      # agent test suite.
+      - name: Agent typecheck
+        working-directory: packages/agent
+        run: bun run typecheck
+
+      - name: Agent tests
         working-directory: packages/agent
         run: bun run test
+
+      - name: API typecheck
+        working-directory: packages/api
+        run: bun run typecheck
+
+      - name: API tests
+        working-directory: packages/api
+        run: bun run test
+
+      - name: Dashboard typecheck (UI + server)
+        working-directory: packages/dashboard
+        run: bun run typecheck
+
+      - name: Dashboard lint
+        working-directory: packages/dashboard
+        run: bun run lint
 
       # Produces packages/dashboard/out/ + dist/out.tar + dist/build-info.json,
       # which the agent binary embeds via `with { type: "file" }`.

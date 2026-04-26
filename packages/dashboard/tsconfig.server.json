@@ -11,7 +11,8 @@
   },
   "include": [
     "server/**/*.ts",
-    "scripts/**/*.ts"
+    "scripts/**/*.ts",
+    "tests/server/**/*.ts"
   ],
   "exclude": ["node_modules", "dist", "out", ".next"]
 }

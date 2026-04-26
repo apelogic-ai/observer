@@ -105,12 +105,12 @@ describe("Shipper", () => {
 
     const shipper = new Shipper(failingConfig);
     const result = await shipper.processFile(traceFile, "claude_code", "test-project");
-    expect(result).toBe(false);
+    expect(result).toBe(0);
     expect(failCount).toBe(1);
 
     // Retry — should attempt again (cursor was NOT advanced)
     const result2 = await shipper.processFile(traceFile, "claude_code", "test-project");
-    expect(result2).toBe(false);
+    expect(result2).toBe(0);
     expect(failCount).toBe(2);
   });
 
@@ -200,5 +200,107 @@ describe("Shipper", () => {
     await shipper.processFile(traceFile, "claude_code", "test-project");
     expect(shipped).toHaveLength(1);
     expect(shipped[0].entries).toHaveLength(2);
+  });
+
+  // ── Streaming behavior (replaces the old 200MB-skip path) ────────
+
+  it("ships a multi-batch file in chunks of maxBatchEntries", async () => {
+    const traceDir = makeTmpDir();
+    const traceFile = join(traceDir, "big.jsonl");
+    // 13 lines, batch size 5 → expect 3 batches (5 + 5 + 3)
+    let content = "";
+    for (let i = 0; i < 13; i++) content += `{"i":${i}}\n`;
+    writeFileSync(traceFile, content);
+
+    const shipper = new Shipper({ ...config, maxBatchEntries: 5 });
+    const n = await shipper.processFile(traceFile, "claude_code", "test-project");
+
+    expect(n).toBe(3);
+    expect(shipped).toHaveLength(3);
+    expect(shipped[0].entries).toHaveLength(5);
+    expect(shipped[1].entries).toHaveLength(5);
+    expect(shipped[2].entries).toHaveLength(3);
+    // Each batch has a different deterministic batchId
+    const ids = new Set(shipped.map((b) => b.batchId));
+    expect(ids.size).toBe(3);
+  });
+
+  it("does NOT advance offset past an incomplete trailing line", async () => {
+    const traceDir = makeTmpDir();
+    const traceFile = join(traceDir, "appended.jsonl");
+    // First write: 2 complete + 1 incomplete (no trailing \n).
+    writeFileSync(traceFile, '{"a":1}\n{"a":2}\n{"part":');
+
+    const shipper = new Shipper(config);
+    const first = await shipper.processFile(traceFile, "claude_code", "test-project");
+    expect(first).toBe(1);
+    expect(shipped[0].entries).toHaveLength(2);
+
+    // Now complete the trailing line + add another. Offset should pick up
+    // from before the partial line and ship both new completed lines.
+    shipped = [];
+    writeFileSync(traceFile, '{"a":1}\n{"a":2}\n{"part":3}\n{"a":4}\n');
+    const second = await shipper.processFile(traceFile, "claude_code", "test-project");
+    expect(second).toBe(1);
+    expect(shipped[0].entries).toHaveLength(2);
+    expect(shipped[0].entries[0]).toContain('"part":3');
+    expect(shipped[0].entries[1]).toContain('"a":4');
+  });
+
+  it("stops shipping mid-stream on failure; offset reflects last good batch", async () => {
+    const traceDir = makeTmpDir();
+    const traceFile = join(traceDir, "fail-mid.jsonl");
+    let content = "";
+    for (let i = 0; i < 10; i++) content += `{"i":${i}}\n`;
+    writeFileSync(traceFile, content);
+
+    let callCount = 0;
+    const failingConfig: ShipperConfig = {
+      ...config,
+      maxBatchEntries: 3,
+      ship: async (batch) => {
+        callCount++;
+        if (callCount === 2) throw new Error("fail mid-stream");
+        shipped.push(batch);
+      },
+    };
+    const shipper = new Shipper(failingConfig);
+    const n = await shipper.processFile(traceFile, "claude_code", "test-project");
+
+    // Batch 1 succeeded (3 entries). Batch 2 failed → stop.
+    expect(n).toBe(1);
+    expect(shipped).toHaveLength(1);
+    expect(shipped[0].entries).toHaveLength(3);
+
+    // Retry — should pick up after the first 3 entries.
+    shipped = [];
+    callCount = 0;
+    const retryConfig: ShipperConfig = {
+      ...config,
+      maxBatchEntries: 3,
+      ship: async (batch) => { shipped.push(batch); },
+    };
+    // Need a fresh Shipper to pick up persisted offset.
+    const retryShipper = new Shipper(retryConfig);
+    const n2 = await retryShipper.processFile(traceFile, "claude_code", "test-project");
+    // 7 remaining → batches of 3, 3, 1
+    expect(n2).toBe(3);
+    expect(shipped[0].entries[0]).toContain('"i":3');
+  });
+
+  it("handles a file with no size limit (formerly 200MB skip path)", async () => {
+    const traceDir = makeTmpDir();
+    const traceFile = join(traceDir, "many.jsonl");
+    // 50,000 small lines — would previously have been at risk of large-string
+    // blowup; with streaming we just process them in batches.
+    let content = "";
+    for (let i = 0; i < 50_000; i++) content += `{"i":${i}}\n`;
+    writeFileSync(traceFile, content);
+
+    const shipper = new Shipper({ ...config, maxBatchEntries: 10_000 });
+    const n = await shipper.processFile(traceFile, "claude_code", "test-project");
+    expect(n).toBe(5);
+    expect(shipped[0].entries).toHaveLength(10_000);
+    expect(shipped[4].entries).toHaveLength(10_000);
   });
 });
