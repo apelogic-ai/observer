@@ -745,6 +745,12 @@ async function updateAction(): Promise<void> {
   const latestVersion = latestTag.replace(/^v/, "");
   console.log(`Latest version: ${latestVersion}`);
 
+  const pkg = require("../package.json") as { version: string };
+  if (pkg.version === latestVersion) {
+    console.log(`Already at v${latestVersion} — nothing to do.`);
+    return;
+  }
+
   const baseUrl = `https://github.com/${repo}/releases/download/${latestTag}`;
   const binaryUrl = `${baseUrl}/observer-${target}${ext}`;
   const checksumUrl = `${binaryUrl}.sha256`;
