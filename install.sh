@@ -47,10 +47,13 @@ detect_platform() {
   echo "${os}-${arch}"
 }
 
-# Get latest version from GitHub
+# Get latest version from GitHub.
+# Uses /releases/latest (returns whichever is flagged Latest), not /releases —
+# the listing endpoint orders by created_at, which doesn't track the published
+# Latest flag, so head -1 there can pick a stale release.
 get_latest_version() {
   local version
-  version=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases" \
+  version=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
     | grep -o '"tag_name": "v[^"]*"' \
     | head -1 \
     | grep -o 'v[0-9.]*' \
