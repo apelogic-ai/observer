@@ -29,10 +29,13 @@ describe("CLI", () => {
     expect(stdout).toContain("status");
   });
 
-  it("shows version", () => {
+  it("shows the version from package.json", () => {
+    // Don't hardcode — package.json gets bumped on every release. The test
+    // is that --version reflects whatever the current package.json says.
+    const pkg = require("../package.json") as { version: string };
     const { code, stdout } = run("--version");
     expect(code).toBe(0);
-    expect(stdout).toContain("0.1.0");
+    expect(stdout.trim()).toBe(pkg.version);
   });
 
   it("scan discovers and processes traces", () => {
