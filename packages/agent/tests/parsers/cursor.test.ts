@@ -95,7 +95,10 @@ describe("parseCursorDb", () => {
     expect(entries[0].project).toBe("");
   });
 
-  it("infers project from bubble tool-call paths when home dir matches", () => {
+  // The inference walks paths using Unix `/` separators and matches against
+  // `homedir()`, which on Windows returns a `C:\…` path. The parser is
+  // effectively Unix-only; Cursor on Windows falls through to meta.project.
+  it.skipIf(process.platform === "win32")("infers project from bubble tool-call paths when home dir matches", () => {
     // The realistic shape: Cursor's globalStorage pools sessions across
     // workspaces, so the per-composer project must come from the bubbles
     // themselves. Plant tool-call paths under $HOME/<basename>/ — parser
