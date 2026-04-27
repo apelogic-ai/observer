@@ -2,6 +2,7 @@ import { describe, it, expect } from "bun:test";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { execSync } from "node:child_process";
 import {
   discoverActiveRepos,
   getSessionWindows,
@@ -13,6 +14,16 @@ import type { GitEvent } from "../../src/git/types";
 
 function makeTmpDir(): string {
   return mkdtempSync(join(tmpdir(), "observer-scanner-"));
+}
+
+/** Create a minimal git repo in a tmp dir with a remote pointing at
+ *  a recognizable owner/name pair, so resolveRepoFromPath returns a
+ *  non-null result regardless of the host filesystem. */
+function makeTmpRepo(remote = "git@github.com:acme/test-repo.git"): string {
+  const dir = mkdtempSync(join(tmpdir(), "observer-repo-"));
+  execSync("git init -q", { cwd: dir });
+  execSync(`git remote add origin ${remote}`, { cwd: dir });
+  return dir;
 }
 
 /** Write a JSONL file containing entries with the given (project, sessionId,
@@ -68,14 +79,15 @@ describe("discoverActiveRepos", () => {
       { project: "any" },
     ]);
 
-    // Use this repo as the resolvable target — it exists, has a .git dir,
-    // and resolveRepoFromPath should return owner/name.
+    // Synthetic git repo in tmp — exists on every CI runner, has a remote
+    // that resolveRepoFromPath can parse into owner/name.
+    const repoPath = makeTmpRepo("git@github.com:acme/test-repo.git");
     const repos = discoverActiveRepos(dir, {
-      "any": ["/Users/lbelyaev/dev/observer"],
+      "any": [repoPath],
     });
     expect(repos.length).toBeGreaterThan(0);
     expect(repos[0].project).toBe("any");
-    expect(repos[0].repo).toContain("/observer");
+    expect(repos[0].repo).toBe("acme/test-repo");
   });
 
   it("dedupes by repo key when the same repo comes from multiple sources", () => {
@@ -83,10 +95,11 @@ describe("discoverActiveRepos", () => {
     writeAgentJsonl(dir, "2026-04-01", "claude_code", "a.jsonl", [
       { project: "first" },
     ]);
+    const repoPath = makeTmpRepo("git@github.com:acme/dup-repo.git");
     const repos = discoverActiveRepos(dir, {
       // Both project labels point at the same physical repo.
-      "first":  ["/Users/lbelyaev/dev/observer"],
-      "second": ["/Users/lbelyaev/dev/observer"],
+      "first":  [repoPath],
+      "second": [repoPath],
     });
     // Only one entry — same repo key, deduped.
     expect(repos.length).toBe(1);
@@ -229,20 +242,20 @@ describe("filterByAuthor", () => {
 
   it("matches by author name when developer isn't an email", () => {
     const events = [
-      ev("Leonid Belyaev", null),
-      ev("Nicholas Pettas", null),
+      ev("Jane Doe", null),
+      ev("John Smith", null),
     ];
-    const kept = filterByAuthor(events, "Leonid Belyaev");
+    const kept = filterByAuthor(events, "Jane Doe");
     expect(kept.length).toBe(1);
-    expect(kept[0].author).toBe("Leonid Belyaev");
+    expect(kept[0].author).toBe("Jane Doe");
   });
 
-  it("matches partial substrings (e.g. 'lbeliaev' in author or email)", () => {
+  it("matches partial substrings (e.g. handle in author or email)", () => {
     const events = [
-      ev("Leonid Belyaev", "lbelyaev@example.com"),
+      ev("Jane Doe", "jdoe@example.com"),
       ev("Other Person", "other@example.com"),
     ];
-    expect(filterByAuthor(events, "lbelyaev").length).toBe(1);
+    expect(filterByAuthor(events, "jdoe").length).toBe(1);
   });
 
   it("returns the input unchanged when developer is empty", () => {

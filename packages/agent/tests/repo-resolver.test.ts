@@ -15,16 +15,6 @@ function makeTmpDir(): string {
 }
 
 describe("resolveRepoFromPath", () => {
-  it("returns git remote for a repo directory", () => {
-    // Use an actual git repo
-    const result = resolveRepoFromPath("/Users/dev/my-project");
-    if (result) {
-      expect(result.remote).toContain("my-project");
-      expect(result.localPath).toBe("/Users/dev/my-project");
-    }
-    // Skip if path doesn't exist (CI)
-  });
-
   it("returns null for non-git directory", () => {
     const dir = makeTmpDir();
     const result = resolveRepoFromPath(dir);
