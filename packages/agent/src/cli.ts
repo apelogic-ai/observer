@@ -257,6 +257,7 @@ async function scanAction(opts: ScanOpts): Promise<void> {
         developer: shipper.developer,
         machine: shipper.machine,
         extraRepos: Object.keys(config.git.repos).length > 0 ? config.git.repos : undefined,
+        onlySelf: config.git.onlySelf,
       });
       if (gitCount > 0) {
         console.log(`Git: ${gitCount} event(s) collected`);

@@ -29,6 +29,10 @@ export interface GitScanOptions {
   machine: string;
   /** Extra repos from config: project → paths */
   extraRepos?: Record<string, string[]>;
+  /** When true (default), drop commits not authored by `developer` so
+   *  shared-repo teammates' commits don't fill the dashboard. Match is
+   *  case-insensitive against author name and authorEmail. */
+  onlySelf?: boolean;
 }
 
 /** @internal — exported for tests. */
@@ -215,6 +219,24 @@ export function getSessionWindows(outputDir: string, date: string, project: stri
  * If a commit isn't already agent-attributed (via Co-Authored-By),
  * check if it falls within any agent session window for the same project.
  */
+/**
+ * Drop git events whose author/authorEmail doesn't match the configured
+ * developer. Case-insensitive; matches if either field matches OR contains
+ * the developer string (so "Leonid Belyaev" matches author "Leonid Belyaev"
+ * and email "lbelyaev@example.com" matches "lbelyaev@example.com" alike).
+ *
+ * @internal — exported for tests.
+ */
+export function filterByAuthor(events: GitEvent[], developer: string): GitEvent[] {
+  if (!developer) return events;
+  const dev = developer.toLowerCase();
+  return events.filter((e) => {
+    const name  = (e.author ?? "").toLowerCase();
+    const email = (e.authorEmail ?? "").toLowerCase();
+    return name === dev || email === dev || name.includes(dev) || email.includes(dev);
+  });
+}
+
 /** @internal — exported for tests. */
 export function attributeFromSessions(events: GitEvent[], sessions: SessionWindow[]): void {
   if (sessions.length === 0) return;
@@ -271,8 +293,9 @@ export function scanGitEvents(opts: GitScanOptions): number {
 
     // Collect day by day from startDate through today
     let currentDate = startDate;
+    const onlySelf = opts.onlySelf !== false; // default true
     while (currentDate <= today) {
-      const events = collectCommits({
+      const allEvents = collectCommits({
         repoPath: localPath,
         since: currentDate,
         until: nextDay(currentDate),
@@ -281,6 +304,10 @@ export function scanGitEvents(opts: GitScanOptions): number {
         developer: opts.developer,
         machine: opts.machine,
       });
+
+      // Drop teammates' commits (they live on disk in the same repo, but
+      // they're not OUR activity). Toggle off via config.git.onlySelf=false.
+      const events = onlySelf ? filterByAuthor(allEvents, opts.developer) : allEvents;
 
       if (events.length > 0) {
         // Enrich with session-based attribution (catches Codex, etc.)

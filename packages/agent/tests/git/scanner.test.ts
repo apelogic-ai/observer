@@ -6,6 +6,7 @@ import {
   discoverActiveRepos,
   getSessionWindows,
   attributeFromSessions,
+  filterByAuthor,
   type SessionWindow,
 } from "../../src/git/scanner";
 import type { GitEvent } from "../../src/git/types";
@@ -194,5 +195,66 @@ describe("attributeFromSessions", () => {
     const events = [commit("2026-04-15T10:15:00Z")];
     attributeFromSessions(events, []);
     expect(events[0].agentAuthored).toBe(false);
+  });
+});
+
+// ── filterByAuthor ─────────────────────────────────────────────────
+
+describe("filterByAuthor", () => {
+  function ev(author: string | null, email: string | null): GitEvent {
+    return {
+      id: "x", eventType: "commit", timestamp: "2026-04-15T10:00:00Z",
+      project: "p", repo: "owner/name", branch: "main",
+      developer: "x", machine: "y", commitSha: "deadbeef",
+      filesChanged: 0, insertions: 0, deletions: 0,
+      agentAuthored: false, agentName: null,
+      author, authorEmail: email,
+    } as unknown as GitEvent;
+  }
+
+  it("keeps commits matching the developer email exactly", () => {
+    const events = [
+      ev("Me", "me@example.com"),
+      ev("Other", "other@example.com"),
+    ];
+    const kept = filterByAuthor(events, "me@example.com");
+    expect(kept.length).toBe(1);
+    expect(kept[0].author).toBe("Me");
+  });
+
+  it("matches case-insensitively", () => {
+    const events = [ev("Me", "Me@Example.COM")];
+    expect(filterByAuthor(events, "ME@EXAMPLE.com").length).toBe(1);
+  });
+
+  it("matches by author name when developer isn't an email", () => {
+    const events = [
+      ev("Leonid Belyaev", null),
+      ev("Nicholas Pettas", null),
+    ];
+    const kept = filterByAuthor(events, "Leonid Belyaev");
+    expect(kept.length).toBe(1);
+    expect(kept[0].author).toBe("Leonid Belyaev");
+  });
+
+  it("matches partial substrings (e.g. 'lbeliaev' in author or email)", () => {
+    const events = [
+      ev("Leonid Belyaev", "lbelyaev@example.com"),
+      ev("Other Person", "other@example.com"),
+    ];
+    expect(filterByAuthor(events, "lbelyaev").length).toBe(1);
+  });
+
+  it("returns the input unchanged when developer is empty", () => {
+    const events = [ev("Anyone", "anyone@example.com")];
+    expect(filterByAuthor(events, "").length).toBe(1);
+  });
+
+  it("drops everything when no commit matches", () => {
+    const events = [
+      ev("A", "a@x.com"),
+      ev("B", "b@x.com"),
+    ];
+    expect(filterByAuthor(events, "nobody@nowhere").length).toBe(0);
   });
 });

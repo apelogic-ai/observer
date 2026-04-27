@@ -44,6 +44,10 @@ export interface ObserverConfig {
     /** Extra repo paths to scan, keyed by project name.
      *  e.g. { "db-mcp": ["/Users/dev/observer"] } */
     repos: Record<string, string[]>;
+    /** When true, only collect commits authored by the configured developer
+     *  (matched against author name + email). Prevents your dashboard from
+     *  filling with teammates' commits in shared repos. Default true. */
+    onlySelf: boolean;
   };
   privacy: {
     excludeProjects: string[];
@@ -72,6 +76,7 @@ export const DEFAULT_CONFIG: ObserverConfig = {
   git: {
     enabled: true,
     repos: {},
+    onlySelf: true,
   },
   privacy: {
     excludeProjects: [],
@@ -148,6 +153,9 @@ export function loadConfig(configPath: string): ObserverConfig {
         ? Boolean(rawGit.enabled)
         : DEFAULT_CONFIG.git.enabled,
       repos: (rawGit.repos as Record<string, string[]>) ?? DEFAULT_CONFIG.git.repos,
+      onlySelf: rawGit.onlySelf !== undefined
+        ? Boolean(rawGit.onlySelf)
+        : DEFAULT_CONFIG.git.onlySelf,
     },
     privacy: {
       excludeProjects: Array.isArray(rawPrivacy.excludeProjects)

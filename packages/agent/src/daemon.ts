@@ -101,6 +101,7 @@ export class Daemon {
           developer: this.shipper.developer,
           machine: this.shipper.machine,
           extraRepos,
+          onlySelf: config.git.onlySelf,
         });
         if (gitCount > 0) {
           this.progress(`Git: ${gitCount} event(s) collected`);

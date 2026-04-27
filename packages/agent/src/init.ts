@@ -74,6 +74,9 @@ ${answers.apiKey ? `  apiKey: ${answers.apiKey}` : "  # apiKey: null (using Ed25
 git:
   enabled: true
   repos: {}
+  # Only collect commits authored by ${answers.developer}. Set to false
+  # if you want teammates' commits in shared repos to show up too.
+  onlySelf: true
 
 privacy:
   excludeProjects: []
