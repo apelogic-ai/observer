@@ -71,6 +71,7 @@ export class Daemon {
               useLocalTime: this.config.useLocalTime,
               developer: this.shipper.developer,
               machine: this.shipper.machine,
+              project: source.project,
               stateDir: this.config.stateDir,
             });
             if (count > 0) shipped++;

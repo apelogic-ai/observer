@@ -76,6 +76,69 @@ describe("parseCursorDb", () => {
     expect(userMsgs[0].sessionId).toBe("comp-1");
   });
 
+  it("stamps project on every entry from meta.project", () => {
+    // Regression: before this, parseCursorDb hardcoded project: "" and the
+    // dashboard's WHERE project = X filter dropped every Cursor entry.
+    insertComposer(dbPath, "comp-1", { createdAt: 1712592000000 });
+    insertBubble(dbPath, "comp-1", "bubble-1", { type: 1, text: "hello" });
+    insertBubble(dbPath, "comp-1", "bubble-2", { type: 2, text: "hi" });
+
+    const entries = parseCursorDb(dbPath, { project: "observer" });
+    expect(entries.length).toBeGreaterThan(0);
+    expect(entries.every((e) => e.project === "observer")).toBe(true);
+  });
+
+  it("falls back to empty project when meta.project is omitted", () => {
+    insertComposer(dbPath, "comp-1", { createdAt: 1712592000000 });
+    insertBubble(dbPath, "comp-1", "bubble-1", { type: 1, text: "hello" });
+    const entries = parseCursorDb(dbPath);
+    expect(entries[0].project).toBe("");
+  });
+
+  it("infers project from bubble tool-call paths when home dir matches", () => {
+    // The realistic shape: Cursor's globalStorage pools sessions across
+    // workspaces, so the per-composer project must come from the bubbles
+    // themselves. Plant tool-call paths under $HOME/<basename>/ — parser
+    // walks up looking for a .git or package.json marker, falls back to
+    // basename of the common prefix when none found.
+    const home = process.env.HOME ?? "";
+    insertComposer(dbPath, "comp-1", { createdAt: 1712592000000 });
+    insertBubble(dbPath, "comp-1", "bubble-1", {
+      type: 1,
+      text: "edit this file",
+      // Inference walks any path-shaped value found anywhere in the bubble
+      // (toolFormerData.params is one common spot, but we don't depend on
+      // a specific schema — collectPathsFromBubble walks the whole object).
+      toolFormerData: [{
+        toolName: "edit_file",
+        filePath: `${home}/dev/some-fake-proj-xyz/src/index.ts`,
+      }],
+    });
+    insertBubble(dbPath, "comp-1", "bubble-2", {
+      type: 2,
+      text: "done",
+      toolFormerData: [{
+        toolName: "read_file",
+        filePath: `${home}/dev/some-fake-proj-xyz/src/lib.ts`,
+      }],
+    });
+
+    // No meta.project — entries should still get inference.
+    const entries = parseCursorDb(dbPath);
+    expect(entries.length).toBeGreaterThan(0);
+    expect(entries.every((e) => e.project === "some-fake-proj-xyz")).toBe(true);
+  });
+
+  it("respects meta.project when bubbles have no inferable paths", () => {
+    insertComposer(dbPath, "comp-1", { createdAt: 1712592000000 });
+    insertBubble(dbPath, "comp-1", "bubble-1", {
+      type: 1,
+      text: "just chatting, no tool calls",
+    });
+    const entries = parseCursorDb(dbPath, { project: "fallback-proj" });
+    expect(entries[0].project).toBe("fallback-proj");
+  });
+
   it("parses an assistant message", () => {
     insertComposer(dbPath, "comp-1", { createdAt: 1712592000000 });
     insertBubble(dbPath, "comp-1", "bubble-2", {

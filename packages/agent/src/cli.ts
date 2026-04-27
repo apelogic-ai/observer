@@ -205,6 +205,7 @@ async function scanAction(opts: ScanOpts): Promise<void> {
             useLocalTime: opts.localTime,
             developer: shipper.developer,
             machine: shipper.machine,
+            project: source.project,
             stateDir: opts.stateDir,
           });
           if (count > 0) {

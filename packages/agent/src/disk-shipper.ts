@@ -135,6 +135,10 @@ export interface CursorShipConfig {
   useLocalTime?: boolean;
   developer: string;
   machine: string;
+  /** Project label derived from the Cursor workspace.json. Required —
+   *  without it the dashboard's per-project filter drops every Cursor
+   *  entry (Cursor's state.vscdb has no project field of its own). */
+  project: string;
   stateDir: string;
 }
 
@@ -176,6 +180,7 @@ export function shipCursorEntries(dbPath: string, config: CursorShipConfig): num
   const allEntries = parseCursorDb(dbPath, {
     developer: config.developer,
     machine: config.machine,
+    project: config.project,
   });
 
   if (allEntries.length === 0) return 0;

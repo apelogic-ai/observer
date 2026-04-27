@@ -4,6 +4,9 @@
  */
 
 import { Database } from "bun:sqlite";
+import { existsSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
+import { homedir } from "node:os";
 import type { TraceEntry } from "../types";
 
 function truncate(s: string, max: number): string {
@@ -25,6 +28,94 @@ const TOOL_NAME_MAP: Record<string, string> = {
 function normalizeToolName(raw: string): string {
   if (raw.startsWith("mcp__")) return raw.replace(/__/g, ":");
   return TOOL_NAME_MAP[raw] ?? raw;
+}
+
+/**
+ * Infer a project name for a Cursor composer from the file paths its tool
+ * calls touched. Cursor's globalStorage state.vscdb has no per-conversation
+ * workspace tag, but bubble payloads contain `toolFormerData.params.targetFile`
+ * / `targetDirectory` / `effectiveUri` / `path`, which give us the actual
+ * working directory.
+ *
+ * Returns the basename of the nearest containing repo (one with a .git/ or
+ * package.json), or null when there are no usable paths (pure-chat sessions
+ * or paths outside the user's home).
+ */
+function inferProjectFromBubbles(bubbleJsonValues: string[]): string | null {
+  const home = homedir();
+  const paths: string[] = [];
+
+  for (const raw of bubbleJsonValues) {
+    let bubble: unknown;
+    try { bubble = JSON.parse(raw); } catch { continue; }
+    collectPathsFromBubble(bubble, paths, home);
+    if (paths.length > 200) break; // bounded — early exit on long sessions
+  }
+  if (paths.length === 0) return null;
+
+  const common = longestCommonPathPrefix(paths);
+  if (!common || !common.startsWith(home)) return null;
+
+  // First pass: walk upward looking for a real project root marker (.git or
+  // package.json). Catches the typical case `~/dev/<repo>/{src,packages,...}`.
+  let dir = common;
+  for (let i = 0; i < 20; i++) {
+    if (dir === "/" || dir === home) break;
+    if (existsSync(join(dir, ".git")) || existsSync(join(dir, "package.json"))) {
+      return basename(dir);
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+
+  // Fallback: parse the path relative to $HOME, skipping known "category"
+  // dirs the user keeps projects under. So `~/dev/foo/src/x.ts` → "foo",
+  // `~/projects/foo/x.ts` → "foo", `~/foo/x.ts` → "foo".
+  const CATEGORY_DIRS = new Set(["dev", "src", "projects", "work", "code", "Code", "repos", "git"]);
+  const rel = common.slice(home.length).replace(/^\/+/, "");
+  if (!rel) return null;
+  const segments = rel.split("/").filter(Boolean);
+  if (segments.length === 0) return null;
+  const idx = CATEGORY_DIRS.has(segments[0]) ? 1 : 0;
+  return segments[idx] ?? null;
+}
+
+function collectPathsFromBubble(node: unknown, out: string[], home: string): void {
+  if (typeof node === "string") {
+    if (node.startsWith(home)) out.push(node);
+    else if (node.startsWith("file://")) {
+      const p = decodeURIComponent(node.slice(7));
+      if (p.startsWith(home)) out.push(p);
+    }
+    return;
+  }
+  if (Array.isArray(node)) {
+    for (const v of node) collectPathsFromBubble(v, out, home);
+    return;
+  }
+  if (node && typeof node === "object") {
+    for (const v of Object.values(node)) collectPathsFromBubble(v, out, home);
+  }
+}
+
+function longestCommonPathPrefix(paths: string[]): string | null {
+  if (paths.length === 0) return null;
+  const split = paths.map((p) => p.split("/"));
+  const first = split[0];
+  let i = 0;
+  outer: for (; i < first.length; i++) {
+    const seg = first[i];
+    for (const s of split) {
+      if (s[i] !== seg) break outer;
+    }
+  }
+  // Drop a trailing partial filename segment (i.e. something with a "."),
+  // since we're looking for a directory ancestor not a file.
+  while (i > 0 && first[i - 1].includes(".")) i--;
+  if (i === 0) return null;
+  const result = first.slice(0, i).join("/");
+  return result || null;
 }
 
 const EMPTY_TRACE: Omit<TraceEntry, "id" | "timestamp" | "agent" | "sessionId" | "entryType" | "role" | "developer" | "machine" | "project"> = {
@@ -60,10 +151,15 @@ interface BubbleData {
 
 /**
  * Parse a Cursor state.vscdb file into TraceEntry array.
+ *
+ * `meta.project` is required for the dashboard's per-project filter to find
+ * these entries — Cursor's state.vscdb has no project field of its own, so
+ * the caller (which knows the workspace via discoverCursor's resolved
+ * workspace.json) has to supply it.
  */
 export function parseCursorDb(
   dbPath: string,
-  meta?: { developer?: string; machine?: string },
+  meta?: { developer?: string; machine?: string; project?: string },
 ): TraceEntry[] {
   const db = new Database(dbPath, { readonly: true });
   const entries: TraceEntry[] = [];
@@ -91,6 +187,19 @@ export function parseCursorDb(
       if (firstModel) model = firstModel;
     }
 
+    const bubbleRows = db
+      .prepare("SELECT key, value FROM cursorDiskKV WHERE key LIKE ?")
+      .all(`bubbleId:${sessionId}:%`) as { key: string; value: string }[];
+
+    // Per-composer project: prefer the project inferred from the bubbles'
+    // tool calls (file paths under the user's home dir → nearest containing
+    // git repo) over the fallback meta.project. Cursor's globalStorage DB
+    // pools sessions across ALL workspaces with no per-conversation tag,
+    // so without this, every global-storage entry gets the same flat
+    // "global" label and the dashboard's per-project filter is useless.
+    const inferredProject = inferProjectFromBubbles(bubbleRows.map((b) => b.value));
+    const project = inferredProject ?? meta?.project ?? "";
+
     const base = {
       ...EMPTY_TRACE,
       timestamp,
@@ -99,12 +208,8 @@ export function parseCursorDb(
       model,
       developer: meta?.developer ?? "",
       machine: meta?.machine ?? "",
-      project: "",
+      project,
     };
-
-    const bubbleRows = db
-      .prepare("SELECT key, value FROM cursorDiskKV WHERE key LIKE ?")
-      .all(`bubbleId:${sessionId}:%`) as { key: string; value: string }[];
 
     for (const bubbleRow of bubbleRows) {
       let bubble: BubbleData;
