@@ -47,6 +47,15 @@ jobs:
       - name: Install workspace dependencies
         run: bun install
 
+      # The agent imports @observer/dashboard/runtime, which transitively
+      # imports `embed.ts` (which references dist/out.tar +
+      # dist/build-info.json via `with { type: "file" }`). Those don't exist
+      # on a fresh checkout, so TypeScript can't resolve them and the agent
+      # typecheck blows up. Drop in empty stubs before any typecheck step;
+      # they get overwritten when the real dashboard build runs.
+      - name: Stub dashboard build artifacts (for typecheck)
+        run: bun packages/dashboard/scripts/ensure-stubs.ts
+
       # Quality gates — anything green on CI must stay green at release.
       # Without these the release path could ship regressions outside the
       # agent test suite.

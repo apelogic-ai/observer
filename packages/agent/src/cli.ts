@@ -822,10 +822,15 @@ async function updateAction(): Promise<void> {
 
 const program = new Command();
 
+// Read the bundled package version at build time — bun --compile inlines the
+// JSON. Was previously hardcoded to "0.1.0", which made `observer --version`
+// lie about every release.
+const pkg = require("../package.json") as { version: string };
+
 program
   .name("observer")
   .description("Local agent for AI trace collection and shipping")
-  .version("0.1.0")
+  .version(pkg.version)
   .action(defaultAction);
 
 program
