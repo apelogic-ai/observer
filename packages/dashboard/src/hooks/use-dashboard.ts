@@ -185,7 +185,10 @@ export function useSessionCommits(sessionId: string | null) {
   const [commits, setCommits] = useState<GitCommitRow[] | null>(null);
 
   useEffect(() => {
-    if (!sessionId) { setCommits(null); return; }
+    if (!sessionId) return;          // can't pre-clear via setState here:
+                                     // react-hooks/set-state-in-effect bans
+                                     // synchronous state updates from
+                                     // effects (cascading-renders risk).
     let cancelled = false;
     fetchJson<GitCommitRow[]>(`/api/session-commits?id=${encodeURIComponent(sessionId)}`)
       .then((d) => { if (!cancelled) setCommits(d); })
@@ -193,7 +196,10 @@ export function useSessionCommits(sessionId: string | null) {
     return () => { cancelled = true; };
   }, [sessionId]);
 
-  return commits;
+  // Derive null when no sessionId (instead of clearing inside the effect).
+  // commits may still hold a previous session's data during the transition,
+  // so gate on sessionId here.
+  return sessionId ? commits : null;
 }
 
 export function useHeatmap(filters: DashboardFilters) {

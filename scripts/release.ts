@@ -121,12 +121,28 @@ run("bun run typecheck", { cwd: resolve(repoRoot, "packages/dashboard") });
 if (!skipTests) {
   section("Tests");
   run("bun run test", { cwd: resolve(repoRoot, "packages/agent") });
+  run("bun run test", { cwd: resolve(repoRoot, "packages/dashboard") });
 } else {
   console.log("\n(skipping `bun run test` — --skip-tests; CI still runs them)");
 }
 
+// Lint mirrors what the release CI job runs. Without this gate, an
+// ESLint failure (e.g. a new react-hooks rule tripping on a hook we
+// just added) is only caught after the tag is already pushed —
+// happened with v0.1.13 which had to be re-cut.
+section("Dashboard lint");
+run("bun run lint", { cwd: resolve(repoRoot, "packages/dashboard") });
+
 section("Dashboard build");
 run("bun run build", { cwd: resolve(repoRoot, "packages/dashboard") });
+
+// Playwright e2e is not in CI yet (no system browser pre-installed on
+// runners) but the local fixture/seed is fast and deterministic. Skip
+// only when the developer asked for --skip-tests.
+if (!skipTests) {
+  section("Dashboard e2e (Playwright)");
+  run("bunx playwright test", { cwd: resolve(repoRoot, "packages/dashboard") });
+}
 
 section("Binary compile smoke");
 const smokeBin = "/tmp/observer-release-smoke";

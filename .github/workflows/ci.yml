@@ -114,6 +114,40 @@ jobs:
           ./observer-${{ matrix.target }} --version
           ./observer-${{ matrix.target }} dashboard --help | head -5
 
+  dashboard-e2e:
+    name: Dashboard e2e (Playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Catches UI regressions (silent toolbar handlers, broken heatmap,
+    # session ↔ commit linkage drift) that pure unit tests miss.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.21"
+      - name: Install workspace dependencies
+        run: bun install
+      - name: Install Playwright browser
+        working-directory: packages/dashboard
+        run: bunx playwright install --with-deps chromium
+      - name: Build dashboard
+        working-directory: packages/dashboard
+        run: bun run build
+      - name: Run Playwright tests
+        working-directory: packages/dashboard
+        env:
+          CI: "1"
+        run: bunx playwright test
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            packages/dashboard/test-results
+            packages/dashboard/playwright-report
+          retention-days: 7
+
   api-tests:
     name: API (tests + typecheck)
     runs-on: ubuntu-latest
