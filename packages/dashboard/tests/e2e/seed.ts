@@ -42,9 +42,18 @@ function entry(o: Partial<Entry> & { id: string; timestamp: string; agent: strin
   };
 }
 
-function writeJsonl(path: string, rows: Entry[]) {
-  mkdirSync(join(path, ".."), { recursive: true });
-  writeFileSync(path, rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
+function writeJsonl(path: string, rows: Entry[] | Record<string, unknown>[]) {
+  const dir = join(path, "..");
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path, rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
+    const exists = existsSync(path);
+    const sz = exists ? statSync(path).size : -1;
+    console.log(`[seed] wrote ${path} (${rows.length} rows, ${sz}B, exists=${exists})`);
+  } catch (err) {
+    console.log(`[seed] FAILED ${path}: ${(err as Error).message}`);
+    throw err;
+  }
 }
 
 export default async function globalSetup() {
