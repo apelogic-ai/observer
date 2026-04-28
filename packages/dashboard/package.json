@@ -16,6 +16,7 @@
     "compile": "bun run build && bun build --compile server/compiled-entry.ts --outfile dist/observer-dashboard",
     "typecheck": "bun scripts/ensure-stubs.ts && bunx tsc --noEmit && bunx tsc --noEmit -p tsconfig.server.json",
     "test": "bun test tests/server",
+    "test:e2e": "playwright test",
     "lint": "eslint"
   },
   "dependencies": {
@@ -33,6 +34,7 @@
     "yaml": "^2.7.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.59.1",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",

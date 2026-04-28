@@ -704,6 +704,67 @@ function logsAction(opts: { stateDir: string; lines: string }): void {
   console.log(tail);
 }
 
+// --- Cursor usage ---
+
+interface CursorUsageOptions {
+  days: string;
+  force?: boolean;
+  stateDir: string;
+}
+
+async function cursorUsageAction(opts: CursorUsageOptions): Promise<void> {
+  const { loadConfig } = await import("./config");
+  const { fetchAndWriteDailySidecar, readCursorAuth, readCursorUsageSidecar }
+    = await import("./cursor-api");
+
+  const config = loadConfig(join(opts.stateDir, "config.yaml"));
+  const outputDir = config.ship.localOutputDir
+    ?? join(homedir(), ".observer", "traces", "normalized");
+
+  const auth = readCursorAuth();
+  if (!auth) {
+    console.error("Could not read Cursor auth token.");
+    console.error("Make sure Cursor is installed and you're signed in,");
+    console.error("then quit and reopen Cursor so the token gets refreshed.");
+    process.exit(1);
+  }
+
+  const days = Math.max(1, parseInt(opts.days, 10) || 7);
+  const today = new Date();
+  const dates: string[] = [];
+  for (let i = 0; i < days; i++) {
+    const d = new Date(today);
+    d.setUTCDate(d.getUTCDate() - i);
+    dates.push(d.toISOString().slice(0, 10));
+  }
+  dates.reverse();
+
+  console.log(`Fetching Cursor usage for last ${days} day(s)…`);
+  let written = 0, skipped = 0, failed = 0;
+  for (const date of dates) {
+    const r = await fetchAndWriteDailySidecar(outputDir, date, {
+      auth,
+      force: opts.force === true,
+    });
+    if (r.written) {
+      const s = readCursorUsageSidecar(outputDir, date);
+      const t = s?.totals;
+      console.log(`  ${date}  in=${t?.input ?? 0}  out=${t?.output ?? 0}  cacheR=${t?.cacheRead ?? 0}  ${(t?.costCents ?? 0).toFixed(2)}¢`);
+      written++;
+    } else if (r.reason === "no-data") {
+      console.log(`  ${date}  (no usage)`);
+      skipped++;
+    } else if (r.reason === "stale-skipped") {
+      console.log(`  ${date}  (cached, use --force to refresh)`);
+      skipped++;
+    } else {
+      console.log(`  ${date}  (${r.reason ?? "skipped"})`);
+      failed++;
+    }
+  }
+  console.log(`\n${written} sidecar(s) written, ${skipped} skipped, ${failed} failed.`);
+}
+
 // --- Update ---
 
 async function updateAction(): Promise<void> {
@@ -916,6 +977,14 @@ program
   .option("--state-dir <path>", "State directory", DEFAULT_STATE_DIR)
   .option("-n, --lines <n>", "Number of lines", "50")
   .action(logsAction);
+
+program
+  .command("cursor-usage")
+  .description("Fetch real Cursor token usage from Cursor's API and write per-day sidecars")
+  .option("-n, --days <n>", "Number of recent days to fetch", "7")
+  .option("--force", "Re-fetch even if a recent sidecar exists")
+  .option("--state-dir <path>", "State directory", DEFAULT_STATE_DIR)
+  .action(cursorUsageAction);
 
 program
   .command("update")

@@ -26,3 +26,17 @@ export const CHART_PALETTE = [
 export function agentColor(agent: string): string {
   return AGENT_COLORS[agent] ?? "#8b949e";
 }
+
+// Shared Recharts tooltip styling. Recharts defaults the item text to the
+// series fill color, which collapses to dark-on-dark on our muted palette
+// (e.g. cursor purple on the dashboard's near-black panel). Force readable
+// white for both label and item rows.
+export const TOOLTIP_CONTENT_STYLE = {
+  background: "#171717",
+  border: "1px solid rgba(255,255,255,0.1)",
+  borderRadius: 8,
+  fontSize: 12,
+  color: "#fff",
+} as const;
+export const TOOLTIP_LABEL_STYLE = { color: "#fff" } as const;
+export const TOOLTIP_ITEM_STYLE = { color: "#fff" } as const;

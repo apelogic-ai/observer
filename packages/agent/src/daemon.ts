@@ -8,6 +8,7 @@ import { Shipper, type ShippedBatch } from "./shipper";
 import { shipCursorEntries, type CursorShipConfig } from "./disk-shipper";
 import { scanGitEvents } from "./git/scanner";
 import { loadConfig } from "./config";
+import { fetchAndWriteDailySidecar, readCursorAuth } from "./cursor-api";
 import { join } from "node:path";
 import type { DisclosureLevel } from "./types";
 
@@ -89,10 +90,16 @@ export class Daemon {
       this.progress(`Shipped ${shipped} batch(es) from ${sources.length} source(s)`);
     }
 
+    // Load config once for both git collection and cursor usage fetch
+    let config: ReturnType<typeof loadConfig> | null = null;
+    if (this.config.localOutputDir) {
+      try { config = loadConfig(join(this.config.stateDir, "config.yaml")); }
+      catch { config = null; }
+    }
+
     // Git event collection
-    if (this.config.collectGit !== false && this.config.localOutputDir) {
+    if (this.config.collectGit !== false && this.config.localOutputDir && config) {
       try {
-        const config = loadConfig(join(this.config.stateDir, "config.yaml"));
         const extraRepos = Object.keys(config.git.repos).length > 0 ? config.git.repos : undefined;
         const gitCount = scanGitEvents({
           outputDir: this.config.localOutputDir,
@@ -108,6 +115,26 @@ export class Daemon {
         }
       } catch {
         // Git collection is best-effort — don't crash the daemon
+      }
+    }
+
+    // Cursor usage augmentation (opt-in). Cursor doesn't store consumed
+    // tokens locally; this calls their dashboard API and writes a
+    // <date>/cursor/_usage.json sidecar. Today + yesterday only — older
+    // days are stable and only need a backfill via `observer cursor-usage`.
+    if (config?.cursor.fetchUsage && this.config.localOutputDir) {
+      const auth = readCursorAuth();
+      if (auth) {
+        const today = todayUtc();
+        const yesterday = priorDay(today);
+        for (const date of [yesterday, today]) {
+          try {
+            const r = await fetchAndWriteDailySidecar(this.config.localOutputDir, date, { auth });
+            if (r.written) this.progress(`Cursor usage: refreshed ${date}`);
+          } catch {
+            // best-effort
+          }
+        }
       }
     }
   }
@@ -132,4 +159,14 @@ export class Daemon {
     // Keep alive
     await new Promise(() => {});
   }
+}
+
+function todayUtc(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function priorDay(date: string): string {
+  const d = new Date(date + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
 }

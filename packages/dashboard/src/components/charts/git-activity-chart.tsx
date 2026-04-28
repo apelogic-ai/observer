@@ -4,7 +4,7 @@ import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend,
 } from "recharts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { GIT_COLORS } from "@/lib/colors";
+import { GIT_COLORS, TOOLTIP_CONTENT_STYLE, TOOLTIP_ITEM_STYLE, TOOLTIP_LABEL_STYLE } from "@/lib/colors";
 import { formatDate, formatNumber } from "@/lib/format";
 import type { GitTimelineRow } from "@/lib/queries";
 
@@ -37,12 +37,9 @@ export function GitActivityChart({ data }: Props) {
                 width={40}
               />
               <Tooltip
-                contentStyle={{
-                  background: "#171717",
-                  border: "1px solid rgba(255,255,255,0.1)",
-                  borderRadius: 8,
-                  fontSize: 12,
-                }}
+                contentStyle={TOOLTIP_CONTENT_STYLE}
+                labelStyle={TOOLTIP_LABEL_STYLE}
+                itemStyle={TOOLTIP_ITEM_STYLE}
                 labelFormatter={(v) => formatDate(String(v))}
               />
               <Legend wrapperStyle={{ fontSize: 12 }} />
@@ -88,12 +85,9 @@ export function GitActivityChart({ data }: Props) {
                 tickFormatter={(v) => formatNumber(v)}
               />
               <Tooltip
-                contentStyle={{
-                  background: "#171717",
-                  border: "1px solid rgba(255,255,255,0.1)",
-                  borderRadius: 8,
-                  fontSize: 12,
-                }}
+                contentStyle={TOOLTIP_CONTENT_STYLE}
+                labelStyle={TOOLTIP_LABEL_STYLE}
+                itemStyle={TOOLTIP_ITEM_STYLE}
                 labelFormatter={(v) => formatDate(String(v))}
                 formatter={(value) => formatNumber(Number(value))}
               />

@@ -10,7 +10,9 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import { useFilters } from "@/hooks/use-filters";
-import { formatDateTime, formatNumber } from "@/lib/format";
+import { formatDateTime, formatDuration, formatDurationMs, formatNumber } from "@/lib/format";
+import { TOKEN_COLORS } from "@/lib/colors";
+import { ResponsiveContainer, BarChart, Bar, Tooltip, XAxis } from "recharts";
 import type { SessionDetail } from "@/lib/queries";
 
 const AGENT_VARIANT: Record<string, string> = {
@@ -78,22 +80,127 @@ export default function SessionPage() {
       {session && (
         <>
           {/* Session header */}
-          <div className="flex items-center gap-3 flex-wrap">
-            <Badge variant="outline" className={AGENT_VARIANT[session.agent] ?? ""}>
-              {session.agent.replace("_", " ")}
-            </Badge>
-            <Link
-              href={`/project?name=${encodeURIComponent(session.project)}`}
-              className="text-sm text-muted-foreground hover:text-blue-400 hover:underline"
-            >
-              {session.project}
-            </Link>
-            <span className="text-sm text-muted-foreground">
-              {formatDateTime(session.started)} — {formatDateTime(session.ended)}
-            </span>
-            <Badge variant="outline" className="text-xs">
-              {session.entries.length} entries
-            </Badge>
+          <div className="space-y-3">
+            <div className="flex items-center gap-3 flex-wrap">
+              <Badge variant="outline" className={AGENT_VARIANT[session.agent] ?? ""}>
+                {session.agent.replace("_", " ")}
+              </Badge>
+              <Link
+                href={`/project?name=${encodeURIComponent(session.project)}`}
+                className="text-sm text-muted-foreground hover:text-blue-400 hover:underline"
+              >
+                {session.project}
+              </Link>
+              <span className="text-sm text-muted-foreground">
+                {formatDateTime(session.started)} — {formatDateTime(session.ended)}
+              </span>
+              <span className="text-sm text-muted-foreground">
+                · {formatDuration(session.started, session.ended)} wall
+              </span>
+              <span
+                className="text-sm text-muted-foreground"
+                title="Wall time minus consecutive-entry gaps over 5 min — strips out idle time so a 27-hour session that was actually a few hours of work reads honestly."
+              >
+                · {formatDurationMs(session.active_ms)} active
+              </span>
+              <Badge variant="outline" className="text-xs">
+                {session.entries.length} entries shown
+              </Badge>
+            </div>
+
+            {/* Activity sparkline — entry count per ~60 wall-time buckets.
+                Shows when the work actually happened so the long wall span
+                doesn't suggest a continuous 27h grind. */}
+            {session.activity.length > 0 && (
+              <div className="rounded-lg border border-border p-3">
+                <p className="text-xs text-muted-foreground uppercase tracking-wider mb-1">
+                  Activity (entries per bucket)
+                </p>
+                <ResponsiveContainer width="100%" height={60}>
+                  <BarChart data={session.activity} margin={{ top: 4, right: 4, bottom: 4, left: 4 }}>
+                    <XAxis dataKey="t" hide />
+                    <Tooltip
+                      contentStyle={{ background: "#171717", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12, color: "#fff" }}
+                      labelStyle={{ color: "#fff" }}
+                      itemStyle={{ color: "#fff" }}
+                      labelFormatter={(v) => new Date(Number(v)).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false })}
+                      formatter={(v) => [formatNumber(Number(v)), "entries"]}
+                    />
+                    <Bar dataKey="count" fill="#58a6ff" />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 rounded-lg border border-border p-4">
+              <div>
+                <p className="text-xs text-muted-foreground uppercase tracking-wider">Input</p>
+                <p className="text-xl font-bold tabular-nums" style={{ color: TOKEN_COLORS.input }}>
+                  {formatNumber(session.input_tokens)}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground uppercase tracking-wider">Output</p>
+                <p className="text-xl font-bold tabular-nums" style={{ color: TOKEN_COLORS.output }}>
+                  {formatNumber(session.output_tokens)}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground uppercase tracking-wider">Cache Read</p>
+                <p className="text-xl font-bold tabular-nums" style={{ color: TOKEN_COLORS.cache_read }}>
+                  {formatNumber(session.cache_read)}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground uppercase tracking-wider">Cache Write</p>
+                <p className="text-xl font-bold tabular-nums" style={{ color: TOKEN_COLORS.cache_creation }}>
+                  {formatNumber(session.cache_creation)}
+                </p>
+              </div>
+            </div>
+            {(() => {
+              const insertions = session.commits.reduce((s, c) => s + c.insertions, 0);
+              const deletions  = session.commits.reduce((s, c) => s + c.deletions, 0);
+              const loc = insertions + deletions;
+              // Use input + output only (NOT cache_read). cache_read scales
+              // with conversation length — every turn re-reads the prefix
+              // — and would inflate this metric to 100K+/LoC for any long
+              // session regardless of how much code was actually shipped.
+              // input+output is the marginal "new token" work per turn,
+              // which is what tokens/LoC should reflect.
+              const newTokens = session.input_tokens + session.output_tokens;
+              const tokensPerLoc = loc > 0 ? newTokens / loc : null;
+              if (session.commits.length === 0) return null;
+              return (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 rounded-lg border border-border p-4">
+                  <div>
+                    <p className="text-xs text-muted-foreground uppercase tracking-wider">Lines Added</p>
+                    <p className="text-xl font-bold tabular-nums text-green-400">
+                      +{formatNumber(insertions)}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground uppercase tracking-wider">Lines Deleted</p>
+                    <p className="text-xl font-bold tabular-nums text-red-400">
+                      -{formatNumber(deletions)}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground uppercase tracking-wider">Net LoC Changed</p>
+                    <p className="text-xl font-bold tabular-nums">
+                      {formatNumber(loc)}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground uppercase tracking-wider" title="(input + output) tokens divided by total lines changed. Cache reads are excluded since they scale with turn count, not with shipped code. Trend indicator only — not a quality measure.">
+                      Tokens / LoC
+                    </p>
+                    <p className="text-xl font-bold tabular-nums">
+                      {tokensPerLoc !== null ? formatNumber(Math.round(tokensPerLoc)) : "—"}
+                    </p>
+                  </div>
+                </div>
+              );
+            })()}
           </div>
 
           {/* Tool summary */}

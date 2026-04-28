@@ -5,7 +5,7 @@ import {
   BarChart, Bar,
 } from "recharts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { TOKEN_COLORS } from "@/lib/colors";
+import { TOKEN_COLORS, TOOLTIP_CONTENT_STYLE, TOOLTIP_ITEM_STYLE, TOOLTIP_LABEL_STYLE } from "@/lib/colors";
 import { formatDate, formatNumber } from "@/lib/format";
 import type { TokenRow } from "@/lib/queries";
 
@@ -31,12 +31,9 @@ function MiniArea({ data, dataKey, name, color }: {
           width={45}
         />
         <Tooltip
-          contentStyle={{
-            background: "#171717",
-            border: "1px solid rgba(255,255,255,0.1)",
-            borderRadius: 8,
-            fontSize: 12,
-          }}
+          contentStyle={TOOLTIP_CONTENT_STYLE}
+          labelStyle={TOOLTIP_LABEL_STYLE}
+          itemStyle={TOOLTIP_ITEM_STYLE}
           labelFormatter={(v) => formatDate(String(v))}
           formatter={(value) => [formatNumber(Number(value)), name]}
         />
@@ -110,12 +107,9 @@ export function TokenChart({ data }: Props) {
               <XAxis dataKey="date" hide />
               <YAxis hide />
               <Tooltip
-                contentStyle={{
-                  background: "#171717",
-                  border: "1px solid rgba(255,255,255,0.1)",
-                  borderRadius: 8,
-                  fontSize: 12,
-                }}
+                contentStyle={TOOLTIP_CONTENT_STYLE}
+                labelStyle={TOOLTIP_LABEL_STYLE}
+                itemStyle={TOOLTIP_ITEM_STYLE}
                 labelFormatter={(v) => formatDate(String(v))}
                 formatter={(value) => [formatNumber(Number(value)), "Cache Read"]}
               />
@@ -136,12 +130,9 @@ export function TokenChart({ data }: Props) {
               <XAxis dataKey="date" hide />
               <YAxis hide />
               <Tooltip
-                contentStyle={{
-                  background: "#171717",
-                  border: "1px solid rgba(255,255,255,0.1)",
-                  borderRadius: 8,
-                  fontSize: 12,
-                }}
+                contentStyle={TOOLTIP_CONTENT_STYLE}
+                labelStyle={TOOLTIP_LABEL_STYLE}
+                itemStyle={TOOLTIP_ITEM_STYLE}
                 labelFormatter={(v) => formatDate(String(v))}
                 formatter={(value) => [formatNumber(Number(value)), "Cache Write"]}
               />

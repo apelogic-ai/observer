@@ -15,6 +15,14 @@ export interface ActivityRow {
   date: string;
   agent: string;
   count: number;
+  total_tokens: number;
+}
+
+export interface HeatmapRow {
+  date: string;
+  project: string;
+  agent: string;
+  total_tokens: number;
 }
 
 export interface TokenRow {
@@ -37,6 +45,7 @@ export interface ProjectRow {
   entries: number;
   sessions: number;
   output_tokens: number;
+  total_tokens: number;
 }
 
 export interface ModelRow {
@@ -110,6 +119,7 @@ export interface GitCommitRow {
   deletions: number;
   agent_authored: boolean;
   agent_name: string | null;
+  session_id: string | null;
 }
 
 export interface CommitDetail extends GitCommitRow {
@@ -145,12 +155,32 @@ export interface SessionEntry {
   output_tokens: number | null;
 }
 
+export interface GitSessionRow {
+  session_id: string;
+  agent: string;
+  project: string;
+  started: string;
+  ended: string;
+  duration_ms: number;
+  entries: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read: number;
+  commits: GitCommitRow[];
+}
+
 export interface SessionDetail {
   session_id: string;
   agent: string;
   project: string;
   started: string;
   ended: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read: number;
+  cache_creation: number;
+  active_ms: number;
+  activity: { t: number; count: number }[];
   entries: SessionEntry[];
   tool_summary: { tool_name: string; count: number }[];
   commits: GitCommitRow[];

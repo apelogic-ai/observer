@@ -13,6 +13,7 @@ export interface Filters {
   project?: string;
   model?: string;
   tool?: string;
+  agent?: string;
   granularity?: "day" | "week" | "month";
 }
 
@@ -39,6 +40,7 @@ function where(f: Filters, extra?: string[]): string {
   if (f.project) conds.push(`project = '${esc(f.project)}'`);
   if (f.model)   conds.push(`model = '${esc(f.model)}'`);
   if (f.tool)    conds.push(`toolName = '${esc(f.tool)}'`);
+  if (f.agent)   conds.push(`agent = '${esc(f.agent)}'`);
   return `WHERE ${conds.join(" AND ")}`;
 }
 
@@ -47,6 +49,14 @@ const TU_INPUT  = `json_extract(tokenUsage, '$.input')`;
 const TU_OUTPUT = `json_extract(tokenUsage, '$.output')`;
 const TU_CACHE_R = `json_extract(tokenUsage, '$.cacheRead')`;
 const TU_CACHE_C = `json_extract(tokenUsage, '$.cacheCreation')`;
+
+/** All tokens the model processed: input + output + cache reads + cache
+ *  writes. Plain "input + output" undercounts caching agents by ~500x —
+ *  Claude Code routes ~99% of its prompt tokens through cacheRead, so its
+ *  raw input field is tiny while its actual model workload is huge.
+ *  Including cache reads/writes makes the cross-agent comparison fair:
+ *  every token here was shown to a model. */
+const TU_TOTAL = `(COALESCE(${TU_INPUT},0) + COALESCE(${TU_OUTPUT},0) + COALESCE(${TU_CACHE_R},0) + COALESCE(${TU_CACHE_C},0))`;
 
 // ── Stats ──────────────────────────────────────────────────────
 
@@ -84,6 +94,7 @@ export interface ActivityRow {
   date: string;
   agent: string;
   count: number;
+  total_tokens: number;
 }
 
 export async function getActivity(f: Filters = {}): Promise<ActivityRow[]> {
@@ -91,10 +102,38 @@ export async function getActivity(f: Filters = {}): Promise<ActivityRow[]> {
     SELECT
       ${dateTrunc(f)} AS date,
       agent,
-      COUNT(*) AS count
+      COUNT(*) AS count,
+      COALESCE(SUM(${TU_TOTAL}), 0) AS total_tokens
     FROM traces
     ${where(f)}
     GROUP BY date, agent
+    ORDER BY date
+  `);
+}
+
+// ── Activity heatmap (date × project × agent) ────────────────
+
+export interface HeatmapRow {
+  date: string;
+  project: string;
+  agent: string;
+  total_tokens: number;
+}
+
+/** Same filters and date granularity as the Activity Timeline; adds a
+ *  `project` dimension so the dashboard can render a date×project matrix
+ *  with per-cell agent breakdown. Drops null projects (rows we couldn't
+ *  attribute to a workspace). */
+export async function getHeatmap(f: Filters = {}): Promise<HeatmapRow[]> {
+  return query<HeatmapRow>(`
+    SELECT
+      ${dateTrunc(f)} AS date,
+      project,
+      agent,
+      COALESCE(SUM(${TU_TOTAL}), 0) AS total_tokens
+    FROM traces
+    ${where(f, ["project IS NOT NULL"])}
+    GROUP BY date, project, agent
     ORDER BY date
   `);
 }
@@ -171,6 +210,7 @@ export interface ProjectRow {
   entries: number;
   sessions: number;
   output_tokens: number;
+  total_tokens: number;
 }
 
 export async function getProjects(f: Filters = {}): Promise<ProjectRow[]> {
@@ -179,11 +219,12 @@ export async function getProjects(f: Filters = {}): Promise<ProjectRow[]> {
       project,
       COUNT(*) AS entries,
       COUNT(DISTINCT sessionId) AS sessions,
-      COALESCE(SUM(${TU_OUTPUT}), 0) AS output_tokens
+      COALESCE(SUM(${TU_OUTPUT}), 0) AS output_tokens,
+      COALESCE(SUM(${TU_TOTAL}), 0) AS total_tokens
     FROM traces
     ${where(f, ["project IS NOT NULL"])}
     GROUP BY project
-    ORDER BY entries DESC
+    ORDER BY total_tokens DESC
   `);
 }
 
@@ -200,11 +241,11 @@ export async function getModels(f: Filters = {}): Promise<ModelRow[]> {
     SELECT
       model,
       COUNT(*) AS count,
-      COALESCE(SUM(COALESCE(${TU_INPUT},0) + COALESCE(${TU_OUTPUT},0)), 0) AS total_tokens
+      COALESCE(SUM(${TU_TOTAL}), 0) AS total_tokens
     FROM traces
     ${where(f, ["model IS NOT NULL"])}
     GROUP BY model
-    ORDER BY count DESC
+    ORDER BY total_tokens DESC
   `);
 }
 
@@ -374,6 +415,16 @@ export async function getModelList(): Promise<string[]> {
   return rows.map((r) => r.model);
 }
 
+export async function getAgentList(): Promise<string[]> {
+  const rows = await query<{ agent: string }>(`
+    SELECT DISTINCT agent
+    FROM traces
+    WHERE agent IS NOT NULL
+    ORDER BY agent
+  `);
+  return rows.map((r) => r.agent);
+}
+
 // ── Git Events ──────────────────────────────────────────────────
 
 function gitWhere(f: Filters, extra?: string[]): string {
@@ -448,6 +499,7 @@ export interface GitCommitRow {
   deletions: number;
   agent_authored: boolean;
   agent_name: string | null;
+  session_id: string | null;
 }
 
 interface GitCommitRowRaw extends Omit<GitCommitRow, "agent_authored"> { agent_authored: number }
@@ -466,7 +518,8 @@ export async function getGitCommits(f: Filters = {}, limit = 50): Promise<GitCom
       COALESCE(insertions, 0) AS insertions,
       COALESCE(deletions, 0) AS deletions,
       COALESCE(agentAuthored, 0) AS agent_authored,
-      agentName AS agent_name
+      agentName AS agent_name,
+      sessionId AS session_id
     FROM git_events
     ${gitWhere(f, ["eventType = 'commit'"])}
     ORDER BY timestamp DESC
@@ -531,6 +584,127 @@ export async function getCommitDetail(sha: string): Promise<CommitDetail | null>
   };
 }
 
+/**
+ * Sibling commits for a given session: every commit that shares this
+ * sessionId, ordered chronologically. Used by the commit page to show
+ * "this commit is one of N produced by the same session" — without it
+ * the Agent Session card's whole-session totals (27h, 405M cache reads,
+ * etc.) read like per-commit numbers, which they aren't.
+ */
+export async function getSessionCommits(sessionId: string): Promise<GitCommitRow[]> {
+  const rows = await query<GitCommitRowRaw>(`
+    SELECT
+      commitSha          AS commit_sha,
+      timestamp,
+      project,
+      repo,
+      branch,
+      author,
+      message,
+      COALESCE(filesChanged, 0) AS files_changed,
+      COALESCE(insertions, 0)   AS insertions,
+      COALESCE(deletions, 0)    AS deletions,
+      COALESCE(agentAuthored, 0) AS agent_authored,
+      agentName                 AS agent_name,
+      sessionId                 AS session_id
+    FROM git_events
+    WHERE sessionId = '${esc(sessionId)}' AND eventType = 'commit'
+    ORDER BY timestamp ASC
+  `);
+  return rows.map((r) => ({ ...r, agent_authored: Boolean(r.agent_authored) }));
+}
+
+/**
+ * Sessions that produced ≥1 commit in the filtered window, with the
+ * session's total trace stats and the list of commits each one yielded.
+ * Powers the "By session" view on the overview page.
+ */
+export interface GitSessionRow {
+  session_id: string;
+  agent: string;
+  project: string;
+  started: string;
+  ended: string;
+  duration_ms: number;
+  entries: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read: number;
+  commits: GitCommitRow[];
+}
+
+export async function getGitSessions(f: Filters): Promise<GitSessionRow[]> {
+  // Find session_ids that produced commits in-filter.
+  const ids = await query<{ session_id: string }>(`
+    SELECT DISTINCT sessionId AS session_id
+    FROM git_events
+    ${gitWhere(f, ["eventType = 'commit'", "sessionId IS NOT NULL"])}
+  `);
+  if (ids.length === 0) return [];
+
+  const idList = ids.map((r) => `'${esc(r.session_id)}'`).join(",");
+  const meta = await query<{
+    session_id: string; agent: string; project: string;
+    started: string; ended: string;
+    entries: number;
+    input_tokens: number; output_tokens: number; cache_read: number;
+  }>(`
+    SELECT
+      sessionId AS session_id,
+      agent,
+      MAX(project) AS project,
+      MIN(timestamp) AS started,
+      MAX(timestamp) AS ended,
+      COUNT(*) AS entries,
+      COALESCE(SUM(${TU_INPUT}),  0) AS input_tokens,
+      COALESCE(SUM(${TU_OUTPUT}), 0) AS output_tokens,
+      COALESCE(SUM(${TU_CACHE_R}),0) AS cache_read
+    FROM traces
+    WHERE sessionId IN (${idList})
+    GROUP BY sessionId, agent
+  `);
+
+  const commitRows = await query<GitCommitRowRaw>(`
+    SELECT
+      sessionId AS session_id,
+      commitSha AS commit_sha,
+      timestamp,
+      project,
+      repo,
+      branch,
+      author,
+      message,
+      COALESCE(filesChanged, 0) AS files_changed,
+      COALESCE(insertions, 0)   AS insertions,
+      COALESCE(deletions, 0)    AS deletions,
+      COALESCE(agentAuthored, 0) AS agent_authored,
+      agentName                 AS agent_name
+    FROM git_events
+    WHERE sessionId IN (${idList}) AND eventType = 'commit'
+    ORDER BY timestamp ASC
+  `);
+
+  const commitsBySession = new Map<string, GitCommitRow[]>();
+  for (const c of commitRows) {
+    if (!c.session_id) continue;
+    const list = commitsBySession.get(c.session_id) ?? [];
+    list.push({ ...c, agent_authored: Boolean(c.agent_authored) });
+    commitsBySession.set(c.session_id, list);
+  }
+
+  return meta
+    .map((m) => {
+      const start = new Date(m.started).getTime();
+      const end = new Date(m.ended).getTime();
+      return {
+        ...m,
+        duration_ms: isNaN(start) || isNaN(end) ? 0 : Math.max(0, end - start),
+        commits: commitsBySession.get(m.session_id) ?? [],
+      };
+    })
+    .sort((a, b) => (a.started < b.started ? 1 : -1));
+}
+
 // ── Session detail (trace entries for a session) ──────────────
 
 export interface SessionEntry {
@@ -552,6 +726,18 @@ export interface SessionDetail {
   project: string;
   started: string;
   ended: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read: number;
+  cache_creation: number;
+  /** Wall time minus consecutive-entry gaps that exceed IDLE_THRESHOLD_MS.
+   *  Lets the UI show "3h active" alongside "27h wall" for long sessions
+   *  where most of the wall time was idle. */
+  active_ms: number;
+  /** Per-bucket entry counts across [started..ended]. ~60 buckets, so the
+   *  resolution adapts to session length: minute-ish for short sessions,
+   *  hour-ish for multi-day ones. Powers the activity sparkline. */
+  activity: { t: number; count: number }[];
   entries: SessionEntry[];
   tool_summary: { tool_name: string; count: number }[];
   commits: GitCommitRow[];
@@ -620,13 +806,19 @@ export async function getSessionDetail(sessionId: string): Promise<SessionDetail
   const meta = await query<{
     session_id: string; agent: string; project: string;
     started: string; ended: string;
+    input_tokens: number; output_tokens: number;
+    cache_read: number; cache_creation: number;
   }>(`
     SELECT
       sessionId AS session_id,
       MIN(agent) AS agent,
       MIN(project) AS project,
       MIN(timestamp) AS started,
-      MAX(timestamp) AS ended
+      MAX(timestamp) AS ended,
+      COALESCE(SUM(${TU_INPUT}),   0) AS input_tokens,
+      COALESCE(SUM(${TU_OUTPUT}),  0) AS output_tokens,
+      COALESCE(SUM(${TU_CACHE_R}), 0) AS cache_read,
+      COALESCE(SUM(${TU_CACHE_C}), 0) AS cache_creation
     FROM traces
     WHERE sessionId = '${esc(sessionId)}'
     GROUP BY sessionId
@@ -674,19 +866,91 @@ export async function getSessionDetail(sessionId: string): Promise<SessionDetail
         COALESCE(insertions, 0) AS insertions,
         COALESCE(deletions, 0) AS deletions,
         COALESCE(agentAuthored, 0) AS agent_authored,
-        agentName AS agent_name
+        agentName AS agent_name,
+        sessionId AS session_id
       FROM git_events
       WHERE sessionId = '${esc(sessionId)}' AND eventType = 'commit'
       ORDER BY timestamp
     `),
   ]);
 
+  // Pull every entry's timestamp once for active-time + sparkline. Cheap
+  // even for 10K-entry sessions (one column scan + a sort).
+  const allTimestamps = await query<{ timestamp: string }>(`
+    SELECT timestamp FROM traces
+    WHERE sessionId = '${esc(sessionId)}'
+    ORDER BY timestamp
+  `);
+  const { active_ms, activity } = computeActivityProfile(
+    allTimestamps.map((r) => r.timestamp),
+    meta[0].started,
+    meta[0].ended,
+  );
+
   return {
     ...meta[0],
+    active_ms,
+    activity,
     entries,
     tool_summary: toolSummary,
     commits: commits.map((r) => ({ ...r, agent_authored: Boolean(r.agent_authored) })),
   };
+}
+
+/**
+ * From a sorted list of entry timestamps, compute:
+ *   - active_ms: wall time minus gaps over IDLE_THRESHOLD_MS. So a 27-hour
+ *     session with two 8-hour gaps (overnight) reports ~11h active.
+ *   - activity: ~60 wall-time buckets with entry counts, for a sparkline.
+ *
+ * Idle threshold is fixed at 5 minutes — long enough that "thinking" or a
+ * slow Bash command stays in the active span, short enough that meal/sleep
+ * gaps fall out.
+ */
+function computeActivityProfile(
+  timestamps: string[],
+  started: string,
+  ended: string,
+): { active_ms: number; activity: { t: number; count: number }[] } {
+  const IDLE_THRESHOLD_MS = 5 * 60 * 1000;
+  const startMs = new Date(started).getTime();
+  const endMs   = new Date(ended).getTime();
+  if (timestamps.length === 0 || isNaN(startMs) || isNaN(endMs)) {
+    return { active_ms: 0, activity: [] };
+  }
+  // Single-instant session (one entry, or all entries at the same
+  // timestamp): return one bucket with the full count so the sparkline
+  // still has something to render. Active time is 0 by definition.
+  if (endMs <= startMs) {
+    return { active_ms: 0, activity: [{ t: startMs, count: timestamps.length }] };
+  }
+
+  // Active time: walk consecutive timestamps, sum gaps ≤ threshold.
+  let activeMs = 0;
+  let prev = NaN;
+  for (const ts of timestamps) {
+    const t = new Date(ts).getTime();
+    if (isNaN(t)) continue;
+    if (!isNaN(prev)) {
+      const gap = t - prev;
+      if (gap > 0 && gap <= IDLE_THRESHOLD_MS) activeMs += gap;
+    }
+    prev = t;
+  }
+
+  // ~60 wall-time buckets across [start..end].
+  const N = 60;
+  const bucketMs = Math.max(1, Math.floor((endMs - startMs) / N));
+  const counts = new Array<number>(N).fill(0);
+  for (const ts of timestamps) {
+    const t = new Date(ts).getTime();
+    if (isNaN(t)) continue;
+    const idx = Math.min(N - 1, Math.max(0, Math.floor((t - startMs) / bucketMs)));
+    counts[idx]++;
+  }
+  const activity = counts.map((count, i) => ({ t: startMs + i * bucketMs, count }));
+
+  return { active_ms: activeMs, activity };
 }
 
 // ── Helpers ────────────────────────────────────────────────────

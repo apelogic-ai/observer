@@ -174,10 +174,30 @@ async function doBuild(reason: string): Promise<void> {
     return;
   }
 
-  const { traceFiles, gitFiles } = discoverFiles(_dataDir);
+  const { traceFiles, gitFiles, cursorSidecars } = discoverFiles(_dataDir);
 
   _traceRows = ingestTraces(_db, traceFiles);
   _gitRows = ingestGitEvents(_db, gitFiles);
+  // Cursor doesn't write consumed-token counts to disk. The agent's
+  // `cursor.fetchUsage` opt-in writes per-day _usage.json sidecars from
+  // Cursor's API; inject them as synthetic summary rows so the existing
+  // token aggregations pick them up. sessionId=null keeps these out of
+  // the session list (honest: we can't attribute to a specific composer).
+  _traceRows += ingestCursorSidecars(_db, cursorSidecars);
+
+  // Drop teammates' commits from shared repos. The agent's
+  // `git.onlySelf` (default true in v0.1.9+) filters at *collection* time
+  // — but anything written to disk before that fix landed is still on
+  // disk and shows up here. Apply the same filter at ingest so old data
+  // gets cleaned without forcing a rescan.
+  _gitRows -= filterForeignGitCommits(_db);
+
+  // Older on-disk git_events have sessionId=null whenever the commit was
+  // attributed via Co-Authored-By (the agent's scanner short-circuited
+  // session-window matching for those). Re-do the window match here so
+  // commits link back to their parent session in the UI.
+  const filled = backfillCommitSessions(_db);
+  if (filled > 0) log("db.backfill_sessions", { commits_linked: filled });
 
   // Indexes after bulk insert is faster than during.
   _db.exec(`CREATE INDEX traces_session ON traces(sessionId)`);
@@ -206,9 +226,14 @@ async function doBuild(reason: string): Promise<void> {
 
 // ── Discovery ──────────────────────────────────────────────────────
 
-function discoverFiles(dir: string): { traceFiles: string[]; gitFiles: string[] } {
+function discoverFiles(dir: string): {
+  traceFiles: string[];
+  gitFiles: string[];
+  cursorSidecars: string[];
+} {
   const traceFiles: string[] = [];
   const gitFiles: string[] = [];
+  const cursorSidecars: string[] = [];
 
   for (const dateDir of readdirSync(dir)) {
     const datePath = join(dir, dateDir);
@@ -226,10 +251,11 @@ function discoverFiles(dir: string): { traceFiles: string[]; gitFiles: string[] 
       if (!target) continue;
       for (const f of files) {
         if (f.endsWith(".jsonl")) target.push(join(subPath, f));
+        else if (sub === "cursor" && f === "_usage.json") cursorSidecars.push(join(subPath, f));
       }
     }
   }
-  return { traceFiles, gitFiles };
+  return { traceFiles, gitFiles, cursorSidecars };
 }
 
 // ── Ingestion ──────────────────────────────────────────────────────
@@ -253,6 +279,161 @@ function ingestTraces(db: Database, files: string[]): number {
     total += rows.length;
   }
   return total;
+}
+
+/**
+ * Inject one synthetic trace row per cursor `_usage.json` sidecar.
+ *
+ * The sidecar carries the day's real input/output/cache token totals that
+ * Cursor's API returns (Cursor doesn't write these to disk locally — see
+ * packages/agent/src/cursor-api.ts). We insert with sessionId=null so
+ * `getSessions` (which filters on `sessionId IS NOT NULL`) doesn't surface
+ * these as fake sessions; token-aggregation queries (which sum tokenUsage
+ * across all rows) pick them up automatically.
+ */
+function ingestCursorSidecars(db: Database, paths: string[]): number {
+  if (paths.length === 0) return 0;
+  const placeholders = TRACE_INSERT_COLS.map(() => "?").join(", ");
+  const stmt = db.prepare(
+    `INSERT INTO traces (${TRACE_INSERT_COLS.join(", ")}) VALUES (${placeholders})`,
+  );
+
+  let n = 0;
+  for (const path of paths) {
+    let payload: { date?: string; totals?: Record<string, number> };
+    try { payload = JSON.parse(readFileSync(path, "utf-8")); }
+    catch { continue; }
+    if (!payload.date || !payload.totals) continue;
+
+    const t = payload.totals;
+    const tokenUsage = JSON.stringify({
+      input: t.input ?? 0,
+      output: t.output ?? 0,
+      cacheRead: t.cacheRead ?? 0,
+      cacheCreation: t.cacheCreation ?? 0,
+      reasoning: t.reasoning ?? 0,
+    });
+    // End-of-day timestamp so the row falls in the same date bucket as
+    // the day it represents.
+    const ts = `${payload.date}T23:59:00.000Z`;
+
+    // Order must match TRACE_INSERT_COLS.
+    stmt.run(
+      `cursor-usage-${payload.date}`,  // id
+      ts,                              // timestamp
+      "cursor",                        // agent
+      null,                            // sessionId — keep out of session list
+      null, null, null,                // developer, machine, project
+      "usage_summary",                 // entryType
+      null, null,                      // role, model
+      tokenUsage,                      // tokenUsage
+      null, null, null, null, null,    // toolName … taskSummary
+      null, null, null,                // gitRepo, gitBranch, gitCommit
+      null, null,                      // userPrompt, assistantText
+    );
+    n++;
+  }
+  return n;
+}
+
+/** Read the developer email/name from the agent's config.yaml, if present.
+ *  Tests set `OBSERVER_SKIP_FOREIGN_FILTER=1` to short-circuit the filter
+ *  so fixture commits with synthetic authors don't get dropped. */
+function readDeveloperFromAgentConfig(): string | null {
+  if (process.env.OBSERVER_SKIP_FOREIGN_FILTER) return null;
+  const cfgPath = join(homedir(), ".observer", "config.yaml");
+  if (!existsSync(cfgPath)) return null;
+  try {
+    const text = readFileSync(cfgPath, "utf-8");
+    // Tolerate any quoting style; "developer:" line is enough for this filter.
+    const m = /^developer:\s*['"]?([^'"\n]+)['"]?\s*$/m.exec(text);
+    return m ? m[1].trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Drop git_events whose author/authorEmail doesn't match the configured
+ *  developer. Returns rows deleted. Idempotent; no-op when no config. */
+function filterForeignGitCommits(db: Database): number {
+  const dev = readDeveloperFromAgentConfig();
+  if (!dev) return 0;
+  const lower = dev.toLowerCase();
+  // Match the agent's filterByAuthor semantics: equality on either field
+  // OR substring match (so "lbelyaev" matches "lbelyaev@example.com").
+  const stmt = db.prepare(
+    `DELETE FROM git_events
+       WHERE NOT (
+         LOWER(COALESCE(author,''))      = ? OR
+         LOWER(COALESCE(authorEmail,'')) = ? OR
+         INSTR(LOWER(COALESCE(author,'')),      ?) > 0 OR
+         INSTR(LOWER(COALESCE(authorEmail,'')), ?) > 0
+       )`,
+  );
+  const res = stmt.run(lower, lower, lower, lower);
+  return res.changes;
+}
+
+/**
+ * Backfill missing sessionId on git_events using the same logic as the
+ * agent's `attributeFromSessions`: a commit gets a sessionId iff its
+ * timestamp falls within [session.start - 5min, session.end + 5min] for
+ * a session in the same project. The agent only ran this for commits
+ * NOT yet attributed via Co-Authored-By, so older on-disk data has
+ * agent_authored=true but sessionId=null. We do the lookup at ingest
+ * (in-memory only — no files rewritten) so the dashboard can show a
+ * commit's parent session correctly without a forced rescan.
+ */
+function backfillCommitSessions(db: Database): number {
+  const BUFFER_MS = 5 * 60 * 1000;
+  const sessions = db
+    .prepare(
+      `SELECT sessionId, project, agent,
+              MIN(timestamp) AS started, MAX(timestamp) AS ended
+         FROM traces
+        WHERE sessionId IS NOT NULL AND project IS NOT NULL
+        GROUP BY sessionId, project`,
+    )
+    .all() as { sessionId: string; project: string; agent: string; started: string; ended: string }[];
+  if (sessions.length === 0) return 0;
+
+  // Bucket sessions by project so the per-commit search is O(sessions-in-project).
+  const byProject = new Map<string, { sessionId: string; agent: string; start: number; end: number }[]>();
+  for (const s of sessions) {
+    const start = new Date(s.started).getTime();
+    const end = new Date(s.ended).getTime();
+    if (isNaN(start) || isNaN(end)) continue;
+    const list = byProject.get(s.project) ?? [];
+    list.push({ sessionId: s.sessionId, agent: s.agent, start: start - BUFFER_MS, end: end + BUFFER_MS });
+    byProject.set(s.project, list);
+  }
+
+  const orphans = db
+    .prepare(
+      `SELECT commitSha, project, timestamp
+         FROM git_events
+        WHERE sessionId IS NULL AND project IS NOT NULL`,
+    )
+    .all() as { commitSha: string; project: string; timestamp: string }[];
+
+  const update = db.prepare(
+    `UPDATE git_events SET sessionId = ?, agentAuthored = 1, agentName = COALESCE(agentName, ?) WHERE commitSha = ?`,
+  );
+  let filled = 0;
+  for (const c of orphans) {
+    const candidates = byProject.get(c.project);
+    if (!candidates) continue;
+    const ts = new Date(c.timestamp).getTime();
+    if (isNaN(ts)) continue;
+    for (const s of candidates) {
+      if (ts >= s.start && ts <= s.end) {
+        update.run(s.sessionId, s.agent, c.commitSha);
+        filled++;
+        break;
+      }
+    }
+  }
+  return filled;
 }
 
 function ingestGitEvents(db: Database, files: string[]): number {

@@ -82,6 +82,14 @@ privacy:
   excludeProjects: []
 ${excludeProjectsYaml}
 
+cursor:
+  # Cursor doesn't write consumed-token counts to its local SQLite —
+  # they only live on Cursor's servers. Set to true and the daemon will
+  # read your local Cursor auth token (state.vscdb) and call Cursor's
+  # dashboard API once per tick to fetch real per-day totals.
+  # Tradeoff: that token is account-equivalent. Off by default.
+  fetchUsage: false
+
 # Daemon poll interval in milliseconds. 300000 = 5 minutes.
 pollIntervalMs: 300000
 

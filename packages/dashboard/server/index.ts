@@ -11,11 +11,11 @@ import { loadDashboardConfig, parseCliArgs, type CliOverrides } from "./config";
 import { getBuildInfo } from "./build-info";
 import { createStaticHandler } from "./static";
 import {
-  getStats, getActivity, getTokens, getTools,
-  getProjects, getModels, getSessions, getProjectList, getModelList,
+  getStats, getActivity, getHeatmap, getTokens, getTools,
+  getProjects, getModels, getSessions, getProjectList, getModelList, getAgentList,
   getToolDetail, getSkills,
-  getGitStats, getGitTimeline, getGitCommits,
-  getCommitDetail, getSessionSummary, getSessionDetail,
+  getGitStats, getGitTimeline, getGitCommits, getGitSessions,
+  getCommitDetail, getSessionCommits, getSessionSummary, getSessionDetail,
   type Filters,
 } from "./queries";
 
@@ -32,6 +32,8 @@ function filters(url: URL): Filters {
   if (model) f.model = model;
   const tool = url.searchParams.get("tool");
   if (tool) f.tool = tool;
+  const agent = url.searchParams.get("agent");
+  if (agent) f.agent = agent;
   const granularity = url.searchParams.get("granularity");
   if (granularity === "week" || granularity === "month") f.granularity = granularity;
   return f;
@@ -48,6 +50,7 @@ type Handler = (url: URL) => Promise<unknown>;
 const routes: Record<string, Handler> = {
   "/api/stats": async (url) => getStats(filters(url)),
   "/api/activity": async (url) => getActivity(filters(url)),
+  "/api/heatmap": async (url) => getHeatmap(filters(url)),
   "/api/tokens": async (url) => getTokens(filters(url)),
   "/api/tools": async (url) => getTools(filters(url), parsePositiveInt(url.searchParams.get("limit")) ?? 25),
   "/api/projects": async (url) => getProjects(filters(url)),
@@ -61,6 +64,7 @@ const routes: Record<string, Handler> = {
   "/api/skills": async (url) => getSkills(filters(url)),
   "/api/project-list": async () => getProjectList(),
   "/api/model-list": async () => getModelList(),
+  "/api/agent-list": async () => getAgentList(),
   "/api/git-stats": async (url) => getGitStats(filters(url)),
   "/api/git-timeline": async (url) => getGitTimeline(filters(url)),
   "/api/git-commits": async (url) => getGitCommits(filters(url), parsePositiveInt(url.searchParams.get("limit")) ?? 50),
@@ -69,6 +73,12 @@ const routes: Record<string, Handler> = {
     if (!sha) return { error: "sha param required" };
     return getCommitDetail(sha);
   },
+  "/api/session-commits": async (url) => {
+    const id = url.searchParams.get("id");
+    if (!id) return { error: "id param required" };
+    return getSessionCommits(id);
+  },
+  "/api/git-sessions": async (url) => getGitSessions(filters(url)),
   "/api/session-summary": async (url) => {
     const id = url.searchParams.get("id");
     if (!id) return { error: "id param required" };

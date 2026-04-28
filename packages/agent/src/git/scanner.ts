@@ -242,15 +242,23 @@ export function attributeFromSessions(events: GitEvent[], sessions: SessionWindo
   if (sessions.length === 0) return;
 
   for (const event of events) {
-    if (event.agentAuthored) continue;  // already attributed via Co-Authored-By
+    // Skip only if we already have a sessionId — we want to link
+    // Co-Authored-By-tagged commits to a session too (the dashboard's
+    // commit page shows an Agent Session card iff sessionId is set).
+    if (event.sessionId) continue;
 
     const commitTime = new Date(event.timestamp).getTime();
     if (isNaN(commitTime)) continue;
 
     for (const session of sessions) {
       if (commitTime >= session.start && commitTime <= session.end) {
-        event.agentAuthored = true;
-        event.agentName = session.agent;
+        // Co-Authored-By is the strongest agent-attribution signal;
+        // don't let a session-window match override it. Only fill in
+        // fields that are missing.
+        if (!event.agentAuthored) {
+          event.agentAuthored = true;
+          event.agentName = session.agent;
+        }
         event.sessionId = session.sessionId;
         break;
       }

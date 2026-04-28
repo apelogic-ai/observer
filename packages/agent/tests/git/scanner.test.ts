@@ -197,11 +197,27 @@ describe("attributeFromSessions", () => {
     expect(events[0].agentName).toBeUndefined();
   });
 
-  it("respects existing agentAuthored=true (Co-Authored-By takes precedence)", () => {
+  it("respects Co-Authored-By agentName but still fills missing sessionId", () => {
+    // Co-Authored-By is the strongest signal for *who*, but if the commit
+    // happens to fall inside a session window we still want to link it to
+    // that session so the dashboard's commit page can show parent-session
+    // context. Reason for change: pre-fix, Co-Authored-By commits had
+    // sessionId=null and looked like orphans on the commit page.
     const events = [commit("2026-04-15T10:15:00Z", true)];
     events[0].agentName = "codex"; // pretend codex took credit first
     attributeFromSessions(events, [session]);
-    expect(events[0].agentName).toBe("codex"); // unchanged
+    expect(events[0].agentName).toBe("codex");      // not overwritten
+    expect(events[0].agentAuthored).toBe(true);
+    expect(events[0].sessionId).toBe("abc");        // filled in
+  });
+
+  it("doesn't overwrite an existing sessionId", () => {
+    // If a previous run already linked a commit to session "old", a
+    // subsequent attribution pass must not steal it.
+    const events = [commit("2026-04-15T10:15:00Z", true)];
+    events[0].sessionId = "old";
+    attributeFromSessions(events, [session]);
+    expect(events[0].sessionId).toBe("old");
   });
 
   it("is a no-op when no sessions provided", () => {

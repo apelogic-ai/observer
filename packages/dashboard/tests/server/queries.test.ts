@@ -4,11 +4,11 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { initDb } from "../../server/db";
 import {
-  getStats, getActivity, getTokens, getTools,
+  getStats, getActivity, getHeatmap, getTokens, getTools,
   getProjects, getModels, getSessions, getProjectList, getModelList,
   getToolDetail, getSkills,
-  getGitStats, getGitTimeline, getGitCommits,
-  getCommitDetail, getSessionSummary, getSessionDetail,
+  getGitStats, getGitTimeline, getGitCommits, getGitSessions,
+  getCommitDetail, getSessionCommits, getSessionSummary, getSessionDetail,
 } from "../../server/queries";
 
 function writeJsonl(path: string, rows: Array<Record<string, unknown>>): void {
@@ -23,6 +23,10 @@ const THREE_HOURS_AGO = new Date(Date.now() - 3 * 3600_000).toISOString();
 let DATA_DIR: string;
 
 beforeAll(async () => {
+  // Bypass the dashboard's foreign-commit filter for these tests — they
+  // use synthetic authors (Alice, Bob, etc.) that wouldn't match a real
+  // developer email in config.yaml.
+  process.env.OBSERVER_SKIP_FOREIGN_FILTER = "1";
   DATA_DIR = mkdtempSync(join(tmpdir(), "observer-queries-"));
 
   // Today's claude_code traces — two sessions in project alpha, one in beta.
@@ -51,17 +55,30 @@ beforeAll(async () => {
       tokenUsage: { input: 80, output: 30 } },
   ]);
 
-  // Today's git events — two commits, one agent-authored, one human.
+  // Today's git events.
+  //   g1: agent-authored, sessionId already set (s1) — straight through
+  //   g2: human commit, no session (and shouldn't get one)
+  //   g3: agent-authored via Co-Authored-By (no sessionId on disk), in
+  //       project beta at ONE_HOUR_AGO — falls inside session s2's window,
+  //       so the dashboard's backfill should link it to s2 at ingest.
   writeJsonl(join(DATA_DIR, TODAY, "git", "events.jsonl"), [
     { id: "g1", timestamp: THREE_HOURS_AGO, eventType: "commit",
       project: "alpha", repo: "owner/alpha", branch: "main",
       commitSha: "deadbeef", filesChanged: 3, insertions: 100, deletions: 20,
       agentAuthored: true, agentName: "claude_code",
       author: "agent@x.com", message: "agent commit", sessionId: "s1" },
-    { id: "g2", timestamp: ONE_HOUR_AGO,   eventType: "commit",
+    // g2 is human-authored and timestamped THREE_HOURS_AGO in project
+    // beta — there's no agent session in beta at that time, so backfill
+    // must leave it unlinked.
+    { id: "g2", timestamp: THREE_HOURS_AGO, eventType: "commit",
       project: "beta",  repo: "owner/beta",  branch: "main",
       commitSha: "cafebabe", filesChanged: 1, insertions: 10, deletions: 5,
       agentAuthored: false, author: "human@x.com", message: "human commit" },
+    { id: "g3", timestamp: ONE_HOUR_AGO,   eventType: "commit",
+      project: "beta",  repo: "owner/beta",  branch: "main",
+      commitSha: "feedface", filesChanged: 2, insertions: 50, deletions: 10,
+      agentAuthored: true, agentName: "claude_code",
+      author: "agent@x.com", message: "co-authored agent commit" },
   ]);
 
   await initDb(DATA_DIR);
@@ -205,29 +222,31 @@ describe("getToolDetail", () => {
 describe("git queries", () => {
   it("getGitStats: agent vs human split", async () => {
     const s = await getGitStats({ days: 7 });
-    expect(s.total_commits).toBe(2);
-    expect(s.agent_commits).toBe(1);
+    expect(s.total_commits).toBe(3);
+    expect(s.agent_commits).toBe(2);  // g1 + g3 (g3 picked up by backfill)
     expect(s.human_commits).toBe(1);
-    expect(s.total_insertions).toBe(110);
-    expect(s.agent_insertions).toBe(100);
+    expect(s.total_insertions).toBe(160); // 100 + 10 + 50
+    expect(s.agent_insertions).toBe(150);
     expect(s.repos).toBe(2);
   });
 
   it("getGitTimeline: rolls up per date with agent/human counters", async () => {
     const rows = await getGitTimeline({ days: 7 });
     expect(rows.length).toBe(1);
-    expect(rows[0].agent_commits).toBe(1);
+    expect(rows[0].agent_commits).toBe(2);
     expect(rows[0].human_commits).toBe(1);
   });
 
-  it("getGitCommits: returns rows with boolean agent_authored coercion", async () => {
+  it("getGitCommits: returns rows with boolean agent_authored + session_id", async () => {
     const rows = await getGitCommits({ days: 7 }, 5);
-    expect(rows.length).toBe(2);
+    expect(rows.length).toBe(3);
     const agent = rows.find((r) => r.commit_sha === "deadbeef")!;
     expect(agent.agent_authored).toBe(true);
     expect(typeof agent.agent_authored).toBe("boolean");
+    expect(agent.session_id).toBe("s1");
     const human = rows.find((r) => r.commit_sha === "cafebabe")!;
     expect(human.agent_authored).toBe(false);
+    expect(human.session_id).toBeNull();
   });
 
   it("getCommitDetail: single commit with parsed files array", async () => {
@@ -270,5 +289,108 @@ describe("getSessionDetail", () => {
     expect(d!.commits.length).toBe(1); // g1 is linked to s1
     expect(d!.commits[0].commit_sha).toBe("deadbeef");
     expect(d!.commits[0].agent_authored).toBe(true);
+  });
+
+  it("includes token totals (input/output/cache) for the session header", async () => {
+    const d = await getSessionDetail("s1");
+    expect(d!.input_tokens).toBe(300);   // a1 + a2 input
+    expect(d!.output_tokens).toBe(130);  // a1 + a2 output
+    expect(d!.cache_read).toBe(0);
+    expect(d!.cache_creation).toBe(0);
+  });
+
+  it("computes active_ms + activity buckets from entry timestamps", async () => {
+    const d = await getSessionDetail("s1");
+    // s1's two entries share THREE_HOURS_AGO (zero-duration session). The
+    // helper collapses that into a single activity bucket with the full
+    // count and active_ms=0, instead of returning empty arrays which would
+    // render as a hidden sparkline.
+    expect(d!.active_ms).toBe(0);
+    expect(d!.activity.length).toBeGreaterThanOrEqual(1);
+    const totalCounts = d!.activity.reduce((s, b) => s + b.count, 0);
+    expect(totalCounts).toBe(2);
+  });
+});
+
+// ── Heatmap (date × project × agent) ───────────────────────────────
+
+describe("getHeatmap", () => {
+  it("groups by date, project, agent and excludes null projects", async () => {
+    const rows = await getHeatmap({ days: 7 });
+    // Three (date, project, agent) buckets should appear: claude/alpha,
+    // claude/beta, codex/alpha.
+    expect(rows.length).toBe(3);
+    const claudeAlpha = rows.find((r) => r.project === "alpha" && r.agent === "claude_code");
+    const claudeBeta  = rows.find((r) => r.project === "beta"  && r.agent === "claude_code");
+    const codexAlpha  = rows.find((r) => r.project === "alpha" && r.agent === "codex");
+    expect(claudeAlpha).toBeDefined();
+    expect(claudeBeta).toBeDefined();
+    expect(codexAlpha).toBeDefined();
+    expect(claudeBeta!.total_tokens).toBeGreaterThan(0);
+  });
+});
+
+// ── Commit ↔ session linkage ────────────────────────────────────────
+
+describe("session ↔ commit linkage", () => {
+  it("backfillCommitSessions: links Co-Authored-By commit to session window", async () => {
+    // g3 was written without a sessionId but its timestamp falls in s2's
+    // window — the dashboard's backfill runs at ingest and should fill it.
+    const c = await getCommitDetail("feedface");
+    expect(c).not.toBeNull();
+    expect(c!.session_id).toBe("s2");
+    expect(c!.agent_authored).toBe(true);
+  });
+
+  it("backfillCommitSessions: leaves explicit sessionId alone", async () => {
+    // g1 already had sessionId=s1 on disk. Backfill shouldn't touch it
+    // (and shouldn't move it to s3, even though s3 is in alpha at a
+    // similar time).
+    const c = await getCommitDetail("deadbeef");
+    expect(c!.session_id).toBe("s1");
+  });
+
+  it("backfillCommitSessions: doesn't link human commits", async () => {
+    // g2 is human-authored and outside any agent session window. It must
+    // stay unlinked — backfill is *only* for missing sessionIds, not
+    // for re-attributing humans.
+    const c = await getCommitDetail("cafebabe");
+    expect(c!.session_id).toBeNull();
+    expect(c!.agent_authored).toBe(false);
+  });
+
+  it("getSessionCommits: returns siblings ordered by timestamp asc", async () => {
+    const commits = await getSessionCommits("s2");
+    expect(commits.length).toBe(1);   // only g3 lives in s2 (after backfill)
+    expect(commits[0].commit_sha).toBe("feedface");
+    expect(commits[0].session_id).toBe("s2");
+  });
+
+  it("getSessionCommits: empty for unknown session", async () => {
+    expect(await getSessionCommits("nope")).toEqual([]);
+  });
+});
+
+// ── "By session" view (sessions that produced commits) ─────────────
+
+describe("getGitSessions", () => {
+  it("returns one row per session that produced commits, with totals + commits[]", async () => {
+    const sessions = await getGitSessions({ days: 7 });
+    // s1 (deadbeef) and s2 (feedface) produced commits; s3 didn't.
+    expect(sessions.length).toBe(2);
+    const ids = sessions.map((s) => s.session_id).sort();
+    expect(ids).toEqual(["s1", "s2"]);
+    const s1 = sessions.find((s) => s.session_id === "s1")!;
+    expect(s1.agent).toBe("claude_code");
+    expect(s1.commits.length).toBe(1);
+    expect(s1.commits[0].commit_sha).toBe("deadbeef");
+    expect(s1.input_tokens).toBe(300);
+    expect(s1.entries).toBe(2);
+  });
+
+  it("respects project filter", async () => {
+    const sessions = await getGitSessions({ days: 7, project: "beta" });
+    expect(sessions.length).toBe(1);
+    expect(sessions[0].session_id).toBe("s2");
   });
 });

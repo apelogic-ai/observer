@@ -2,8 +2,12 @@
 
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
-import { useProjectList } from "@/hooks/use-dashboard";
+import { useProjectList, useAgentList } from "@/hooks/use-dashboard";
 import type { FilterState, Granularity } from "@/hooks/use-filters";
+
+function prettyAgent(a: string): string {
+  return a.replace("_", " ");
+}
 
 const RANGES = [
   { label: "7d", value: 7 },
@@ -31,6 +35,8 @@ interface Props {
   onGranularityChange?: (g: Granularity) => void;
   onProjectChange?: (project: string | null) => void;
   showProjectSelector?: boolean;
+  onAgentChange?: (agent: string | null) => void;
+  showAgentSelector?: boolean;
   onRefresh?: () => void;
 }
 
@@ -42,9 +48,12 @@ export function PageHeader({
   onGranularityChange,
   onProjectChange,
   showProjectSelector,
+  onAgentChange,
+  showAgentSelector,
   onRefresh,
 }: Props) {
   const projects = useProjectList();
+  const agents = useAgentList();
 
   return (
     <div className="space-y-2">
@@ -75,6 +84,18 @@ export function PageHeader({
                 <option value="">All projects</option>
                 {projects.map((p) => (
                   <option key={p} value={p}>{p}</option>
+                ))}
+              </select>
+            )}
+            {showAgentSelector && onAgentChange && (
+              <select
+                value={filters.agent ?? ""}
+                onChange={(e) => onAgentChange(e.target.value || null)}
+                className="h-8 rounded-md border border-border bg-secondary px-3 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+              >
+                <option value="">All agents</option>
+                {agents.map((a) => (
+                  <option key={a} value={a}>{prettyAgent(a)}</option>
                 ))}
               </select>
             )}

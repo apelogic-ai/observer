@@ -1,10 +1,10 @@
 "use client";
 
 import {
-  PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Legend,
+  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, LabelList,
 } from "recharts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { CHART_PALETTE } from "@/lib/colors";
+import { CHART_PALETTE, TOOLTIP_CONTENT_STYLE, TOOLTIP_ITEM_STYLE, TOOLTIP_LABEL_STYLE } from "@/lib/colors";
 import { formatNumber } from "@/lib/format";
 import type { ModelRow } from "@/lib/queries";
 
@@ -14,57 +14,71 @@ interface Props {
 }
 
 function shortModelName(model: string): string {
-  const m = model.replace("claude-", "").replace(/-\d{8}$/, "");
-  return m;
+  return model.replace("claude-", "").replace(/-\d{8}$/, "");
 }
 
 export function ModelChart({ data, onModelClick }: Props) {
-  const chartData = data.map((r) => ({
-    name: shortModelName(r.model),
-    fullName: r.model,
-    value: r.count,
-    tokens: r.total_tokens,
-  }));
+  const chartData = data
+    .filter((r) => r.total_tokens > 0)
+    .map((r) => ({
+      name: shortModelName(r.model),
+      fullName: r.model,
+      tokens: r.total_tokens,
+      count: r.count,
+    }));
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Models</CardTitle>
+        <CardTitle>
+          Models
+          <span className="ml-2 text-xs font-normal text-muted-foreground">
+            tokens (input + output + cache reads + writes)
+          </span>
+        </CardTitle>
       </CardHeader>
       <CardContent>
-        <ResponsiveContainer width="100%" height={260}>
-          <PieChart>
-            <Pie
-              data={chartData}
-              cx="50%"
-              cy="50%"
-              innerRadius={50}
-              outerRadius={90}
-              paddingAngle={2}
-              dataKey="value"
-              nameKey="name"
+        <ResponsiveContainer width="100%" height={Math.max(240, chartData.length * 32)}>
+          <BarChart data={chartData} layout="vertical" margin={{ left: 100, right: 60 }}>
+            <XAxis
+              type="number"
+              tick={{ fill: "#8b949e", fontSize: 11 }}
+              axisLine={false}
+              tickLine={false}
+              tickFormatter={formatNumber}
+            />
+            <YAxis
+              type="category"
+              dataKey="name"
+              tick={{ fill: "#e6edf3", fontSize: 11 }}
+              axisLine={false}
+              tickLine={false}
+              width={100}
+            />
+            <Tooltip
+              contentStyle={TOOLTIP_CONTENT_STYLE}
+              labelStyle={TOOLTIP_LABEL_STYLE}
+              itemStyle={TOOLTIP_ITEM_STYLE}
+              formatter={(value) => [formatNumber(Number(value)), "tokens"]}
+            />
+            <Bar
+              dataKey="tokens"
+              radius={[0, 4, 4, 0]}
               cursor={onModelClick ? "pointer" : undefined}
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               onClick={onModelClick ? (entry: any) => onModelClick(entry.fullName) : undefined}
             >
-              {chartData.map((_, i) => (
-                <Cell key={i} fill={CHART_PALETTE[i % CHART_PALETTE.length]} />
+              {chartData.map((entry, i) => (
+                <Cell key={entry.fullName} fill={CHART_PALETTE[i % CHART_PALETTE.length]} />
               ))}
-            </Pie>
-            <Tooltip
-              contentStyle={{
-                background: "#171717",
-                border: "1px solid rgba(255,255,255,0.1)",
-                borderRadius: 8,
-                fontSize: 12,
-              }}
-              formatter={(value) => formatNumber(Number(value))}
-            />
-            <Legend
-              wrapperStyle={{ fontSize: 12 }}
-              formatter={(value: string) => <span style={{ color: "#e6edf3" }}>{value}</span>}
-            />
-          </PieChart>
+              <LabelList
+                dataKey="tokens"
+                position="right"
+                formatter={(v) => formatNumber(Number(v))}
+                style={{ fill: "#e6edf3", fontSize: 11 }}
+              />
+            </Bar>
+          </BarChart>
         </ResponsiveContainer>
       </CardContent>
     </Card>

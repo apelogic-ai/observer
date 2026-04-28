@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
@@ -31,6 +32,7 @@ export function GitCommitsTable({ data, onProjectClick, onCommitClick }: Props) 
               <TableHead>Time</TableHead>
               <TableHead className="text-right">+/-</TableHead>
               <TableHead>Source</TableHead>
+              <TableHead>Session</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -84,6 +86,19 @@ export function GitCommitsTable({ data, onProjectClick, onCommitClick }: Props) 
                     >
                       human
                     </Badge>
+                  )}
+                </TableCell>
+                <TableCell className="font-mono text-xs">
+                  {c.session_id ? (
+                    <Link
+                      href={`/session?id=${c.session_id}`}
+                      className="text-blue-400 hover:underline"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {c.session_id.slice(0, 8)}
+                    </Link>
+                  ) : (
+                    <span className="text-muted-foreground/50">—</span>
                   )}
                 </TableCell>
               </TableRow>

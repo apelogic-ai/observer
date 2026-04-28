@@ -52,6 +52,14 @@ export interface ObserverConfig {
   privacy: {
     excludeProjects: string[];
   };
+  cursor: {
+    /** When true, the daemon will read Cursor's local auth token from
+     *  state.vscdb and call Cursor's undocumented dashboard API to fetch
+     *  real consumed-token totals (Cursor doesn't write these to disk).
+     *  Off by default — the auth token is account-equivalent; opt in
+     *  consciously. */
+    fetchUsage: boolean;
+  };
   dashboard: DashboardConfig;
   pollIntervalMs: number;
   developer: string | null;
@@ -80,6 +88,9 @@ export const DEFAULT_CONFIG: ObserverConfig = {
   },
   privacy: {
     excludeProjects: [],
+  },
+  cursor: {
+    fetchUsage: false,
   },
   dashboard: {
     port: 3457,
@@ -116,6 +127,7 @@ export function loadConfig(configPath: string): ObserverConfig {
   const rawShip = (raw.ship ?? {}) as Record<string, unknown>;
   const rawGit = (raw.git ?? {}) as Record<string, unknown>;
   const rawPrivacy = (raw.privacy ?? {}) as Record<string, unknown>;
+  const rawCursor = (raw.cursor ?? {}) as Record<string, unknown>;
   const rawDash = (raw.dashboard ?? {}) as Record<string, unknown>;
   const rawDashLog = (rawDash.log ?? {}) as Record<string, unknown>;
 
@@ -161,6 +173,11 @@ export function loadConfig(configPath: string): ObserverConfig {
       excludeProjects: Array.isArray(rawPrivacy.excludeProjects)
         ? rawPrivacy.excludeProjects
         : DEFAULT_CONFIG.privacy.excludeProjects,
+    },
+    cursor: {
+      fetchUsage: rawCursor.fetchUsage !== undefined
+        ? Boolean(rawCursor.fetchUsage)
+        : DEFAULT_CONFIG.cursor.fetchUsage,
     },
     dashboard: {
       port: typeof rawDash.port === "number" ? rawDash.port : DEFAULT_CONFIG.dashboard.port,

@@ -4,8 +4,8 @@ import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend,
 } from "recharts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { AGENT_COLORS } from "@/lib/colors";
-import { formatDate } from "@/lib/format";
+import { AGENT_COLORS, TOOLTIP_CONTENT_STYLE, TOOLTIP_ITEM_STYLE, TOOLTIP_LABEL_STYLE } from "@/lib/colors";
+import { formatDate, formatNumber } from "@/lib/format";
 import type { ActivityRow } from "@/lib/queries";
 
 interface Props {
@@ -19,7 +19,11 @@ export function ActivityChart({ data }: Props) {
 
   for (const row of data) {
     const entry = byDate.get(row.date) ?? { date: row.date };
-    entry[row.agent] = row.count;
+    // Stack by tokens, not entry count — agents differ ~100x in entries
+    // but consume comparable tokens. Skip zero-token rows; sub-1%
+    // contributors won't be visible as a bar but still show up in the
+    // legend and per-day tooltip, which is enough.
+    if (row.total_tokens > 0) entry[row.agent] = row.total_tokens;
     byDate.set(row.date, entry);
   }
 
@@ -28,7 +32,12 @@ export function ActivityChart({ data }: Props) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Activity Timeline</CardTitle>
+        <CardTitle>
+          Activity Timeline
+          <span className="ml-2 text-xs font-normal text-muted-foreground">
+            tokens (input + output + cache reads + writes)
+          </span>
+        </CardTitle>
       </CardHeader>
       <CardContent>
         <ResponsiveContainer width="100%" height={240}>
@@ -44,21 +53,25 @@ export function ActivityChart({ data }: Props) {
               tick={{ fill: "#8b949e", fontSize: 11 }}
               axisLine={false}
               tickLine={false}
-              width={40}
+              width={50}
+              tickFormatter={formatNumber}
             />
             <Tooltip
-              contentStyle={{
-                background: "#171717",
-                border: "1px solid rgba(255,255,255,0.1)",
-                borderRadius: 8,
-                fontSize: 12,
-              }}
+              contentStyle={TOOLTIP_CONTENT_STYLE}
+              labelStyle={TOOLTIP_LABEL_STYLE}
+              itemStyle={TOOLTIP_ITEM_STYLE}
               labelFormatter={(v) => formatDate(String(v))}
+              formatter={(value) => formatNumber(Number(value))}
             />
-            <Legend
-              wrapperStyle={{ fontSize: 12 }}
-              formatter={(value) => String(value ?? "").replace("_", " ")}
-            />
+            {/* Legend only adds info when there's more than one series.
+                With a single agent (e.g. agent filter active) the legend
+                just repeats the agent name, so hide it. */}
+            {agents.length > 1 && (
+              <Legend
+                wrapperStyle={{ fontSize: 12 }}
+                formatter={(value) => String(value ?? "").replace("_", " ")}
+              />
+            )}
             {agents.map((agent) => (
               <Bar
                 key={agent}

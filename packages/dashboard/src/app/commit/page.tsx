@@ -7,6 +7,7 @@ import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useFilters } from "@/hooks/use-filters";
+import { useSessionCommits } from "@/hooks/use-dashboard";
 import { formatDateTime, formatDuration, formatNumber } from "@/lib/format";
 import type { CommitDetail, SessionSummary } from "@/lib/queries";
 
@@ -19,6 +20,7 @@ export default function CommitPage() {
   // Skip the initial "loading" state when no sha is given — avoids setting
   // state synchronously in the guard branch of the effect.
   const [loading, setLoading] = useState(sha !== "");
+  const siblingCommits = useSessionCommits(commit?.session_id ?? null);
 
   useEffect(() => {
     if (!sha) return;
@@ -145,11 +147,14 @@ export default function CommitPage() {
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-3">
-                  Agent Session
+                  Session containing this commit
                   <Badge variant="outline" className="bg-blue-500/15 text-blue-400 border-blue-500/20 text-xs">
                     {session.agent.replace("_", " ")}
                   </Badge>
                 </CardTitle>
+                <p className="text-xs text-muted-foreground">
+                  {formatDateTime(session.started)} → {formatDateTime(session.ended)} · session-wide totals below, not commit-specific
+                </p>
               </CardHeader>
               <CardContent className="space-y-5">
                 {/* Token stats */}
@@ -202,6 +207,43 @@ export default function CommitPage() {
                           <span className="ml-1.5 text-muted-foreground">{m.count}</span>
                         </Badge>
                       ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Sibling commits — every other commit produced by this
+                    same session. Without this list it's easy to read the
+                    session-wide token totals as if they applied to *this*
+                    commit alone. */}
+                {siblingCommits && siblingCommits.length > 1 && (
+                  <div className="pt-3 border-t border-border">
+                    <span className="text-xs text-muted-foreground uppercase tracking-wider">
+                      Commits from this session ({siblingCommits.length})
+                    </span>
+                    <div className="mt-2 space-y-1">
+                      {siblingCommits.map((c) => {
+                        const isCurrent = c.commit_sha === commit.commit_sha;
+                        return (
+                          <Link
+                            key={c.commit_sha}
+                            href={`/commit?sha=${c.commit_sha}`}
+                            className={`flex items-center gap-3 px-2 py-1 rounded text-sm hover:bg-secondary/50 ${isCurrent ? "bg-secondary/40" : ""}`}
+                          >
+                            <span className="font-mono text-xs text-muted-foreground shrink-0">
+                              {c.commit_sha.slice(0, 8)}
+                            </span>
+                            <span className="font-mono text-xs text-muted-foreground shrink-0 w-32 truncate">
+                              {formatDateTime(c.timestamp)}
+                            </span>
+                            <span className="truncate flex-1">{c.message}</span>
+                            <span className="shrink-0 text-xs tabular-nums">
+                              <span className="text-green-400">+{formatNumber(c.insertions)}</span>
+                              {" / "}
+                              <span className="text-red-400">-{formatNumber(c.deletions)}</span>
+                            </span>
+                          </Link>
+                        );
+                      })}
                     </div>
                   </div>
                 )}

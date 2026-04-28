@@ -17,12 +17,15 @@ interface Props {
   onToolClick?: (tool: string) => void;
 }
 
-function AgentLegend() {
+function AgentLegend({ agents }: { agents: string[] }) {
+  // With one agent there's only one bar color and the legend is just a
+  // restatement of the agent filter — hide it.
+  if (agents.length <= 1) return null;
   return (
     <div className="flex gap-3 text-xs text-muted-foreground">
-      {Object.entries(AGENT_COLORS).map(([agent, color]) => (
+      {agents.map((agent) => (
         <div key={agent} className="flex items-center gap-1.5">
-          <div className="w-2 h-2 rounded-full" style={{ backgroundColor: color }} />
+          <div className="w-2 h-2 rounded-full" style={{ backgroundColor: AGENT_COLORS[agent] ?? "#8b949e" }} />
           <span>{agent.replace("_", " ")}</span>
         </div>
       ))}
@@ -56,6 +59,9 @@ function ToolTooltip({ active, payload }: { active?: boolean; payload?: { payloa
 
 export function ToolChart({ data, skills, onToolClick }: Props) {
   const top = data.slice(0, 15);
+  // Only legend the agents that actually appear in the rendered bars,
+  // so a filtered view doesn't list colors that aren't on screen.
+  const agentsInChart = [...new Set(top.map((t) => t.primary_agent).filter(Boolean))];
 
   return (
     <Card>
@@ -63,7 +69,7 @@ export function ToolChart({ data, skills, onToolClick }: Props) {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4">
             <CardTitle>Top Tools</CardTitle>
-            <AgentLegend />
+            <AgentLegend agents={agentsInChart} />
           </div>
         </div>
       </CardHeader>

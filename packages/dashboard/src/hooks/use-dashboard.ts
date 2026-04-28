@@ -2,9 +2,9 @@
 
 import { useEffect, useState, useCallback } from "react";
 import type {
-  Stats, ActivityRow, TokenRow, ToolRow, ProjectRow, ModelRow,
+  Stats, ActivityRow, HeatmapRow, TokenRow, ToolRow, ProjectRow, ModelRow,
   SessionRow, SkillRow, ToolDetail,
-  GitStats, GitTimelineRow, GitCommitRow,
+  GitStats, GitTimelineRow, GitCommitRow, GitSessionRow,
 } from "@/lib/queries";
 
 export interface DashboardData {
@@ -21,6 +21,7 @@ export interface DashboardData {
 export interface DashboardFilters {
   days: number | null;
   project: string | null;
+  agent?: string | null;
   granularity?: string;
   model?: string | null;
   tool?: string | null;
@@ -30,6 +31,7 @@ function buildParams(f: DashboardFilters, extra?: Record<string, string>): strin
   const p = new URLSearchParams();
   if (f.days) p.set("days", String(f.days));
   if (f.project) p.set("project", f.project);
+  if (f.agent) p.set("agent", f.agent);
   if (f.granularity && f.granularity !== "day") p.set("granularity", f.granularity);
   if (f.model) p.set("model", f.model);
   if (f.tool) p.set("tool", f.tool);
@@ -57,11 +59,11 @@ export function useDashboard(filters: DashboardFilters) {
 
   // Destructure primitives so exhaustive-deps is satisfied without the
   // whole filters object being a dep.
-  const { days, project, granularity, model, tool } = filters;
+  const { days, project, agent, granularity, model, tool } = filters;
 
   useEffect(() => {
     let cancelled = false;
-    const params = buildParams({ days, project, granularity, model, tool });
+    const params = buildParams({ days, project, agent, granularity, model, tool });
 
     Promise.all([
       fetchJson<Stats>(`/api/stats${params}`),
@@ -86,7 +88,7 @@ export function useDashboard(filters: DashboardFilters) {
       });
 
     return () => { cancelled = true; };
-  }, [days, project, granularity, model, tool, tick]);
+  }, [days, project, agent, granularity, model, tool, tick]);
 
   const refresh = useCallback(() => setTick((t) => t + 1), []);
   return { data, loading, error, refresh };
@@ -120,6 +122,21 @@ export function useModelList() {
   }, []);
 
   return models;
+}
+
+export function useAgentList() {
+  const [agents, setAgents] = useState<string[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/agent-list")
+      .then((r) => r.json())
+      .then((data) => { if (!cancelled && Array.isArray(data)) setAgents(data); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+  return agents;
 }
 
 export interface GitData {
@@ -162,6 +179,54 @@ export function useGitData(filters: DashboardFilters) {
 
   const refresh = useCallback(() => setTick((t) => t + 1), []);
   return { data, loading, error, refresh };
+}
+
+export function useSessionCommits(sessionId: string | null) {
+  const [commits, setCommits] = useState<GitCommitRow[] | null>(null);
+
+  useEffect(() => {
+    if (!sessionId) { setCommits(null); return; }
+    let cancelled = false;
+    fetchJson<GitCommitRow[]>(`/api/session-commits?id=${encodeURIComponent(sessionId)}`)
+      .then((d) => { if (!cancelled) setCommits(d); })
+      .catch(() => { if (!cancelled) setCommits([]); });
+    return () => { cancelled = true; };
+  }, [sessionId]);
+
+  return commits;
+}
+
+export function useHeatmap(filters: DashboardFilters) {
+  const [rows, setRows] = useState<HeatmapRow[] | null>(null);
+  const { days, project, agent, granularity } = filters;
+
+  useEffect(() => {
+    let cancelled = false;
+    const params = buildParams({ days, project, agent, granularity });
+    fetchJson<HeatmapRow[]>(`/api/heatmap${params}`)
+      .then((d) => { if (!cancelled) setRows(d); })
+      .catch(() => { if (!cancelled) setRows([]); });
+    return () => { cancelled = true; };
+  }, [days, project, agent, granularity]);
+
+  return rows;
+}
+
+export function useGitSessions(filters: DashboardFilters, enabled: boolean) {
+  const [sessions, setSessions] = useState<GitSessionRow[] | null>(null);
+  const { days, project, agent, granularity } = filters;
+
+  useEffect(() => {
+    if (!enabled) return;
+    let cancelled = false;
+    const params = buildParams({ days, project, agent, granularity });
+    fetchJson<GitSessionRow[]>(`/api/git-sessions${params}`)
+      .then((d) => { if (!cancelled) setSessions(d); })
+      .catch(() => { if (!cancelled) setSessions([]); });
+    return () => { cancelled = true; };
+  }, [enabled, days, project, agent, granularity]);
+
+  return sessions;
 }
 
 export function useToolDetail(tool: string | null, filters: DashboardFilters) {

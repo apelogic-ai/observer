@@ -1,10 +1,10 @@
 "use client";
 
 import {
-  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell,
+  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, LabelList,
 } from "recharts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { CHART_PALETTE } from "@/lib/colors";
+import { CHART_PALETTE, TOOLTIP_CONTENT_STYLE, TOOLTIP_ITEM_STYLE, TOOLTIP_LABEL_STYLE } from "@/lib/colors";
 import { formatNumber } from "@/lib/format";
 import type { ProjectRow } from "@/lib/queries";
 
@@ -19,11 +19,16 @@ export function ProjectChart({ data, onProjectClick }: Props) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Projects</CardTitle>
+        <CardTitle>
+          Projects
+          <span className="ml-2 text-xs font-normal text-muted-foreground">
+            tokens (input + output + cache reads + writes)
+          </span>
+        </CardTitle>
       </CardHeader>
       <CardContent>
         <ResponsiveContainer width="100%" height={Math.max(240, top.length * 32)}>
-          <BarChart data={top} layout="vertical" margin={{ left: 100 }}>
+          <BarChart data={top} layout="vertical" margin={{ left: 100, right: 60 }}>
             <XAxis
               type="number"
               tick={{ fill: "#8b949e", fontSize: 11 }}
@@ -40,16 +45,13 @@ export function ProjectChart({ data, onProjectClick }: Props) {
               width={100}
             />
             <Tooltip
-              contentStyle={{
-                background: "#171717",
-                border: "1px solid rgba(255,255,255,0.1)",
-                borderRadius: 8,
-                fontSize: 12,
-              }}
+              contentStyle={TOOLTIP_CONTENT_STYLE}
+              labelStyle={TOOLTIP_LABEL_STYLE}
+              itemStyle={TOOLTIP_ITEM_STYLE}
               formatter={(value) => formatNumber(Number(value))}
             />
             <Bar
-              dataKey="entries"
+              dataKey="total_tokens"
               radius={[0, 4, 4, 0]}
               cursor={onProjectClick ? "pointer" : undefined}
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -58,6 +60,12 @@ export function ProjectChart({ data, onProjectClick }: Props) {
               {top.map((entry, i) => (
                 <Cell key={entry.project} fill={CHART_PALETTE[i % CHART_PALETTE.length]} />
               ))}
+              <LabelList
+                dataKey="total_tokens"
+                position="right"
+                formatter={(v) => formatNumber(Number(v))}
+                style={{ fill: "#e6edf3", fontSize: 11 }}
+              />
             </Bar>
           </BarChart>
         </ResponsiveContainer>
