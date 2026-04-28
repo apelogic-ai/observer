@@ -12,7 +12,7 @@
  * instance for the whole suite (workers=1).
  */
 
-import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, statSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -48,6 +48,13 @@ function writeJsonl(path: string, rows: Entry[]) {
 }
 
 export default async function globalSetup() {
+  // CI log so we can see in the workflow output that seed actually
+  // executed and where it wrote the fixture. The v0.1.13 first attempt
+  // had the diag probe show traceRows:0; this tells us if seed ran at
+  // all and whether the path matches the dashboard's data_dir.
+  console.log(`[seed] FIXTURE_ROOT=${FIXTURE_ROOT}`);
+  console.log(`[seed] cwd=${process.cwd()}`);
+
   // Wipe and recreate so re-runs are deterministic.
   if (existsSync(FIXTURE_ROOT)) rmSync(FIXTURE_ROOT, { recursive: true });
   mkdirSync(FIXTURE_ROOT, { recursive: true });
@@ -151,4 +158,21 @@ export default async function globalSetup() {
   // The test entrypoint sets OBSERVER_SKIP_FOREIGN_FILTER=1 already; we
   // just need to be sure it's set before the server boots.
   process.env.OBSERVER_SKIP_FOREIGN_FILTER = "1";
+
+  // Verify the fixture actually got written. Helps diagnose CI failures
+  // where the dashboard server scans an empty/missing dir despite seed
+  // appearing to complete.
+  function tree(dir: string, depth = 0): string {
+    if (!existsSync(dir)) return `${"  ".repeat(depth)}${dir} [MISSING]`;
+    const lines: string[] = [];
+    const items = readdirSync(dir);
+    for (const item of items) {
+      const full = join(dir, item);
+      const stat = statSync(full);
+      lines.push(`${"  ".repeat(depth)}${item}${stat.isDirectory() ? "/" : ` (${stat.size}B)`}`);
+      if (stat.isDirectory()) lines.push(tree(full, depth + 1));
+    }
+    return lines.filter(Boolean).join("\n");
+  }
+  console.log(`[seed] fixture tree:\n${tree(FIXTURE_ROOT)}`);
 }
