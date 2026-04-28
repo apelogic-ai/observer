@@ -28,6 +28,13 @@ jobs:
       - name: Install workspace dependencies
         run: bun install
 
+      # Agent imports @observer/dashboard/runtime, which transitively
+      # references dist/out.tar + dist/build-info.json via `with { type:
+      # "file" }`. Those don't exist on a fresh checkout, so TS can't
+      # resolve them. Stubs get overwritten when the real build runs.
+      - name: Stub dashboard build artifacts
+        run: bun packages/dashboard/scripts/ensure-stubs.ts
+
       - name: Typecheck
         working-directory: packages/agent
         run: bun run typecheck
