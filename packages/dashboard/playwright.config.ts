@@ -34,14 +34,18 @@ export default defineConfig({
   ],
 
   webServer: {
-    // Skip rebuild between test runs in dev — assume the developer ran
-    // `bun run build` once. CI wires its own build step before tests.
-    command: process.env.CI
-      ? "bun run build && OBSERVER_DATA_DIR=$PWD/tests/e2e/fixtures/data OBSERVER_SKIP_FOREIGN_FILTER=1 bun server/index.ts"
-      : "OBSERVER_DATA_DIR=$PWD/tests/e2e/fixtures/data OBSERVER_SKIP_FOREIGN_FILTER=1 bun server/index.ts",
+    // CI builds the dashboard in a prior workflow step, so the webServer
+    // doesn't need to rebuild here. We just start the Bun server and
+    // point it at the seeded fixture. (Local devs are expected to have
+    // run `bun run build` once; the dev-loop optimisation isn't worth
+    // the doubled startup time on every test run.)
+    command: "bun server/index.ts",
     url: "http://localhost:3457",
     reuseExistingServer: !process.env.CI,
     timeout: 60_000,
+    // Use the resolved absolute path so the data dir is unambiguous —
+    // earlier we relied on shell `$PWD`, which depends on whatever
+    // cwd Playwright spawns the subprocess in.
     env: {
       OBSERVER_DATA_DIR: FIXTURE_DATA_DIR,
       // Bypass the dashboard's foreign-commit filter for tests — the

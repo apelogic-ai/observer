@@ -11,9 +11,143 @@ on:
         required: true
         type: string
 
+# OS-independent gates (lint, typecheck, unit tests, e2e) run once on
+# Linux as their own jobs. The OS-specific `build` matrix only spins up
+# after they all pass. Visible benefit:
+#   • workflow graph names every gate so a failure points at the cause
+#   • lint/typecheck/tests don't duplicate 3× across the matrix
+#   • a UI regression in e2e blocks all binaries from being built
+
 jobs:
+  lint:
+    name: Lint (dashboard)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.21"
+      - name: Install workspace dependencies
+        run: bun install
+      - name: Lint
+        working-directory: packages/dashboard
+        run: bun run lint
+
+  typecheck:
+    name: Typecheck (agent + api + dashboard)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.21"
+      - name: Install workspace dependencies
+        run: bun install
+      # The agent imports @observer/dashboard/runtime, which transitively
+      # imports `embed.ts` (which references dist/out.tar +
+      # dist/build-info.json via `with { type: "file" }`). Those don't exist
+      # on a fresh checkout, so TS can't resolve them. Drop in empty stubs
+      # before any typecheck step; they get overwritten when the real
+      # dashboard build runs in `build`.
+      - name: Stub dashboard build artifacts
+        run: bun packages/dashboard/scripts/ensure-stubs.ts
+      - name: Agent
+        working-directory: packages/agent
+        run: bun run typecheck
+      - name: API
+        working-directory: packages/api
+        run: bun run typecheck
+      - name: Dashboard (UI + server)
+        working-directory: packages/dashboard
+        run: bun run typecheck
+
+  agent-tests:
+    name: Tests (agent)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.21"
+      - name: Install workspace dependencies
+        run: bun install
+      - name: Stub dashboard build artifacts
+        run: bun packages/dashboard/scripts/ensure-stubs.ts
+      - name: Run
+        working-directory: packages/agent
+        run: bun run test
+
+  api-tests:
+    name: Tests (api)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.21"
+      - name: Install workspace dependencies
+        run: bun install
+      - name: Run
+        working-directory: packages/api
+        run: bun run test
+
+  dashboard-tests:
+    name: Tests (dashboard server)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.21"
+      - name: Install workspace dependencies
+        run: bun install
+      - name: Run
+        working-directory: packages/dashboard
+        run: bun run test
+
+  e2e:
+    name: Tests (dashboard e2e)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Single-OS Playwright run. Catches UI regressions (silent toolbar
+    # handlers, broken heatmap, session ↔ commit drift) that pure unit
+    # tests miss. Gates the release matrix.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.21"
+      - name: Install workspace dependencies
+        run: bun install
+      - name: Install Playwright browser
+        working-directory: packages/dashboard
+        run: bunx playwright install --with-deps chromium
+      - name: Build dashboard
+        working-directory: packages/dashboard
+        run: bun run build
+      - name: Run
+        working-directory: packages/dashboard
+        env:
+          CI: "1"
+        run: bunx playwright test
+      - name: Upload trace + screenshots on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            packages/dashboard/test-results
+            packages/dashboard/playwright-report
+          retention-days: 7
+
   build:
     name: Build ${{ matrix.target }}
+    needs: [lint, typecheck, agent-tests, api-tests, dashboard-tests, e2e]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
 
@@ -43,45 +177,8 @@ jobs:
         with:
           bun-version: "1.2.21"
 
-      # Workspace install — resolves @observer/dashboard link for the agent.
       - name: Install workspace dependencies
         run: bun install
-
-      # The agent imports @observer/dashboard/runtime, which transitively
-      # imports `embed.ts` (which references dist/out.tar +
-      # dist/build-info.json via `with { type: "file" }`). Those don't exist
-      # on a fresh checkout, so TypeScript can't resolve them and the agent
-      # typecheck blows up. Drop in empty stubs before any typecheck step;
-      # they get overwritten when the real dashboard build runs.
-      - name: Stub dashboard build artifacts (for typecheck)
-        run: bun packages/dashboard/scripts/ensure-stubs.ts
-
-      # Quality gates — anything green on CI must stay green at release.
-      # Without these the release path could ship regressions outside the
-      # agent test suite.
-      - name: Agent typecheck
-        working-directory: packages/agent
-        run: bun run typecheck
-
-      - name: Agent tests
-        working-directory: packages/agent
-        run: bun run test
-
-      - name: API typecheck
-        working-directory: packages/api
-        run: bun run typecheck
-
-      - name: API tests
-        working-directory: packages/api
-        run: bun run test
-
-      - name: Dashboard typecheck (UI + server)
-        working-directory: packages/dashboard
-        run: bun run typecheck
-
-      - name: Dashboard lint
-        working-directory: packages/dashboard
-        run: bun run lint
 
       # Produces packages/dashboard/out/ + dist/out.tar + dist/build-info.json,
       # which the agent binary embeds via `with { type: "file" }`.
@@ -119,47 +216,9 @@ jobs:
             packages/agent/observer-${{ matrix.target }}${{ matrix.ext }}
             packages/agent/observer-${{ matrix.target }}${{ matrix.ext }}.sha256
 
-  e2e:
-    # Single Linux runner — Playwright fixture is deterministic and fast,
-    # but we don't need to re-run it on every matrix OS. Gates the release
-    # job so a UI regression (silent toolbar handler, broken heatmap, etc.)
-    # blocks the tag from publishing.
-    name: Dashboard e2e
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: "1.2.21"
-      - name: Install workspace dependencies
-        run: bun install
-      - name: Stub dashboard build artifacts (for typecheck)
-        run: bun packages/dashboard/scripts/ensure-stubs.ts
-      - name: Install Playwright browser
-        working-directory: packages/dashboard
-        run: bunx playwright install --with-deps chromium
-      - name: Build dashboard
-        working-directory: packages/dashboard
-        run: bun run build
-      - name: Run Playwright tests
-        working-directory: packages/dashboard
-        env:
-          CI: "1"
-        run: bunx playwright test
-      - name: Upload trace + screenshots on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: playwright-report
-          path: |
-            packages/dashboard/test-results
-            packages/dashboard/playwright-report
-          retention-days: 7
-
   release:
     name: Create Release
-    needs: [build, e2e]
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
