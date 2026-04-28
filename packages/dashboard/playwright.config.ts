@@ -45,8 +45,13 @@ export default defineConfig({
     timeout: 60_000,
     // Use the resolved absolute path so the data dir is unambiguous —
     // earlier we relied on shell `$PWD`, which depends on whatever
-    // cwd Playwright spawns the subprocess in.
+    // cwd Playwright spawns the subprocess in. The spread of process.env
+    // is critical: Playwright's `env:` REPLACES the child env rather
+    // than merging, so without this PATH/HOME/etc. are missing and the
+    // bun process may misbehave (silently empty fixture in CI was
+    // traced to this).
     env: {
+      ...(process.env as Record<string, string>),
       OBSERVER_DATA_DIR: FIXTURE_DATA_DIR,
       // Bypass the dashboard's foreign-commit filter for tests — the
       // fixture authors don't match the developer's real config.yaml,
