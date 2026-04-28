@@ -3,6 +3,10 @@ dist/
 .turbo/
 *.tsbuildinfo
 
+# Playwright artifacts (a stray run from the repo root drops test-results/ here)
+test-results/
+playwright-report/
+
 # OS
 .DS_Store
 Thumbs.db
