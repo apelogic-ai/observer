@@ -141,7 +141,7 @@ run("bun run build", { cwd: resolve(repoRoot, "packages/dashboard") });
 // only when the developer asked for --skip-tests.
 if (!skipTests) {
   section("Dashboard e2e (Playwright)");
-  run("bunx playwright test", { cwd: resolve(repoRoot, "packages/dashboard") });
+  run("bun run test:e2e", { cwd: resolve(repoRoot, "packages/dashboard") });
 }
 
 section("Binary compile smoke");

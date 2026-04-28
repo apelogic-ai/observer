@@ -1,15 +1,15 @@
 /**
  * Generate a deterministic trace fixture under tests/e2e/fixtures/data.
  *
+ * Run as a standalone script BEFORE Playwright starts (`test:e2e` chains
+ * `bun tests/e2e/seed.ts && playwright test`). It used to be wired as a
+ * Playwright globalSetup, but the dashboard server scans
+ * OBSERVER_DATA_DIR once at boot — and Playwright launches webServer in
+ * parallel with globalSetup, so the server cached an empty dir before
+ * seed could write. Pre-seeding is the standard fix.
+ *
  * Layout mirrors what the agent's disk-shipper produces:
  *   <date>/<agent>/<sessionHash>.jsonl
- *
- * Two days, three agents, with cursor having a token sidecar so we can
- * exercise the API-augmented path that motivated this whole work.
- *
- * Why a global setup file instead of a per-test fixture: the dashboard
- * server reads from OBSERVER_DATA_DIR at start, and we keep one server
- * instance for the whole suite (workers=1).
  */
 
 import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, statSync } from "node:fs";
@@ -56,7 +56,7 @@ function writeJsonl(path: string, rows: Entry[] | Record<string, unknown>[]) {
   }
 }
 
-export default async function globalSetup() {
+async function seed() {
   // CI log so we can see in the workflow output that seed actually
   // executed and where it wrote the fixture. The v0.1.13 first attempt
   // had the diag probe show traceRows:0; this tells us if seed ran at
@@ -162,15 +162,6 @@ export default async function globalSetup() {
     } as any,
   ]);
 
-  // The dashboard's foreign-commit filter would otherwise drop these test
-  // commits (their author doesn't match a real developer in config.yaml).
-  // The test entrypoint sets OBSERVER_SKIP_FOREIGN_FILTER=1 already; we
-  // just need to be sure it's set before the server boots.
-  process.env.OBSERVER_SKIP_FOREIGN_FILTER = "1";
-
-  // Verify the fixture actually got written. Helps diagnose CI failures
-  // where the dashboard server scans an empty/missing dir despite seed
-  // appearing to complete.
   function tree(dir: string, depth = 0): string {
     if (!existsSync(dir)) return `${"  ".repeat(depth)}${dir} [MISSING]`;
     const lines: string[] = [];
@@ -185,3 +176,5 @@ export default async function globalSetup() {
   }
   console.log(`[seed] fixture tree:\n${tree(FIXTURE_ROOT)}`);
 }
+
+await seed();

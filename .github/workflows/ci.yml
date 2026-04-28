@@ -133,6 +133,9 @@ jobs:
       - name: Build dashboard
         working-directory: packages/dashboard
         run: bun run build
+      - name: Seed e2e fixture
+        working-directory: packages/dashboard
+        run: bun tests/e2e/seed.ts
       - name: Run Playwright tests
         working-directory: packages/dashboard
         env:
