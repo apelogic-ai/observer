@@ -1,0 +1,7 @@
+# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored.
+
+aws_region   = "us-west-2"
+ssh_key_name = "your-aws-key-pair"
+ssh_cidr     = "203.0.113.42/32"   # tighten to your IP; "0.0.0.0/0" works for first bring-up
+bucket_name  = "observer-dev-CHANGE-ME"   # globally unique S3 name
+domain_name  = "api.dev.observer.apelogic.ai"

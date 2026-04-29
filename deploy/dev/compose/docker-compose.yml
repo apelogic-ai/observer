@@ -1,0 +1,60 @@
+# Observer API dev stack.
+#
+# Two services: caddy (TLS termination + reverse proxy) and observer-api
+# (the ingestor). Caddy provisions a Let's Encrypt cert for ${DOMAIN} via
+# the HTTP-01 challenge — that requires port 80 to be reachable from the
+# internet (it is, per the security group).
+#
+# All env-var configuration lives in `.env` (see .env.example). The
+# ingestor uses S3 for storage; AWS credentials come from the EC2 instance
+# role attached by terraform — no AKID/secret is set here, the SDK picks
+# them up automatically.
+#
+# Bring up:   docker compose up -d --build
+# Tail logs:  docker compose logs -f
+# Tear down:  docker compose down
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      - DOMAIN=${DOMAIN}
+    depends_on:
+      - observer-api
+
+  observer-api:
+    # Build from the repo tree shipped onto the host. The build context is
+    # the repo root because the Dockerfile copies workspace metadata.
+    build:
+      context: ../../..
+      dockerfile: packages/api/Dockerfile
+    restart: unless-stopped
+    expose:
+      - "19900"
+    environment:
+      - NODE_ENV=production
+      - OBSERVER_API_KEYS=${OBSERVER_API_KEYS}
+      - OBSERVER_STORAGE=s3
+      - OBSERVER_S3_BUCKET=${OBSERVER_S3_BUCKET}
+      - OBSERVER_S3_REGION=${OBSERVER_S3_REGION}
+      # AWS_REGION is what the SDK actually reads; mirror OBSERVER_S3_REGION
+      # so the SDK doesn't have to fall back to IMDS.
+      - AWS_REGION=${OBSERVER_S3_REGION}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:19900/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -45,35 +45,34 @@ describe("Store", () => {
     ...overrides,
   });
 
-  it("stores a batch in Hive-partitioned directory", () => {
-    store.saveBatch(makeBatch());
+  it("stores a batch in Hive-partitioned directory", async () => {
+    await store.saveBatch(makeBatch());
     const jsonlFiles = findFiles(dataDir, ".jsonl");
     expect(jsonlFiles).toHaveLength(1);
-    // Verify Hive partitioning path
     expect(jsonlFiles[0]).toContain("year=2026");
     expect(jsonlFiles[0]).toContain("month=04");
     expect(jsonlFiles[0]).toContain("day=08");
     expect(jsonlFiles[0]).toContain("agent=claude_code");
   });
 
-  it("uses batchId as filename", () => {
-    store.saveBatch(makeBatch({ batchId: "abc123def456" }));
+  it("uses batchId as filename", async () => {
+    await store.saveBatch(makeBatch({ batchId: "abc123def456" }));
     const jsonlFiles = findFiles(dataDir, ".jsonl");
     expect(jsonlFiles[0]).toContain("abc123def456.jsonl");
   });
 
-  it("stores entries as individual JSONL lines", () => {
-    store.saveBatch(makeBatch({ entries: ['{"a":1}', '{"a":2}', '{"a":3}'] }));
+  it("stores entries as individual JSONL lines", async () => {
+    await store.saveBatch(makeBatch({ entries: ['{"a":1}', '{"a":2}', '{"a":3}'] }));
     const jsonlFiles = findFiles(dataDir, ".jsonl");
     const content = readFileSync(jsonlFiles[0], "utf-8");
     const lines = content.trim().split("\n");
     expect(lines).toHaveLength(3);
   });
 
-  it("partitions by agent type", () => {
-    store.saveBatch(makeBatch({ batchId: "b1", agent: "claude_code" }));
-    store.saveBatch(makeBatch({ batchId: "b2", agent: "codex" }));
-    store.saveBatch(makeBatch({ batchId: "b3", agent: "cursor" }));
+  it("partitions by agent type", async () => {
+    await store.saveBatch(makeBatch({ batchId: "b1", agent: "claude_code" }));
+    await store.saveBatch(makeBatch({ batchId: "b2", agent: "codex" }));
+    await store.saveBatch(makeBatch({ batchId: "b3", agent: "cursor" }));
 
     const all = findFiles(dataDir, ".jsonl");
     expect(all).toHaveLength(3);
@@ -82,8 +81,8 @@ describe("Store", () => {
     expect(all.some((f) => f.includes("agent=cursor"))).toBe(true);
   });
 
-  it("saves batch metadata alongside entries", () => {
-    store.saveBatch(makeBatch());
+  it("saves batch metadata alongside entries", async () => {
+    await store.saveBatch(makeBatch());
     const metaFiles = findFiles(dataDir, ".meta.json");
     expect(metaFiles).toHaveLength(1);
 
@@ -94,77 +93,76 @@ describe("Store", () => {
     expect(meta.batchId).toBe("test_batch_001");
   });
 
-  it("returns batch stats", () => {
-    const stats = store.saveBatch(makeBatch({ entries: ['{"x":1}', '{"x":2}'] }));
+  it("returns batch stats", async () => {
+    const stats = await store.saveBatch(makeBatch({ entries: ['{"x":1}', '{"x":2}'] }));
     expect(stats.entryCount).toBe(2);
     expect(stats.filePath).toBeTruthy();
     expect(stats.filePath).toContain(".jsonl");
   });
 
-  it("deduplicates by batchId", () => {
-    store.saveBatch(makeBatch({ batchId: "dedup_test" }));
-    const result = store.saveBatch(makeBatch({ batchId: "dedup_test" }));
+  it("deduplicates by batchId", async () => {
+    await store.saveBatch(makeBatch({ batchId: "dedup_test" }));
+    const result = await store.saveBatch(makeBatch({ batchId: "dedup_test" }));
     expect(result.duplicate).toBe(true);
     expect(result.entryCount).toBe(0);
 
-    // Only one file written
+    // Only one batch file written
     const jsonlFiles = findFiles(dataDir, ".jsonl");
     expect(jsonlFiles).toHaveLength(1);
   });
 
-  it("dedup persists across store instances", () => {
-    store.saveBatch(makeBatch({ batchId: "persist_test", developer: "alice@acme.com" }));
+  it("dedup persists across store instances", async () => {
+    await store.saveBatch(makeBatch({ batchId: "persist_test", developer: "alice@acme.com" }));
 
     const store2 = new Store(dataDir);
-    expect(store2.isDuplicate("persist_test", "alice@acme.com")).toBe(true);
+    expect(await store2.isDuplicate("persist_test", "alice@acme.com")).toBe(true);
   });
 
-  it("dedup is per-developer — same batchId from different devs is not a duplicate", () => {
-    store.saveBatch(makeBatch({ batchId: "shared_id", developer: "alice@acme.com" }));
-    // Bob sends the same batchId — not a duplicate (different developer)
-    const result = store.saveBatch(makeBatch({ batchId: "shared_id", developer: "bob@acme.com" }));
+  it("dedup is per-developer — same batchId from different devs is not a duplicate", async () => {
+    await store.saveBatch(makeBatch({ batchId: "shared_id", developer: "alice@acme.com" }));
+    const result = await store.saveBatch(makeBatch({ batchId: "shared_id", developer: "bob@acme.com" }));
     expect(result.duplicate).toBeUndefined();
     expect(result.entryCount).toBe(2);
   });
 
-  it("dedup log lives in developer's partition", () => {
-    store.saveBatch(makeBatch({ batchId: "id_1" }));
-    store.saveBatch(makeBatch({ batchId: "id_2" }));
+  it("dedup markers live under dedup/{devHash}/", async () => {
+    // The previous layout used a single appendable dedup.log per partition.
+    // The current layout uses one tiny marker object per batchId — works
+    // identically on local FS and S3 (where there is no append).
+    await store.saveBatch(makeBatch({ batchId: "id_1" }));
+    await store.saveBatch(makeBatch({ batchId: "id_2" }));
 
-    // Find the dedup.log — should be inside the dev= partition
-    const dedupLogs = findFiles(dataDir, "dedup.log");
-    expect(dedupLogs).toHaveLength(1);
-    expect(dedupLogs[0]).toContain("dev=");
-
-    const content = readFileSync(dedupLogs[0], "utf-8");
-    const lines = content.trim().split("\n");
-    expect(lines).toEqual(["id_1", "id_2"]);
+    // dedup/{devHash}/id_1 and dedup/{devHash}/id_2 should both exist.
+    // We don't pin the dev hash here; just count markers.
+    const dedupRoot = join(dataDir, "dedup");
+    expect(existsSync(dedupRoot)).toBe(true);
+    const allDedup = findFiles(dedupRoot, "");
+    expect(allDedup.length).toBe(2);
+    expect(allDedup.some((p) => p.endsWith("/id_1"))).toBe(true);
+    expect(allDedup.some((p) => p.endsWith("/id_2"))).toBe(true);
   });
 
-  it("listBatches walks partitioned directories", () => {
-    store.saveBatch(makeBatch({ batchId: "b1", agent: "claude_code" }));
-    store.saveBatch(makeBatch({ batchId: "b2", agent: "codex", shippedAt: "2026-04-09T10:00:00Z" }));
+  it("listBatches walks partitioned directories", async () => {
+    await store.saveBatch(makeBatch({ batchId: "b1", agent: "claude_code" }));
+    await store.saveBatch(makeBatch({ batchId: "b2", agent: "codex", shippedAt: "2026-04-09T10:00:00Z" }));
 
-    const batches = store.listBatches();
+    const batches = await store.listBatches();
     expect(batches).toHaveLength(2);
   });
 
-  it("generates batchId when not provided", () => {
-    store.saveBatch(makeBatch({ batchId: undefined }));
+  it("generates batchId when not provided", async () => {
+    await store.saveBatch(makeBatch({ batchId: undefined }));
     const jsonlFiles = findFiles(dataDir, ".jsonl");
     expect(jsonlFiles).toHaveLength(1);
-    // Filename should be a hex hash, not "undefined"
     expect(jsonlFiles[0]).not.toContain("undefined");
   });
 
-  it("files are immutable — same batchId never overwrites", () => {
-    store.saveBatch(makeBatch({ batchId: "immutable_test", entries: ['{"v":1}'] }));
+  it("files are immutable — same batchId never overwrites", async () => {
+    await store.saveBatch(makeBatch({ batchId: "immutable_test", entries: ['{"v":1}'] }));
 
-    // Attempt to save different content with same batchId
-    const result = store.saveBatch(makeBatch({ batchId: "immutable_test", entries: ['{"v":2}'] }));
+    const result = await store.saveBatch(makeBatch({ batchId: "immutable_test", entries: ['{"v":2}'] }));
     expect(result.duplicate).toBe(true);
 
-    // Original content preserved
     const jsonlFiles = findFiles(dataDir, ".jsonl");
     const content = readFileSync(jsonlFiles[0], "utf-8");
     expect(content).toContain('"v":1');
