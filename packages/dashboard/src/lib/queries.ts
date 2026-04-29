@@ -40,6 +40,40 @@ export interface ToolRow {
   agents: string[];
 }
 
+export interface MotifRow {
+  toolName: string;
+  shape: string;
+  occurrences: number;
+  sessions: number;
+  tokens: number;
+}
+
+export interface IncidentRow {
+  sessionId: string;
+  agent: string;
+  project: string | null;
+  toolName: string;
+  shape: string;
+  occurrences: number;
+  tokens: number;
+  sessionTokens: number;
+  firstAt: string;
+  lastAt: string;
+}
+
+export interface DarkSpendRow {
+  sessionId: string;
+  agent: string;
+  project: string | null;
+  started: string;
+  ended: string;
+  activeMs: number;
+  tokens: number;
+  commits: number;
+  locDelta: number;
+  tokensPerLoc: number;
+}
+
 export interface ProjectRow {
   project: string;
   entries: number;

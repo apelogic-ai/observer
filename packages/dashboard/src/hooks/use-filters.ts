@@ -9,6 +9,7 @@ export interface FilterState {
   days: number | null;
   project: string | null;
   agent: string | null;
+  tool: string | null;
   granularity: Granularity;
 }
 
@@ -27,6 +28,7 @@ export function useFilters() {
       days: daysParam === "" || daysParam === "all" ? null : daysParam ? parseInt(daysParam, 10) : 30,
       project: searchParams.get("project") || null,
       agent: searchParams.get("agent") || null,
+      tool: searchParams.get("tool") || null,
       granularity: parseGranularity(searchParams.get("granularity")),
     };
   }, [searchParams]);
@@ -46,6 +48,10 @@ export function useFilters() {
       if ("agent" in updates) {
         if (updates.agent) p.set("agent", updates.agent);
         else p.delete("agent");
+      }
+      if ("tool" in updates) {
+        if (updates.tool) p.set("tool", updates.tool);
+        else p.delete("tool");
       }
       if ("granularity" in updates) {
         if (updates.granularity === "day") p.delete("granularity"); // day is default
@@ -67,6 +73,7 @@ export function useFilters() {
   const setDays = useCallback((days: number | null) => updateParams({ days }), [updateParams]);
   const setProject = useCallback((project: string | null) => updateParams({ project }), [updateParams]);
   const setAgent = useCallback((agent: string | null) => updateParams({ agent }), [updateParams]);
+  const setTool = useCallback((tool: string | null) => updateParams({ tool }), [updateParams]);
   const setGranularity = useCallback((granularity: Granularity) => updateParams({ granularity }), [updateParams]);
 
   /** Build query string preserving current filter state, with optional overrides. */
@@ -78,6 +85,7 @@ export function useFilters() {
       if (merged.days === null) p.set("days", "all");
       if (merged.project) p.set("project", merged.project);
       if (merged.agent) p.set("agent", merged.agent);
+      if (merged.tool) p.set("tool", merged.tool);
       if (merged.granularity !== "day") p.set("granularity", merged.granularity);
       const s = p.toString();
       return s ? `?${s}` : "";
@@ -85,5 +93,5 @@ export function useFilters() {
     [filters],
   );
 
-  return { filters, setDays, setProject, setAgent, setGranularity, buildQs };
+  return { filters, setDays, setProject, setAgent, setTool, setGranularity, buildQs };
 }

@@ -17,8 +17,12 @@ function writeJsonl(path: string, rows: Array<Record<string, unknown>>): void {
 }
 
 const TODAY = new Date().toISOString().slice(0, 10);
-const ONE_HOUR_AGO   = new Date(Date.now() - 1 * 3600_000).toISOString();
-const THREE_HOURS_AGO = new Date(Date.now() - 3 * 3600_000).toISOString();
+// Anchor fixture timestamps at noon TODAY (UTC) so the rows always fall on
+// the same UTC date as TODAY. Using Date.now() - Nh straddled midnight UTC
+// in a way that put some rows on the prior day and broke `r.date === TODAY`
+// asserts when the test ran in the early-UTC hours.
+const ONE_HOUR_AGO   = `${TODAY}T11:00:00Z`;
+const THREE_HOURS_AGO = `${TODAY}T09:00:00Z`;
 
 let DATA_DIR: string;
 

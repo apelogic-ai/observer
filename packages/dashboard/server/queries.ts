@@ -39,7 +39,16 @@ function where(f: Filters, extra?: string[]): string {
   if (f.days)    conds.push(`timestamp >= date('now', '-${f.days} days')`);
   if (f.project) conds.push(`project = '${esc(f.project)}'`);
   if (f.model)   conds.push(`model = '${esc(f.model)}'`);
-  if (f.tool)    conds.push(`toolName = '${esc(f.tool)}'`);
+  if (f.tool) {
+    // Sentinel "*mcp" filters across all MCP tools regardless of naming
+    // convention (Claude Code emits `mcp:server:tool`, the API uses
+    // `mcp__server__tool`). Anything else is treated as an exact match.
+    if (f.tool === "*mcp") {
+      conds.push(`(toolName LIKE 'mcp:%' OR toolName LIKE 'mcp\\_\\_%' ESCAPE '\\')`);
+    } else {
+      conds.push(`toolName = '${esc(f.tool)}'`);
+    }
+  }
   if (f.agent)   conds.push(`agent = '${esc(f.agent)}'`);
   return `WHERE ${conds.join(" AND ")}`;
 }
@@ -201,6 +210,321 @@ export async function getTools(f: Filters = {}, limit = 25): Promise<ToolRow[]> 
     LIMIT ${limit}
   `);
   return rows.map((r) => ({ ...r, agents: parseJsonArray(r.agents) }));
+}
+
+// ── Motifs (parked) ────────────────────────────────────────────
+//
+// Cross-session (tool, first-arg-word) frequency leaderboard.
+// Parked 2026-04-28 because the aggregation was too coarse to be
+// actionable: "Bash cd 1209×" or "Edit .ts 963×" tell you nothing
+// about what the agent actually did wrong. Replaced by `getIncidents`
+// below, which keys on per-session repetition of the *full* normalized
+// command — surfacing concrete loops like "agent ran the same db-mcp
+// query 14× in 30 min" that a human can act on.
+//
+// Function and unit test kept for now in case we re-wire it (e.g. as a
+// "popular tools" sidebar). Drop entirely if it stays unused for a few
+// releases.
+
+export interface MotifRow {
+  toolName: string;
+  shape: string;
+  occurrences: number;
+  sessions: number;
+  tokens: number;
+}
+
+interface MotifRawRow {
+  toolName: string;
+  command: string | null;
+  filePath: string | null;
+  sessionId: string | null;
+  tokens: number;
+}
+
+/** Reduce a tool call's argument to a coarse "shape" token. */
+function motifShape(toolName: string, command: string | null, filePath: string | null): string {
+  if (toolName === "Bash" && command) {
+    // First whitespace-separated word of the command — `grep -r foo`
+    // and `grep -n bar` share the shape "grep".
+    const m = command.trimStart().match(/^[^\s]+/);
+    return m ? m[0] : "";
+  }
+  if (filePath) {
+    // File extension if present (".ts"); otherwise empty so unrelated
+    // paths don't all collapse to one bucket.
+    const dot = filePath.lastIndexOf(".");
+    const slash = Math.max(filePath.lastIndexOf("/"), filePath.lastIndexOf("\\"));
+    if (dot > slash && dot < filePath.length - 1) return filePath.slice(dot);
+  }
+  return "";
+}
+
+export async function getMotifs(f: Filters = {}, limit = 25): Promise<MotifRow[]> {
+  const rows = await query<MotifRawRow>(`
+    SELECT
+      toolName,
+      command,
+      filePath,
+      sessionId,
+      ${TU_TOTAL} AS tokens
+    FROM traces
+    ${where(f, ["entryType = 'tool_call'", "toolName IS NOT NULL"])}
+  `);
+
+  type Bucket = { toolName: string; shape: string; occurrences: number; sessions: Set<string>; tokens: number };
+  const buckets = new Map<string, Bucket>();
+  for (const r of rows) {
+    const shape = motifShape(r.toolName, r.command, r.filePath);
+    const key = `${r.toolName} ${shape}`;
+    let b = buckets.get(key);
+    if (!b) {
+      b = { toolName: r.toolName, shape, occurrences: 0, sessions: new Set(), tokens: 0 };
+      buckets.set(key, b);
+    }
+    b.occurrences += 1;
+    if (r.sessionId) b.sessions.add(r.sessionId);
+    b.tokens += Number(r.tokens) || 0;
+  }
+
+  // Drop singletons — by definition a motif is something repeated.
+  return [...buckets.values()]
+    .filter((b) => b.occurrences >= 2)
+    .map((b) => ({ toolName: b.toolName, shape: b.shape, occurrences: b.occurrences, sessions: b.sessions.size, tokens: b.tokens }))
+    .sort((a, b) => b.occurrences - a.occurrences || b.tokens - a.tokens)
+    .slice(0, limit);
+}
+
+// ── Incidents ──────────────────────────────────────────────────
+//
+// Per-session redundant-loop detector. Groups tool calls by
+// (sessionId, toolName, normalized-args) and surfaces clusters where
+// the same normalized invocation occurred ≥3 times in one session.
+//
+// Why per-session, not cross-session: cross-session totals just tell
+// you which tools the agent uses a lot ("Bash cd 1209×") — that is
+// not actionable. Within-session repetition catches the failure mode
+// the user actually pays for: agent stuck in a loop, poking the same
+// thing over and over instead of stepping back. db-mcp shell-spam,
+// `git status` hammering, MCP query loops surface automatically.
+//
+// File-iteration tools (Read/Edit/Write/MultiEdit/NotebookEdit) are
+// excluded by design. Editing the same file 50 times in one session
+// is just "iterative coding" — it's how editors work; calling it a
+// "loop" produces noise that drowns out the actual stuck patterns
+// (MCP queries, search probes, web fetches).
+
+const ITERATION_TOOLS = new Set([
+  "Read", "Edit", "Write", "MultiEdit", "NotebookEdit",
+]);
+
+export interface IncidentRow {
+  sessionId: string;
+  agent: string;
+  project: string | null;
+  toolName: string;
+  shape: string;
+  occurrences: number;
+  tokens: number;          // tokens attributed to this loop's tool_call rows
+  sessionTokens: number;   // total tokens across the session — the cost frame
+  firstAt: string;
+  lastAt: string;
+}
+
+interface IncidentRawRow {
+  sessionId: string;
+  agent: string;
+  project: string | null;
+  toolName: string;
+  command: string | null;
+  filePath: string | null;
+  timestamp: string;
+  tokens: number;
+}
+
+/**
+ * Reduce a tool call's args to a "shape" that clusters near-duplicate
+ * invocations. Keep the verbatim command/path so the user sees the
+ * actual thing the agent kept doing; only collapse the parts that
+ * vary across runs (paths, quoted strings) so `grep foo /a/b` and
+ * `grep foo /c/d` count as the same loop.
+ */
+function incidentShape(_toolName: string, command: string | null, filePath: string | null): string {
+  // A `command` field exists for Bash and for any MCP tool that surfaces
+  // its primary argument as a command-like string (db-mcp shell, etc.).
+  if (command) {
+    return command
+      .trim()
+      .replace(/'[^']*'/g, "<str>")
+      .replace(/"[^"]*"/g, "<str>")
+      .replace(/\S*[/.][^\s]*/g, "<path>")    // anything containing / or .
+      .replace(/\s+/g, " ");
+  }
+  if (filePath) return filePath;
+  return "";
+}
+
+export async function getIncidents(f: Filters = {}, limit = 25): Promise<IncidentRow[]> {
+  const rows = await query<IncidentRawRow>(`
+    SELECT
+      sessionId,
+      agent,
+      project,
+      toolName,
+      command,
+      filePath,
+      timestamp,
+      ${TU_TOTAL} AS tokens
+    FROM traces
+    ${where(f, ["entryType = 'tool_call'", "toolName IS NOT NULL", "sessionId IS NOT NULL"])}
+  `);
+
+  // Session-wide totals come from message rows (where codex attributes its
+  // tokens), not just the tool_call rows. We pull this in a second query so
+  // the per-incident bucketing stays simple. Sessions outside the filter
+  // window are skipped — the JOIN-equivalent here is the lookup map.
+  const sessionTokenRows = await query<{ sessionId: string; total: number }>(`
+    SELECT sessionId, SUM(${TU_TOTAL}) AS total
+    FROM traces
+    ${where(f, ["sessionId IS NOT NULL"])}
+    GROUP BY sessionId
+  `);
+  const sessionTokens = new Map<string, number>();
+  for (const r of sessionTokenRows) sessionTokens.set(r.sessionId, Number(r.total) || 0);
+
+  type Bucket = {
+    sessionId: string; agent: string; project: string | null;
+    toolName: string; shape: string;
+    occurrences: number; tokens: number;
+    firstAt: string; lastAt: string;
+  };
+  const buckets = new Map<string, Bucket>();
+  for (const r of rows) {
+    if (ITERATION_TOOLS.has(r.toolName)) continue;
+    const shape = incidentShape(r.toolName, r.command, r.filePath);
+    if (!shape) continue;            // skip rows where we have no usable arg signal
+    const key = `${r.sessionId}\t${r.toolName}\t${shape}`;
+    let b = buckets.get(key);
+    if (!b) {
+      b = {
+        sessionId: r.sessionId, agent: r.agent, project: r.project,
+        toolName: r.toolName, shape,
+        occurrences: 0, tokens: 0,
+        firstAt: r.timestamp, lastAt: r.timestamp,
+      };
+      buckets.set(key, b);
+    }
+    b.occurrences += 1;
+    b.tokens += Number(r.tokens) || 0;
+    if (r.timestamp < b.firstAt) b.firstAt = r.timestamp;
+    if (r.timestamp > b.lastAt) b.lastAt = r.timestamp;
+  }
+
+  return [...buckets.values()]
+    .filter((b) => b.occurrences >= 3)
+    .map((b) => ({ ...b, sessionTokens: sessionTokens.get(b.sessionId) ?? 0 }))
+    .sort((a, b) => b.occurrences - a.occurrences || b.sessionTokens - a.sessionTokens)
+    .slice(0, limit);
+}
+
+// ── Dark spend ─────────────────────────────────────────────────
+//
+// Sessions where the agent burned tokens disproportionately to its
+// observable output. Two failure modes get one ranking: agent that
+// flailed and committed nothing (commits=0 → ratio = tokens), and
+// agent that produced something tiny for huge cost (1M tokens for
+// 5 LoC). Both surface as outliers when sorted by tokens/max(LoC, 1).
+//
+// Why this complements `getIncidents`: incidents catches per-session
+// repetition (agent stuck in a loop). Dark spend catches the broader
+// failure where the session may not loop visibly but still burned a
+// pile of tokens for nothing.
+
+export interface DarkSpendRow {
+  sessionId: string;
+  agent: string;
+  project: string | null;
+  started: string;
+  ended: string;
+  /** Active wall time (ms) — first/last minus gaps over 5min, like the
+   *  session detail page's metric. Wall (ended-started) is misleading
+   *  for sessions reused intermittently across days. */
+  activeMs: number;
+  tokens: number;
+  commits: number;
+  locDelta: number;
+  tokensPerLoc: number;
+}
+
+export async function getDarkSpend(f: Filters = {}, limit = 50): Promise<DarkSpendRow[]> {
+  // Per-session token totals from traces (covers both Claude Code's
+  // per-call attribution and codex's per-turn attribution — we just sum).
+  const sessionRows = await query<{
+    sessionId: string; agent: string; project: string | null;
+    started: string; ended: string; tokens: number;
+  }>(`
+    SELECT
+      sessionId,
+      MIN(agent) AS agent,
+      MAX(project) AS project,
+      MIN(timestamp) AS started,
+      MAX(timestamp) AS ended,
+      COALESCE(SUM(${TU_TOTAL}), 0) AS tokens
+    FROM traces
+    ${where(f, ["sessionId IS NOT NULL"])}
+    GROUP BY sessionId
+  `);
+
+  // Per-session commit counts + LoC delta from git_events.
+  const gitRows = await query<{ sessionId: string; commits: number; loc: number }>(`
+    SELECT
+      sessionId,
+      COUNT(*) AS commits,
+      COALESCE(SUM(COALESCE(insertions, 0) + COALESCE(deletions, 0)), 0) AS loc
+    FROM git_events
+    WHERE eventType = 'commit' AND sessionId IS NOT NULL
+    GROUP BY sessionId
+  `);
+  const gitBySession = new Map<string, { commits: number; loc: number }>();
+  for (const r of gitRows) gitBySession.set(r.sessionId, { commits: Number(r.commits), loc: Number(r.loc) });
+
+  // Per-session timestamps — needed so we can compute active time
+  // (wall minus gaps > 5 min). Sessions reused intermittently across
+  // days otherwise show a multi-day "duration" that's almost entirely
+  // idle. One ordered list per session, walked once.
+  const tsRows = await query<{ sessionId: string; timestamp: string }>(`
+    SELECT sessionId, timestamp
+    FROM traces
+    ${where(f, ["sessionId IS NOT NULL"])}
+    ORDER BY sessionId, timestamp
+  `);
+  const tsBySession = new Map<string, string[]>();
+  for (const r of tsRows) {
+    let arr = tsBySession.get(r.sessionId);
+    if (!arr) { arr = []; tsBySession.set(r.sessionId, arr); }
+    arr.push(r.timestamp);
+  }
+
+  return sessionRows
+    .map((s) => {
+      const g = gitBySession.get(s.sessionId);
+      const commits = g?.commits ?? 0;
+      const locDelta = g?.loc ?? 0;
+      const tokens = Number(s.tokens) || 0;
+      const tokensPerLoc = tokens / Math.max(locDelta, 1);
+      const { active_ms } = computeActivityProfile(
+        tsBySession.get(s.sessionId) ?? [],
+        s.started, s.ended,
+      );
+      return {
+        sessionId: s.sessionId, agent: s.agent, project: s.project,
+        started: s.started, ended: s.ended,
+        activeMs: active_ms,
+        tokens, commits, locDelta, tokensPerLoc,
+      };
+    })
+    .sort((a, b) => b.tokensPerLoc - a.tokensPerLoc)
+    .slice(0, limit);
 }
 
 // ── Projects ───────────────────────────────────────────────────
@@ -423,6 +747,16 @@ export async function getAgentList(): Promise<string[]> {
     ORDER BY agent
   `);
   return rows.map((r) => r.agent);
+}
+
+export async function getToolList(): Promise<string[]> {
+  const rows = await query<{ toolName: string }>(`
+    SELECT DISTINCT toolName
+    FROM traces
+    WHERE toolName IS NOT NULL
+    ORDER BY toolName
+  `);
+  return rows.map((r) => r.toolName);
 }
 
 // ── Git Events ──────────────────────────────────────────────────

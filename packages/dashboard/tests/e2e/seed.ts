@@ -29,6 +29,8 @@ interface Entry {
   model: string | null;
   tokenUsage: Record<string, number> | null;
   toolName: string | null;
+  command: string | null;
+  filePath: string | null;
   developer: string;
   machine: string;
 }
@@ -36,7 +38,7 @@ interface Entry {
 function entry(o: Partial<Entry> & { id: string; timestamp: string; agent: string }): Entry {
   return {
     sessionId: null, project: null, entryType: "message", model: null,
-    tokenUsage: null, toolName: null,
+    tokenUsage: null, toolName: null, command: null, filePath: null,
     developer: "test@example.com", machine: "test-host",
     ...o,
   };
@@ -72,6 +74,8 @@ async function seed() {
   const D2 = "2026-04-26";
 
   // --- claude_code: two sessions on D1, one on D2 (alpha + beta projects) ---
+  // Three Bash grep calls in this session feed the motif leaderboard
+  // alongside two more in s-beta.jsonl below — all share shape "grep".
   writeJsonl(join(FIXTURE_ROOT, D1, "claude_code", "s-alpha.jsonl"), [
     entry({ id: "c1", timestamp: `${D1}T10:00:00Z`, agent: "claude_code",
             sessionId: "claude-alpha-1", project: "alpha", model: "claude-opus-4-7",
@@ -79,11 +83,54 @@ async function seed() {
     entry({ id: "c2", timestamp: `${D1}T10:01:00Z`, agent: "claude_code",
             sessionId: "claude-alpha-1", project: "alpha", entryType: "tool_call",
             toolName: "Bash" }),
+    // Three near-identical grep invocations — paths differ but
+    // normalize to <path>, so this becomes one incident with
+    // occurrences=3 (the threshold). Exercises the loop detector.
+    entry({ id: "c2a", timestamp: `${D1}T10:02:00Z`, agent: "claude_code",
+            sessionId: "claude-alpha-1", project: "alpha", entryType: "tool_call",
+            toolName: "Bash", command: "grep -r foo src/",
+            tokenUsage: { input: 100, output: 20, cacheRead: 0, cacheCreation: 0, reasoning: 0 } }),
+    entry({ id: "c2b", timestamp: `${D1}T10:03:00Z`, agent: "claude_code",
+            sessionId: "claude-alpha-1", project: "alpha", entryType: "tool_call",
+            toolName: "Bash", command: "grep -r foo lib/",
+            tokenUsage: { input: 100, output: 20, cacheRead: 0, cacheCreation: 0, reasoning: 0 } }),
+    entry({ id: "c2c", timestamp: `${D1}T10:04:00Z`, agent: "claude_code",
+            sessionId: "claude-alpha-1", project: "alpha", entryType: "tool_call",
+            toolName: "Bash", command: "grep -r foo test/",
+            tokenUsage: { input: 100, output: 20, cacheRead: 0, cacheCreation: 0, reasoning: 0 } }),
   ]);
   writeJsonl(join(FIXTURE_ROOT, D2, "claude_code", "s-beta.jsonl"), [
     entry({ id: "c3", timestamp: `${D2}T11:00:00Z`, agent: "claude_code",
             sessionId: "claude-beta-1", project: "beta", model: "claude-opus-4-7",
             tokenUsage: { input: 2000, output: 800, cacheRead: 80000, cacheCreation: 200, reasoning: 0 } }),
+    entry({ id: "c3a", timestamp: `${D2}T11:01:00Z`, agent: "claude_code",
+            sessionId: "claude-beta-1", project: "beta", entryType: "tool_call",
+            toolName: "Bash", command: "grep -i quux test/",
+            tokenUsage: { input: 100, output: 20, cacheRead: 0, cacheCreation: 0, reasoning: 0 } }),
+    entry({ id: "c3b", timestamp: `${D2}T11:02:00Z`, agent: "claude_code",
+            sessionId: "claude-beta-1", project: "beta", entryType: "tool_call",
+            toolName: "Read", filePath: "/repo/lib/foo.ts",
+            tokenUsage: { input: 200, output: 0, cacheRead: 0, cacheCreation: 0, reasoning: 0 } }),
+    entry({ id: "c3c", timestamp: `${D2}T11:03:00Z`, agent: "claude_code",
+            sessionId: "claude-beta-1", project: "beta", entryType: "tool_call",
+            toolName: "Read", filePath: "/repo/lib/bar.ts",
+            tokenUsage: { input: 200, output: 0, cacheRead: 0, cacheCreation: 0, reasoning: 0 } }),
+    // Three MCP shell calls in this session — exercises the *mcp filter
+    // wildcard (mcp: colon convention used by Claude Code). The Bash grep
+    // and the Read repetitions above stay in the leaderboard under the
+    // default filter; *mcp narrows to just this row.
+    entry({ id: "c3d", timestamp: `${D2}T11:04:00Z`, agent: "claude_code",
+            sessionId: "claude-beta-1", project: "beta", entryType: "tool_call",
+            toolName: "mcp:db-mcp:shell", command: "SELECT * FROM events WHERE day=<str>",
+            tokenUsage: { input: 500, output: 100, cacheRead: 0, cacheCreation: 0, reasoning: 0 } }),
+    entry({ id: "c3e", timestamp: `${D2}T11:05:00Z`, agent: "claude_code",
+            sessionId: "claude-beta-1", project: "beta", entryType: "tool_call",
+            toolName: "mcp:db-mcp:shell", command: "SELECT * FROM events WHERE day=<str>",
+            tokenUsage: { input: 500, output: 100, cacheRead: 0, cacheCreation: 0, reasoning: 0 } }),
+    entry({ id: "c3f", timestamp: `${D2}T11:06:00Z`, agent: "claude_code",
+            sessionId: "claude-beta-1", project: "beta", entryType: "tool_call",
+            toolName: "mcp:db-mcp:shell", command: "SELECT * FROM events WHERE day=<str>",
+            tokenUsage: { input: 500, output: 100, cacheRead: 0, cacheCreation: 0, reasoning: 0 } }),
   ]);
 
   // --- codex: one session on D2 (alpha) ---
