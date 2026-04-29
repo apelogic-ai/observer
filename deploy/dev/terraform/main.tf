@@ -133,7 +133,7 @@ data "aws_subnets" "default" {
 
 resource "aws_security_group" "ingestor" {
   name        = "${var.name_prefix}-ingestor"
-  description = "observer ingestor: https/http from world (no ssh — access is via SSM)"
+  description = "observer ingestor: https/http from world (no ssh; access is via SSM)"
   vpc_id      = data.aws_vpc.default.id
 
   ingress {
