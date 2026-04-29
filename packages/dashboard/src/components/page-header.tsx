@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
-import { useProjectList, useAgentList } from "@/hooks/use-dashboard";
+import { useProjectList, useAgentList, useToolList } from "@/hooks/use-dashboard";
 import type { FilterState, Granularity } from "@/hooks/use-filters";
 
 function prettyAgent(a: string): string {
@@ -37,6 +37,8 @@ interface Props {
   showProjectSelector?: boolean;
   onAgentChange?: (agent: string | null) => void;
   showAgentSelector?: boolean;
+  onToolChange?: (tool: string | null) => void;
+  showToolSelector?: boolean;
   onRefresh?: () => void;
 }
 
@@ -50,10 +52,13 @@ export function PageHeader({
   showProjectSelector,
   onAgentChange,
   showAgentSelector,
+  onToolChange,
+  showToolSelector,
   onRefresh,
 }: Props) {
   const projects = useProjectList();
   const agents = useAgentList();
+  const tools = useToolList();
 
   return (
     <div className="space-y-2">
@@ -99,6 +104,38 @@ export function PageHeader({
                 ))}
               </select>
             )}
+            {showToolSelector && onToolChange && (() => {
+              // Group MCP-prefixed tools so the user can either filter by
+              // a single MCP tool or, more usefully, "All MCP tools" via
+              // the *mcp sentinel — most agents emit dozens of MCP tool
+              // names and picking one out of the flat list is hopeless.
+              const mcp = tools.filter((t) => t.startsWith("mcp:") || t.startsWith("mcp__"));
+              const other = tools.filter((t) => !mcp.includes(t));
+              return (
+                <select
+                  value={filters.tool ?? ""}
+                  onChange={(e) => onToolChange(e.target.value || null)}
+                  className="h-8 rounded-md border border-border bg-secondary px-3 text-xs text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                >
+                  <option value="">All tools</option>
+                  {mcp.length > 0 && (
+                    <optgroup label="MCP tools">
+                      <option value="*mcp">All MCP tools</option>
+                      {mcp.map((t) => (
+                        <option key={t} value={t}>{t}</option>
+                      ))}
+                    </optgroup>
+                  )}
+                  {other.length > 0 && (
+                    <optgroup label="Other tools">
+                      {other.map((t) => (
+                        <option key={t} value={t}>{t}</option>
+                      ))}
+                    </optgroup>
+                  )}
+                </select>
+              );
+            })()}
             {onGranularityChange && (
               <div className="flex gap-1 rounded-lg border border-border p-1">
                 {GRANULARITIES.map((g) => (

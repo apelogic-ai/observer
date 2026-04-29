@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import type {
   Stats, ActivityRow, HeatmapRow, TokenRow, ToolRow, ProjectRow, ModelRow,
-  SessionRow, SkillRow, ToolDetail,
+  SessionRow, SkillRow, ToolDetail, StumbleRow, DarkSpendRow,
   GitStats, GitTimelineRow, GitCommitRow, GitSessionRow,
 } from "@/lib/queries";
 
@@ -139,6 +139,21 @@ export function useAgentList() {
   return agents;
 }
 
+export function useToolList() {
+  const [tools, setTools] = useState<string[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/tool-list")
+      .then((r) => r.json())
+      .then((data) => { if (!cancelled && Array.isArray(data)) setTools(data); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+  return tools;
+}
+
 export interface GitData {
   stats: GitStats;
   timeline: GitTimelineRow[];
@@ -233,6 +248,46 @@ export function useGitSessions(filters: DashboardFilters, enabled: boolean) {
   }, [enabled, days, project, agent, granularity]);
 
   return sessions;
+}
+
+export function useStumbles(filters: DashboardFilters, limit = 50) {
+  const [incidents, setIncidents] = useState<StumbleRow[] | null>(null);
+  const { days, project, agent, tool, granularity } = filters;
+
+  useEffect(() => {
+    let cancelled = false;
+    const params = buildParams({ days, project, agent, tool, granularity }, { limit: String(limit) });
+    fetchJson<StumbleRow[]>(`/api/stumbles${params}`)
+      .then((d) => { if (!cancelled) setIncidents(d); })
+      .catch(() => { if (!cancelled) setIncidents([]); });
+    return () => { cancelled = true; };
+  }, [days, project, agent, tool, granularity, limit]);
+
+  return incidents;
+}
+
+function useSessionRollupEndpoint(endpoint: string, filters: DashboardFilters, limit: number) {
+  const [rows, setRows] = useState<DarkSpendRow[] | null>(null);
+  const { days, project, agent, granularity } = filters;
+
+  useEffect(() => {
+    let cancelled = false;
+    const params = buildParams({ days, project, agent, granularity }, { limit: String(limit) });
+    fetchJson<DarkSpendRow[]>(`${endpoint}${params}`)
+      .then((d) => { if (!cancelled) setRows(d); })
+      .catch(() => { if (!cancelled) setRows([]); });
+    return () => { cancelled = true; };
+  }, [endpoint, days, project, agent, granularity, limit]);
+
+  return rows;
+}
+
+export function useDarkSpend(filters: DashboardFilters, limit = 50) {
+  return useSessionRollupEndpoint("/api/dark-spend", filters, limit);
+}
+
+export function useZeroCode(filters: DashboardFilters, limit = 50) {
+  return useSessionRollupEndpoint("/api/zero-code", filters, limit);
 }
 
 export function useToolDetail(tool: string | null, filters: DashboardFilters) {
