@@ -3,6 +3,7 @@ import { Suspense } from "react";
 import { Space_Grotesk, Inconsolata } from "next/font/google";
 import Image from "next/image";
 import Link from "next/link";
+import { TopNav } from "@/components/top-nav";
 import "./globals.css";
 
 const spaceGrotesk = Space_Grotesk({
@@ -31,7 +32,7 @@ export default function RootLayout({
     >
       <body className="min-h-full flex flex-col">
         <header className="sticky top-0 z-50 border-b border-border bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-          <div className="px-6 py-3">
+          <div className="px-6 py-3 flex items-center gap-8">
             <Link href="/" className="flex items-center gap-2.5">
               <Image
                 src="/ape-icon.svg"
@@ -44,6 +45,9 @@ export default function RootLayout({
                 Observer
               </span>
             </Link>
+            <Suspense>
+              <TopNav />
+            </Suspense>
           </div>
         </header>
         <Suspense>{children}</Suspense>

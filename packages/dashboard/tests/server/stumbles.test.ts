@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { initDb } from "../../server/db";
-import { getIncidents } from "../../server/queries";
+import { getStumbles } from "../../server/queries";
 
 function writeJsonl(path: string, rows: Array<Record<string, unknown>>): void {
   mkdirSync(join(path, ".."), { recursive: true });
@@ -90,9 +90,9 @@ beforeAll(async () => {
   await initDb(DATA_DIR);
 });
 
-describe("getIncidents", () => {
+describe("getStumbles", () => {
   it("surfaces non-iteration tools repeated ≥3 times in one session", async () => {
-    const incidents = await getIncidents({ days: 30 }, 50);
+    const incidents = await getStumbles({ days: 30 }, 50);
 
     // s1 grep cluster + s5 MCP cluster. s3's Read repetition gets filtered
     // (Edit/Read/Write are normal iteration, not loops). s2/s4 don't qualify.
@@ -127,12 +127,12 @@ describe("getIncidents", () => {
   });
 
   it("respects the limit argument", async () => {
-    const incidents = await getIncidents({ days: 30 }, 1);
+    const incidents = await getStumbles({ days: 30 }, 1);
     expect(incidents.length).toBe(1);
   });
 
   it("filter tool='*mcp' narrows to MCP tools only (matches both 'mcp:' and 'mcp__' naming)", async () => {
-    const incidents = await getIncidents({ days: 30, tool: "*mcp" }, 50);
+    const incidents = await getStumbles({ days: 30, tool: "*mcp" }, 50);
     expect(incidents.length).toBe(1);
     expect(incidents[0]!.toolName).toBe("mcp__db_mcp__shell");
   });

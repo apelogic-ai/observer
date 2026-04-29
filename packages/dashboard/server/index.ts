@@ -11,7 +11,7 @@ import { loadDashboardConfig, parseCliArgs, type CliOverrides } from "./config";
 import { getBuildInfo } from "./build-info";
 import { createStaticHandler } from "./static";
 import {
-  getStats, getActivity, getHeatmap, getTokens, getTools, getMotifs, getIncidents, getDarkSpend,
+  getStats, getActivity, getHeatmap, getTokens, getTools, getMotifs, getStumbles, getDarkSpend, getZeroCode,
   getProjects, getModels, getSessions, getProjectList, getModelList, getAgentList, getToolList,
   getToolDetail, getSkills,
   getGitStats, getGitTimeline, getGitCommits, getGitSessions,
@@ -54,8 +54,9 @@ const routes: Record<string, Handler> = {
   "/api/tokens": async (url) => getTokens(filters(url)),
   "/api/tools": async (url) => getTools(filters(url), parsePositiveInt(url.searchParams.get("limit")) ?? 25),
   "/api/motifs": async (url) => getMotifs(filters(url), parsePositiveInt(url.searchParams.get("limit")) ?? 25),
-  "/api/incidents": async (url) => getIncidents(filters(url), parsePositiveInt(url.searchParams.get("limit")) ?? 50),
+  "/api/stumbles": async (url) => getStumbles(filters(url), parsePositiveInt(url.searchParams.get("limit")) ?? 50),
   "/api/dark-spend": async (url) => getDarkSpend(filters(url), parsePositiveInt(url.searchParams.get("limit")) ?? 50),
+  "/api/zero-code": async (url) => getZeroCode(filters(url), parsePositiveInt(url.searchParams.get("limit")) ?? 50),
   "/api/projects": async (url) => getProjects(filters(url)),
   "/api/models": async (url) => getModels(filters(url)),
   "/api/sessions": async (url) => getSessions(filters(url), parsePositiveInt(url.searchParams.get("limit")) ?? 50),

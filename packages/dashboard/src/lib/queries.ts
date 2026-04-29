@@ -48,7 +48,7 @@ export interface MotifRow {
   tokens: number;
 }
 
-export interface IncidentRow {
+export interface StumbleRow {
   sessionId: string;
   agent: string;
   project: string | null;

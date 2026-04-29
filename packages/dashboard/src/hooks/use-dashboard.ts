@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import type {
   Stats, ActivityRow, HeatmapRow, TokenRow, ToolRow, ProjectRow, ModelRow,
-  SessionRow, SkillRow, ToolDetail, IncidentRow, DarkSpendRow,
+  SessionRow, SkillRow, ToolDetail, StumbleRow, DarkSpendRow,
   GitStats, GitTimelineRow, GitCommitRow, GitSessionRow,
 } from "@/lib/queries";
 
@@ -250,14 +250,14 @@ export function useGitSessions(filters: DashboardFilters, enabled: boolean) {
   return sessions;
 }
 
-export function useIncidents(filters: DashboardFilters, limit = 50) {
-  const [incidents, setIncidents] = useState<IncidentRow[] | null>(null);
+export function useStumbles(filters: DashboardFilters, limit = 50) {
+  const [incidents, setIncidents] = useState<StumbleRow[] | null>(null);
   const { days, project, agent, tool, granularity } = filters;
 
   useEffect(() => {
     let cancelled = false;
     const params = buildParams({ days, project, agent, tool, granularity }, { limit: String(limit) });
-    fetchJson<IncidentRow[]>(`/api/incidents${params}`)
+    fetchJson<StumbleRow[]>(`/api/stumbles${params}`)
       .then((d) => { if (!cancelled) setIncidents(d); })
       .catch(() => { if (!cancelled) setIncidents([]); });
     return () => { cancelled = true; };
@@ -266,20 +266,28 @@ export function useIncidents(filters: DashboardFilters, limit = 50) {
   return incidents;
 }
 
-export function useDarkSpend(filters: DashboardFilters, limit = 50) {
+function useSessionRollupEndpoint(endpoint: string, filters: DashboardFilters, limit: number) {
   const [rows, setRows] = useState<DarkSpendRow[] | null>(null);
   const { days, project, agent, granularity } = filters;
 
   useEffect(() => {
     let cancelled = false;
     const params = buildParams({ days, project, agent, granularity }, { limit: String(limit) });
-    fetchJson<DarkSpendRow[]>(`/api/dark-spend${params}`)
+    fetchJson<DarkSpendRow[]>(`${endpoint}${params}`)
       .then((d) => { if (!cancelled) setRows(d); })
       .catch(() => { if (!cancelled) setRows([]); });
     return () => { cancelled = true; };
-  }, [days, project, agent, granularity, limit]);
+  }, [endpoint, days, project, agent, granularity, limit]);
 
   return rows;
+}
+
+export function useDarkSpend(filters: DashboardFilters, limit = 50) {
+  return useSessionRollupEndpoint("/api/dark-spend", filters, limit);
+}
+
+export function useZeroCode(filters: DashboardFilters, limit = 50) {
+  return useSessionRollupEndpoint("/api/zero-code", filters, limit);
 }
 
 export function useToolDetail(tool: string | null, filters: DashboardFilters) {

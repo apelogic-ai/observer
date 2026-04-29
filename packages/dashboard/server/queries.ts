@@ -217,7 +217,7 @@ export async function getTools(f: Filters = {}, limit = 25): Promise<ToolRow[]> 
 // Cross-session (tool, first-arg-word) frequency leaderboard.
 // Parked 2026-04-28 because the aggregation was too coarse to be
 // actionable: "Bash cd 1209×" or "Edit .ts 963×" tell you nothing
-// about what the agent actually did wrong. Replaced by `getIncidents`
+// about what the agent actually did wrong. Replaced by `getStumbles`
 // below, which keys on per-session repetition of the *full* normalized
 // command — surfacing concrete loops like "agent ran the same db-mcp
 // query 14× in 30 min" that a human can act on.
@@ -318,7 +318,7 @@ const ITERATION_TOOLS = new Set([
   "Read", "Edit", "Write", "MultiEdit", "NotebookEdit",
 ]);
 
-export interface IncidentRow {
+export interface StumbleRow {
   sessionId: string;
   agent: string;
   project: string | null;
@@ -331,7 +331,7 @@ export interface IncidentRow {
   lastAt: string;
 }
 
-interface IncidentRawRow {
+interface StumbleRawRow {
   sessionId: string;
   agent: string;
   project: string | null;
@@ -364,8 +364,8 @@ function incidentShape(_toolName: string, command: string | null, filePath: stri
   return "";
 }
 
-export async function getIncidents(f: Filters = {}, limit = 25): Promise<IncidentRow[]> {
-  const rows = await query<IncidentRawRow>(`
+export async function getStumbles(f: Filters = {}, limit = 25): Promise<StumbleRow[]> {
+  const rows = await query<StumbleRawRow>(`
     SELECT
       sessionId,
       agent,
@@ -435,7 +435,7 @@ export async function getIncidents(f: Filters = {}, limit = 25): Promise<Inciden
 // agent that produced something tiny for huge cost (1M tokens for
 // 5 LoC). Both surface as outliers when sorted by tokens/max(LoC, 1).
 //
-// Why this complements `getIncidents`: incidents catches per-session
+// Why this complements `getStumbles`: incidents catches per-session
 // repetition (agent stuck in a loop). Dark spend catches the broader
 // failure where the session may not loop visibly but still burned a
 // pile of tokens for nothing.
@@ -456,9 +456,13 @@ export interface DarkSpendRow {
   tokensPerLoc: number;
 }
 
-export async function getDarkSpend(f: Filters = {}, limit = 50): Promise<DarkSpendRow[]> {
-  // Per-session token totals from traces (covers both Claude Code's
-  // per-call attribution and codex's per-turn attribution — we just sum).
+/**
+ * Pull every session in the filter window with its token totals, commit
+ * count, LoC delta, and active time. Used by both getDarkSpend (sessions
+ * that shipped code) and getZeroCode (sessions that shipped nothing) —
+ * each adds its own filter and sort on top.
+ */
+async function sessionRollups(f: Filters): Promise<DarkSpendRow[]> {
   const sessionRows = await query<{
     sessionId: string; agent: string; project: string | null;
     started: string; ended: string; tokens: number;
@@ -475,7 +479,6 @@ export async function getDarkSpend(f: Filters = {}, limit = 50): Promise<DarkSpe
     GROUP BY sessionId
   `);
 
-  // Per-session commit counts + LoC delta from git_events.
   const gitRows = await query<{ sessionId: string; commits: number; loc: number }>(`
     SELECT
       sessionId,
@@ -488,10 +491,8 @@ export async function getDarkSpend(f: Filters = {}, limit = 50): Promise<DarkSpe
   const gitBySession = new Map<string, { commits: number; loc: number }>();
   for (const r of gitRows) gitBySession.set(r.sessionId, { commits: Number(r.commits), loc: Number(r.loc) });
 
-  // Per-session timestamps — needed so we can compute active time
-  // (wall minus gaps > 5 min). Sessions reused intermittently across
-  // days otherwise show a multi-day "duration" that's almost entirely
-  // idle. One ordered list per session, walked once.
+  // Per-session timestamps for active-time computation (wall minus gaps
+  // > 5 min). Sessions reused across days otherwise look multi-day.
   const tsRows = await query<{ sessionId: string; timestamp: string }>(`
     SELECT sessionId, timestamp
     FROM traces
@@ -505,25 +506,45 @@ export async function getDarkSpend(f: Filters = {}, limit = 50): Promise<DarkSpe
     arr.push(r.timestamp);
   }
 
-  return sessionRows
-    .map((s) => {
-      const g = gitBySession.get(s.sessionId);
-      const commits = g?.commits ?? 0;
-      const locDelta = g?.loc ?? 0;
-      const tokens = Number(s.tokens) || 0;
-      const tokensPerLoc = tokens / Math.max(locDelta, 1);
-      const { active_ms } = computeActivityProfile(
-        tsBySession.get(s.sessionId) ?? [],
-        s.started, s.ended,
-      );
-      return {
-        sessionId: s.sessionId, agent: s.agent, project: s.project,
-        started: s.started, ended: s.ended,
-        activeMs: active_ms,
-        tokens, commits, locDelta, tokensPerLoc,
-      };
-    })
+  return sessionRows.map((s) => {
+    const g = gitBySession.get(s.sessionId);
+    const commits = g?.commits ?? 0;
+    const locDelta = g?.loc ?? 0;
+    const tokens = Number(s.tokens) || 0;
+    const tokensPerLoc = tokens / Math.max(locDelta, 1);
+    const { active_ms } = computeActivityProfile(
+      tsBySession.get(s.sessionId) ?? [],
+      s.started, s.ended,
+    );
+    return {
+      sessionId: s.sessionId, agent: s.agent, project: s.project,
+      started: s.started, ended: s.ended,
+      activeMs: active_ms,
+      tokens, commits, locDelta, tokensPerLoc,
+    };
+  });
+}
+
+/** Sessions that shipped code but burned tokens to do it. LoC > 0 only. */
+export async function getDarkSpend(f: Filters = {}, limit = 50): Promise<DarkSpendRow[]> {
+  const rows = await sessionRollups(f);
+  return rows
+    .filter((r) => r.locDelta > 0)
     .sort((a, b) => b.tokensPerLoc - a.tokensPerLoc)
+    .slice(0, limit);
+}
+
+/**
+ * Sessions that produced zero LoC. Includes legitimate non-code work
+ * (data analysis, exploration) AND pure flail — the dashboard description
+ * tells the user to mentally separate them via the project filter.
+ * Ranked by raw tokens since tokens/LoC is meaningless when LoC = 0.
+ */
+export async function getZeroCode(f: Filters = {}, limit = 50): Promise<DarkSpendRow[]> {
+  const rows = await sessionRollups(f);
+  return rows
+    .filter((r) => r.locDelta === 0)
+    .sort((a, b) => b.tokens - a.tokens)
     .slice(0, limit);
 }
 

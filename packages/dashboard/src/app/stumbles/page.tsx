@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useIncidents, type DashboardFilters } from "@/hooks/use-dashboard";
+import { useStumbles, type DashboardFilters } from "@/hooks/use-dashboard";
 import { useFilters } from "@/hooks/use-filters";
 import { PageHeader } from "@/components/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -12,15 +12,15 @@ function durationMin(firstAt: string, lastAt: string): number {
   return Math.max(0, Math.round(ms / 60_000));
 }
 
-export default function IncidentsPage() {
+export default function StumblesPage() {
   const { filters, setDays, setAgent, setTool, setProject, setGranularity, buildQs } = useFilters();
   const dashFilters: DashboardFilters = { ...filters };
-  const incidents = useIncidents(dashFilters, 100);
+  const stumbles = useStumbles(dashFilters, 100);
 
   return (
     <main className="flex-1 p-6 space-y-6 max-w-[1600px] mx-auto w-full">
       <PageHeader
-        title="Redundant loops"
+        title="Stumbles"
         breadcrumbs={[{ label: "Overview", href: `/${buildQs()}` }]}
         filters={filters}
         onDaysChange={setDays}
@@ -36,27 +36,28 @@ export default function IncidentsPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Per-session repeated invocations</CardTitle>
+          <CardTitle>Sessions where the agent stumbled on the same call</CardTitle>
           <p className="text-sm text-muted-foreground">
             Each row is one session where the agent ran the same normalized
-            tool invocation 3+ times. Generic across tools — db-mcp shell
-            spam, repeated reads of the same file, status hammering all
-            surface here. Paths and quoted strings are collapsed so
-            near-identical commands cluster.
+            tool invocation 3+ times — a sign the agent got stuck and kept
+            poking instead of changing approach. Generic across tools:
+            db-mcp shell spam, MCP query loops, repeated greps all surface
+            here. Paths and quoted strings are collapsed so near-identical
+            commands cluster.
           </p>
         </CardHeader>
         <CardContent>
-          {incidents === null && (
+          {stumbles === null && (
             <p className="text-sm text-muted-foreground">Loading…</p>
           )}
-          {incidents !== null && incidents.length === 0 && (
+          {stumbles !== null && stumbles.length === 0 && (
             <p className="text-sm text-muted-foreground">
-              No redundant loops detected in this window. Either no session
+              No stumbles detected in this window. Either no session
               repeated the same invocation 3+ times, or trace disclosure is
               too low for shape detection (need command + filePath).
             </p>
           )}
-          {incidents !== null && incidents.length > 0 && (
+          {stumbles !== null && stumbles.length > 0 && (
             <table className="w-full text-sm">
               <thead className="text-muted-foreground text-left">
                 <tr className="border-b border-border">
@@ -72,7 +73,7 @@ export default function IncidentsPage() {
                 </tr>
               </thead>
               <tbody>
-                {incidents.map((i) => (
+                {stumbles.map((i) => (
                   <tr key={`${i.sessionId}-${i.toolName}-${i.shape}`} className="border-b border-border/50">
                     <td className="py-2">
                       <Link

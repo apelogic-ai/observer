@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { initDb } from "../../server/db";
-import { getDarkSpend } from "../../server/queries";
+import { getDarkSpend, getZeroCode } from "../../server/queries";
 
 function writeJsonl(path: string, rows: Array<Record<string, unknown>>): void {
   mkdirSync(join(path, ".."), { recursive: true });
@@ -68,37 +68,43 @@ beforeAll(async () => {
 });
 
 describe("getDarkSpend", () => {
-  it("ranks sessions by tokens / max(LoC, 1) descending", async () => {
+  it("ranks sessions with LoC > 0 by tokens / LoC descending", async () => {
     const rows = await getDarkSpend({ days: 7 }, 50);
-    expect(rows.length).toBe(3);
+    // Only B (1M/200) and C (500K/5) — A has zero LoC and is excluded.
+    expect(rows.length).toBe(2);
 
-    // Session A: 0 commits, 0 LoC → ratio = tokens / 1 = 1M. Top of list.
-    expect(rows[0]!.sessionId).toBe("sess-a");
-    expect(rows[0]!.commits).toBe(0);
-    expect(rows[0]!.locDelta).toBe(0);
-    expect(rows[0]!.tokens).toBe(1_000_000);
-    expect(rows[0]!.tokensPerLoc).toBe(1_000_000);
-    // 1 minute between A's two events; everything within 5-min idle threshold.
-    expect(rows[0]!.activeMs).toBe(60_000);
+    // Session C: 500K / 5 = 100K. Top.
+    expect(rows[0]!.sessionId).toBe("sess-c");
+    expect(rows[0]!.commits).toBe(1);
+    expect(rows[0]!.locDelta).toBe(5);   // 4 + 1
+    expect(rows[0]!.tokensPerLoc).toBe(100_000);
 
-    // Session C: 500K / 5 = 100K. Second.
-    expect(rows[1]!.sessionId).toBe("sess-c");
+    // Session B: 1M / 200 = 5K. Below.
+    expect(rows[1]!.sessionId).toBe("sess-b");
     expect(rows[1]!.commits).toBe(1);
-    expect(rows[1]!.locDelta).toBe(5);   // 4 + 1
-    expect(rows[1]!.tokensPerLoc).toBe(100_000);
-
-    // Session B: 1M / 200 = 5K. Last (most efficient).
-    expect(rows[2]!.sessionId).toBe("sess-b");
-    expect(rows[2]!.commits).toBe(1);
-    expect(rows[2]!.locDelta).toBe(200);  // 180 + 20
-    expect(rows[2]!.tokensPerLoc).toBe(5_000);
+    expect(rows[1]!.locDelta).toBe(200);  // 180 + 20
+    expect(rows[1]!.tokensPerLoc).toBe(5_000);
     // 1 min between events 1-2, then a 119-min gap that should be excluded.
-    // Active time should be just the 60 seconds, NOT the full ~2h wall.
-    expect(rows[2]!.activeMs).toBe(60_000);
+    expect(rows[1]!.activeMs).toBe(60_000);
+
+    // Session A is NOT here (zero LoC — belongs in zero-code).
+    expect(rows.find((r) => r.sessionId === "sess-a")).toBeUndefined();
   });
 
   it("respects the limit argument", async () => {
     const rows = await getDarkSpend({ days: 7 }, 1);
     expect(rows.length).toBe(1);
+  });
+});
+
+describe("getZeroCode", () => {
+  it("lists only sessions with locDelta = 0, ranked by tokens", async () => {
+    const rows = await getZeroCode({ days: 7 }, 50);
+    expect(rows.length).toBe(1);
+    expect(rows[0]!.sessionId).toBe("sess-a");
+    expect(rows[0]!.locDelta).toBe(0);
+    expect(rows[0]!.commits).toBe(0);
+    expect(rows[0]!.tokens).toBe(1_000_000);
+    expect(rows[0]!.activeMs).toBe(60_000);
   });
 });
