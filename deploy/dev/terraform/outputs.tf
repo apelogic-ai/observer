@@ -3,9 +3,14 @@ output "public_ip" {
   value       = aws_eip.ingestor.public_ip
 }
 
-output "ssh_command" {
-  description = "Connect to the host."
-  value       = "ssh ec2-user@${aws_eip.ingestor.public_ip}"
+output "instance_id" {
+  description = "EC2 instance ID. Use it as the SSM target."
+  value       = aws_instance.ingestor.id
+}
+
+output "ssm_command" {
+  description = "Open an interactive shell on the host. Requires the AWS CLI session-manager-plugin (one-time `brew install --cask session-manager-plugin`)."
+  value       = "aws ssm start-session --target ${aws_instance.ingestor.id}"
 }
 
 output "bucket_name" {
@@ -28,19 +33,24 @@ output "next_steps" {
          ${var.domain_name} → ${aws_eip.ingestor.public_ip}
          Wait for propagation (usually < 5 min; verify with `dig ${var.domain_name}`).
 
-      2. Copy the compose stack onto the host:
-         scp -r deploy/dev/compose ec2-user@${aws_eip.ingestor.public_ip}:~/
+      2. Open a shell on the host via SSM:
+         aws ssm start-session --target ${aws_instance.ingestor.id}
 
-      3. Create your real .env on the host (substitute strong API keys):
-         ssh ec2-user@${aws_eip.ingestor.public_ip}
-         cd compose
+      3. Inside the host, clone the repo and configure the stack:
+         sudo -u ec2-user bash
+         cd ~
+         git clone https://github.com/apelogic-ai/observer.git
+         cd observer/deploy/dev/compose
          cp .env.example .env
-         vi .env   # set OBSERVER_API_KEYS, DOMAIN, OBSERVER_S3_BUCKET=${aws_s3_bucket.lake.bucket}, OBSERVER_S3_REGION=${var.aws_region}
+         vi .env
+         # Set OBSERVER_API_KEYS (openssl rand -hex 32),
+         # DOMAIN=${var.domain_name},
+         # OBSERVER_S3_BUCKET=${aws_s3_bucket.lake.bucket},
+         # OBSERVER_S3_REGION=${var.aws_region}
 
-      4. Build the api image and bring up the stack:
-         (compose builds from the source tree on the host — ship the repo,
-         or rely on a pre-built image you push to a registry.)
+      4. Build and bring up the stack:
          docker compose up -d --build
+         docker compose logs -f
 
       5. Verify:
          curl -fsSL https://${var.domain_name}/health   →   {"status":"ok"}

@@ -2,6 +2,8 @@
 
 A single-instance dev environment for the API server (ingestor) on AWS,
 backed by S3 storage. Caddy fronts it with HTTPS via Let's Encrypt.
+Host access is via **AWS Session Manager** (SSM) — no SSH port, no
+key pair management.
 
 ```
 internet
@@ -21,8 +23,8 @@ api.dev.observer.apelogic.ai
 
 ## Layout
 
-- `terraform/` — AWS resources (S3 bucket, EC2 + EIP, IAM, security
-  group). Local state.
+- `terraform/` — AWS resources (S3 bucket, EC2 + EIP, IAM with SSM +
+  bucket-only RW, security group). Local state.
 - `compose/` — Caddy + the api as a docker compose stack.
 
 The terraform stand creates **infrastructure**. It does not bring up
@@ -32,11 +34,13 @@ iterate on the compose file without re-applying terraform.
 ## Prerequisites
 
 - AWS account with an IAM user/role permissioned to create EC2 + S3 + IAM.
-- `aws-cli` configured (`aws configure`).
+- AWS CLI configured (e.g., `aws configure --profile projectn`).
 - `terraform >= 1.6`.
-- An SSH key pair locally (default: `~/.ssh/id_ed25519` — generate with
-  `ssh-keygen -t ed25519` if you don't have one). Terraform uploads
-  the public half to AWS; you SSH in with your existing local key.
+- AWS CLI **session-manager-plugin** installed locally:
+  ```
+  brew install --cask session-manager-plugin   # macOS
+  # or follow https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html
+  ```
 - Access to a DNS provider for `apelogic.ai` (NameCheap, etc.).
 - A globally-unique S3 bucket name (e.g. `observer-dev-yourname`).
 
@@ -47,19 +51,21 @@ iterate on the compose file without re-applying terraform.
 ```bash
 cd deploy/dev/terraform
 cp terraform.tfvars.example terraform.tfvars
-$EDITOR terraform.tfvars     # set bucket_name, ssh_cidr, domain_name
+$EDITOR terraform.tfvars     # set bucket_name, domain_name
 ```
 
 ### 2. Apply
 
 ```bash
+export AWS_PROFILE=projectn       # or whichever profile owns the dev account
 terraform init
 terraform apply
 ```
 
 The output prints:
 - `public_ip` — Elastic IP of the host
-- `ssh_command` — copy-paste ssh
+- `instance_id` — EC2 instance ID (SSM target)
+- `ssm_command` — copy-paste shell command
 - `bucket_name` — the S3 bucket terraform created
 - `next_steps` — the manual remainder
 
@@ -74,30 +80,37 @@ At your DNS provider (NameCheap for `apelogic.ai`):
 Wait for propagation (`dig api.dev.observer.apelogic.ai +short` should
 return the EIP).
 
-### 4. Ship the repo to the host
+### 4. Open a shell on the host
 
-The compose stack builds from source, so the host needs the repo.
-Easiest:
+No SSH, no .pem file. Open a session via SSM:
 
 ```bash
-# from your laptop, in the repo root
-rsync -av --exclude node_modules --exclude .git --exclude '*.tfstate*' \
-  ./ ec2-user@<public_ip>:~/observer/
+aws ssm start-session --target <instance_id>
 ```
 
-(Or `git clone` from the host if the repo is reachable. Or build the
-image locally and push to ECR — out of scope for v0.)
-
-### 5. Configure the stack
+You land as the `ssm-user`. Drop to `ec2-user` for the workflow:
 
 ```bash
-ssh ec2-user@<public_ip>
+sudo -u ec2-user -i
+```
+
+### 5. Clone the repo on the host
+
+The compose stack builds from source, so the host needs the repo:
+
+```bash
+git clone https://github.com/apelogic-ai/observer.git
 cd observer/deploy/dev/compose
-cp .env.example .env
-$EDITOR .env
 ```
 
-In `.env`, set:
+### 6. Configure the stack
+
+```bash
+cp .env.example .env
+vi .env
+```
+
+Set:
 - `DOMAIN=api.dev.observer.apelogic.ai`
 - `OBSERVER_API_KEYS=` (generate with `openssl rand -hex 32`)
 - `OBSERVER_S3_BUCKET=` (from terraform output)
@@ -106,9 +119,9 @@ In `.env`, set:
 **Don't set `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY`** —
 credentials come from the EC2 instance role attached by terraform.
 The container uses the SDK's standard credential chain, which picks
-up IRSA / instance metadata automatically.
+up instance metadata automatically.
 
-### 6. Bring it up
+### 7. Bring it up
 
 ```bash
 docker compose up -d --build
@@ -116,9 +129,11 @@ docker compose logs -f
 ```
 
 Watch for `Listening on http://localhost:19900` from the api container.
-Caddy will provision the cert on its first inbound 80 hit (a few seconds).
+Caddy provisions the cert on its first inbound 80 hit (a few seconds).
 
-### 7. Verify
+### 8. Verify
+
+From your laptop:
 
 ```bash
 curl -fsSL https://api.dev.observer.apelogic.ai/health
@@ -143,12 +158,13 @@ You should see one `.jsonl`, one `.meta.json`, and one `dedup/` marker.
 
 | Action | Command |
 |--------|---------|
-| Tail logs | `docker compose logs -f observer-api` |
-| Restart | `docker compose restart observer-api` |
-| Update binary (after `git pull`) | `docker compose up -d --build` |
-| Rotate keys | edit `.env`, then `docker compose up -d` (caddy + api both restart) |
-| Tear down stack only | `docker compose down` |
-| Tear down everything | `terraform destroy` (deletes the bucket — set `force_destroy = true` first if it has objects) |
+| Open shell | `aws ssm start-session --target <instance_id>` |
+| Tail logs | `docker compose logs -f observer-api` (on host) |
+| Restart | `docker compose restart observer-api` (on host) |
+| Update binary (after `git pull`) | `git pull && docker compose up -d --build` (on host) |
+| Rotate keys | edit `.env`, then `docker compose up -d` (on host) |
+| Tear down stack only | `docker compose down` (on host) |
+| Tear down everything | `terraform destroy` (delete bucket contents first if it has objects, or set `force_destroy = true` on the bucket and re-apply) |
 
 ## Cost (rough)
 
@@ -167,14 +183,12 @@ Things that need attention before this is anything but "dev":
 
 1. **Remote terraform state** (S3 + DynamoDB lock table) instead of
    local `.tfstate`. Keep one workspace per environment.
-2. **Tighten `ssh_cidr`** to the operator's IP/32 (or kill SSH and use
-   SSM Session Manager).
-3. **Multi-AZ + auto-scaling** — current setup is single-instance.
-4. **Backups for state.** The bucket has versioning; add a lifecycle
+2. **Multi-AZ + auto-scaling** — current setup is single-instance.
+3. **Backups for state.** The bucket has versioning; add a lifecycle
    policy and cross-region replication.
-5. **Real OAuth for the agent flow.** Bearer keys are fine for testing
+4. **Real OAuth for the agent flow.** Bearer keys are fine for testing
    but won't survive an audit.
-6. **Image registry.** Building from source on the host is simple but
+5. **Image registry.** Building from source on the host is simple but
    slow. Push images to ECR and pull instead.
 
 This stack is intentionally minimal. The non-dev shape is documented

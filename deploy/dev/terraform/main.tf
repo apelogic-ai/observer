@@ -105,6 +105,13 @@ resource "aws_iam_role_policy" "ingestor_bucket_rw" {
   policy = data.aws_iam_policy_document.bucket_rw.json
 }
 
+# Enables Session Manager (`aws ssm start-session --target ...`) — no
+# SSH port, no key pair management, all sessions logged via CloudTrail.
+resource "aws_iam_role_policy_attachment" "ingestor_ssm" {
+  role       = aws_iam_role.ingestor.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
 resource "aws_iam_instance_profile" "ingestor" {
   name = "${var.name_prefix}-ingestor"
   role = aws_iam_role.ingestor.name
@@ -126,16 +133,8 @@ data "aws_subnets" "default" {
 
 resource "aws_security_group" "ingestor" {
   name        = "${var.name_prefix}-ingestor"
-  description = "observer ingestor: ssh from operator, https/http from world"
+  description = "observer ingestor: https/http from world (no ssh — access is via SSM)"
   vpc_id      = data.aws_vpc.default.id
-
-  ingress {
-    description = "ssh from operator"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = [var.ssh_cidr]
-  }
 
   ingress {
     description = "http (caddy ACME challenge + redirect)"
@@ -154,7 +153,7 @@ resource "aws_security_group" "ingestor" {
   }
 
   egress {
-    description = "all outbound (S3, package mirrors, ACME)"
+    description = "all outbound (S3, package mirrors, ACME, SSM)"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
@@ -176,18 +175,12 @@ data "aws_ami" "al2023_arm64" {
   }
 }
 
-resource "aws_key_pair" "ingestor" {
-  key_name   = "${var.name_prefix}-ingestor"
-  public_key = file(pathexpand(var.ssh_public_key_path))
-}
-
 resource "aws_instance" "ingestor" {
   ami                    = data.aws_ami.al2023_arm64.id
   instance_type          = var.instance_type
   subnet_id              = data.aws_subnets.default.ids[0]
   vpc_security_group_ids = [aws_security_group.ingestor.id]
   iam_instance_profile   = aws_iam_instance_profile.ingestor.name
-  key_name               = aws_key_pair.ingestor.key_name
 
   user_data = file("${path.module}/user-data.sh")
 
