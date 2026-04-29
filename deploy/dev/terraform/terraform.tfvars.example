@@ -1,7 +1,11 @@
 # Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored.
 
-aws_region   = "us-west-2"
-ssh_key_name = "your-aws-key-pair"
-ssh_cidr     = "203.0.113.42/32"   # tighten to your IP; "0.0.0.0/0" works for first bring-up
-bucket_name  = "observer-dev-CHANGE-ME"   # globally unique S3 name
-domain_name  = "api.dev.observer.apelogic.ai"
+aws_region          = "us-west-2"
+ssh_cidr            = "203.0.113.42/32"   # tighten to your IP; "0.0.0.0/0" works for first bring-up
+bucket_name         = "observer-dev-CHANGE-ME"   # globally unique S3 name
+domain_name         = "api.dev.observer.apelogic.ai"
+
+# Optional — defaults to ~/.ssh/id_ed25519.pub. Terraform uploads this
+# public key to AWS as an EC2 key pair. SSH later with your existing
+# local private key.
+# ssh_public_key_path = "~/.ssh/id_ed25519.pub"

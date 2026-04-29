@@ -5,7 +5,7 @@ output "public_ip" {
 
 output "ssh_command" {
   description = "Connect to the host."
-  value       = "ssh -i ~/.ssh/${var.ssh_key_name}.pem ec2-user@${aws_eip.ingestor.public_ip}"
+  value       = "ssh ec2-user@${aws_eip.ingestor.public_ip}"
 }
 
 output "bucket_name" {
@@ -29,10 +29,10 @@ output "next_steps" {
          Wait for propagation (usually < 5 min; verify with `dig ${var.domain_name}`).
 
       2. Copy the compose stack onto the host:
-         scp -r -i ~/.ssh/${var.ssh_key_name}.pem deploy/dev/compose ec2-user@${aws_eip.ingestor.public_ip}:~/
+         scp -r deploy/dev/compose ec2-user@${aws_eip.ingestor.public_ip}:~/
 
       3. Create your real .env on the host (substitute strong API keys):
-         ssh -i ~/.ssh/${var.ssh_key_name}.pem ec2-user@${aws_eip.ingestor.public_ip}
+         ssh ec2-user@${aws_eip.ingestor.public_ip}
          cd compose
          cp .env.example .env
          vi .env   # set OBSERVER_API_KEYS, DOMAIN, OBSERVER_S3_BUCKET=${aws_s3_bucket.lake.bucket}, OBSERVER_S3_REGION=${var.aws_region}

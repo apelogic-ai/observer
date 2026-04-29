@@ -176,13 +176,18 @@ data "aws_ami" "al2023_arm64" {
   }
 }
 
+resource "aws_key_pair" "ingestor" {
+  key_name   = "${var.name_prefix}-ingestor"
+  public_key = file(pathexpand(var.ssh_public_key_path))
+}
+
 resource "aws_instance" "ingestor" {
   ami                    = data.aws_ami.al2023_arm64.id
   instance_type          = var.instance_type
   subnet_id              = data.aws_subnets.default.ids[0]
   vpc_security_group_ids = [aws_security_group.ingestor.id]
   iam_instance_profile   = aws_iam_instance_profile.ingestor.name
-  key_name               = var.ssh_key_name
+  key_name               = aws_key_pair.ingestor.key_name
 
   user_data = file("${path.module}/user-data.sh")
 

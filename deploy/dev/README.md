@@ -34,8 +34,9 @@ iterate on the compose file without re-applying terraform.
 - AWS account with an IAM user/role permissioned to create EC2 + S3 + IAM.
 - `aws-cli` configured (`aws configure`).
 - `terraform >= 1.6`.
-- An **existing AWS EC2 key pair** (the `key_name`) you have the .pem
-  for locally.
+- An SSH key pair locally (default: `~/.ssh/id_ed25519` — generate with
+  `ssh-keygen -t ed25519` if you don't have one). Terraform uploads
+  the public half to AWS; you SSH in with your existing local key.
 - Access to a DNS provider for `apelogic.ai` (NameCheap, etc.).
 - A globally-unique S3 bucket name (e.g. `observer-dev-yourname`).
 
@@ -46,7 +47,7 @@ iterate on the compose file without re-applying terraform.
 ```bash
 cd deploy/dev/terraform
 cp terraform.tfvars.example terraform.tfvars
-$EDITOR terraform.tfvars     # set ssh_key_name, bucket_name, ssh_cidr, domain_name
+$EDITOR terraform.tfvars     # set bucket_name, ssh_cidr, domain_name
 ```
 
 ### 2. Apply
@@ -90,7 +91,7 @@ image locally and push to ECR — out of scope for v0.)
 ### 5. Configure the stack
 
 ```bash
-ssh -i ~/.ssh/<key>.pem ec2-user@<public_ip>
+ssh ec2-user@<public_ip>
 cd observer/deploy/dev/compose
 cp .env.example .env
 $EDITOR .env

@@ -27,9 +27,10 @@ variable "ssh_cidr" {
   default     = "0.0.0.0/0"
 }
 
-variable "ssh_key_name" {
-  description = "Name of an existing AWS EC2 key pair for SSH access."
+variable "ssh_public_key_path" {
+  description = "Path to your local SSH **public** key. Terraform uploads it to AWS as an EC2 key pair so you can SSH in with your existing local key — no separate .pem file to manage."
   type        = string
+  default     = "~/.ssh/id_ed25519.pub"
 }
 
 variable "domain_name" {
