@@ -483,28 +483,43 @@ async function daemonAction(opts: { stateDir: string }): Promise<void> {
   console.log("Observer daemon starting...");
   console.log(`  Developer: ${config.developer ?? "(auto)"}`);
   console.log(`  Poll interval: ${config.pollIntervalMs / 1000}s`);
-  if (config.ship.endpoint) {
-    console.log(`  Endpoint: ${config.ship.endpoint}`);
+  for (const d of config.destinations) {
+    console.log(`  Destination: ${d.name} → ${d.endpoint} [${d.kind}, ${d.disclosure}]`);
   }
   console.log();
 
   generateKeypair(opts.stateDir);
   const keypair = loadKeypair(opts.stateDir) ?? undefined;
 
-  const httpShipDaemon = config.ship.endpoint
-    ? createHttpShipper({ endpoint: config.ship.endpoint, keypair })
+  // TODO follow-up: push destinations[] all the way into Daemon so each
+  // gets its own cursor + per-poll iteration. This first step picks the
+  // first http and first disk destination from the list and feeds them
+  // through the existing single-shipper daemon interface — fixes the
+  // "shared disclosure" bug today; multi-N comes next.
+  const firstHttp = config.destinations.find((d) => d.kind === "http");
+  const firstDisk = config.destinations.find((d) => d.kind === "disk");
+
+  const httpShipDaemon = firstHttp
+    ? createHttpShipper({ endpoint: firstHttp.endpoint, keypair })
     : null;
-  const diskShipDaemon = config.ship.localOutputDir
+  const diskShipDaemon = firstDisk
     ? createDiskShipper({
-        outputDir: config.ship.localOutputDir,
-        disclosure: config.ship.disclosure,
-        redactSecrets: config.ship.redactSecrets,
-        useLocalTime: config.ship.useLocalTime,
+        outputDir: firstDisk.endpoint,
+        disclosure: firstDisk.disclosure,
+        redactSecrets: firstDisk.redactSecrets,
+        useLocalTime: firstDisk.useLocalTime,
       })
     : null;
   const shipFn = httpShipDaemon && diskShipDaemon
     ? async (batch: ShippedBatch) => { await diskShipDaemon(batch); await httpShipDaemon(batch); }
     : httpShipDaemon ?? diskShipDaemon ?? (async () => {});
+
+  // Top-level redact + disclosure go to whatever the disk destination
+  // says (cursor-shipper writes to the disk destination); HTTP path
+  // doesn't apply disclosure today either way (separate gap).
+  const redactSecrets = firstDisk?.redactSecrets ?? firstHttp?.redactSecrets ?? true;
+  const disclosure = firstDisk?.disclosure ?? firstHttp?.disclosure ?? "moderate";
+  const useLocalTime = firstDisk?.useLocalTime ?? false;
 
   const daemon = new Daemon({
     claudeDir: DEFAULT_CLAUDE_DIR,
@@ -512,12 +527,12 @@ async function daemonAction(opts: { stateDir: string }): Promise<void> {
     cursorDir: DEFAULT_CURSOR_DIR,
     stateDir: opts.stateDir,
     pollIntervalMs: config.pollIntervalMs,
-    redactSecrets: config.ship.redactSecrets,
+    redactSecrets,
     developer: config.developer ?? undefined,
     onShip: shipFn,
-    localOutputDir: config.ship.localOutputDir ?? undefined,
-    disclosure: config.ship.disclosure,
-    useLocalTime: config.ship.useLocalTime,
+    localOutputDir: firstDisk?.endpoint,
+    disclosure,
+    useLocalTime,
     onProgress: (msg) => {
       const ts = new Date().toLocaleTimeString("en-US", { hour12: false });
       console.log(`[${ts}] ${msg}`);
@@ -718,7 +733,8 @@ async function cursorUsageAction(opts: CursorUsageOptions): Promise<void> {
     = await import("./cursor-api");
 
   const config = loadConfig(join(opts.stateDir, "config.yaml"));
-  const outputDir = config.ship.localOutputDir
+  const firstDisk = config.destinations.find((d) => d.kind === "disk");
+  const outputDir = firstDisk?.endpoint
     ?? join(homedir(), ".observer", "traces", "normalized");
 
   const auth = readCursorAuth();

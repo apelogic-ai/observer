@@ -2,104 +2,176 @@ import { describe, it, expect } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { loadConfig, type ObserverConfig, DEFAULT_CONFIG } from "../src/config";
+import { loadConfig, DEFAULT_CONFIG } from "../src/config";
 
 function makeTmpDir(): string {
   return mkdtempSync(join(tmpdir(), "observer-config-"));
 }
 
-describe("loadConfig", () => {
+function writeConfig(yaml: string): string {
+  const dir = makeTmpDir();
+  const configFile = join(dir, "config.yaml");
+  writeFileSync(configFile, yaml);
+  return configFile;
+}
+
+describe("loadConfig — defaults", () => {
   it("returns defaults when no config file exists", () => {
     const config = loadConfig("/nonexistent/config.yaml");
     expect(config.sources.claude_code).toBe(true);
     expect(config.sources.codex).toBe(true);
     expect(config.sources.cursor).toBe(true);
-    expect(config.ship.redactSecrets).toBe(true);
+    expect(config.destinations).toEqual([]);
+    expect(config.pollIntervalMs).toBeGreaterThan(0);
   });
 
-  it("loads from YAML file", () => {
-    const dir = makeTmpDir();
-    const configFile = join(dir, "config.yaml");
-    writeFileSync(configFile, `
+  it("DEFAULT_CONFIG is sane", () => {
+    expect(DEFAULT_CONFIG.pollIntervalMs).toBeGreaterThan(0);
+    expect(DEFAULT_CONFIG.sources.claude_code).toBe(true);
+    expect(DEFAULT_CONFIG.destinations).toEqual([]);
+  });
+});
+
+describe("loadConfig — destinations", () => {
+  it("parses a disk destination (path → kind=disk)", () => {
+    const config = loadConfig(writeConfig(`
+developer: alice@acme.com
+destinations:
+  - name: local-dashboard
+    endpoint: ~/.observer/traces/normalized
+    disclosure: full
+    schedule: realtime
+    useLocalTime: true
+`));
+    expect(config.destinations).toHaveLength(1);
+    const d = config.destinations[0]!;
+    expect(d.name).toBe("local-dashboard");
+    expect(d.kind).toBe("disk");
+    expect(d.endpoint).toBe("~/.observer/traces/normalized");
+    expect(d.disclosure).toBe("full");
+    expect(d.schedule).toBe("realtime");
+    expect(d.useLocalTime).toBe(true);
+    // Defaults preserved when fields are absent.
+    expect(d.anonymize).toBe(false);
+    expect(d.redactSecrets).toBe(true);
+    expect(d.orgs.include).toEqual([]);
+    expect(d.orgs.exclude).toEqual([]);
+    expect(d.projects.include).toEqual([]);
+    expect(d.projects.exclude).toEqual([]);
+  });
+
+  it("parses an http destination (https://… → kind=http)", () => {
+    const config = loadConfig(writeConfig(`
+destinations:
+  - name: corp-ingestor
+    endpoint: https://api.observer.acme.com/api/ingest
+    apiKeyEnv: CORP_API_KEY
+    disclosure: moderate
+    schedule: hourly
+    anonymize: true
+    orgs:
+      include: [acme-corp]
+    projects:
+      exclude: [/Users/me/personal]
+`));
+    expect(config.destinations).toHaveLength(1);
+    const d = config.destinations[0]!;
+    expect(d.kind).toBe("http");
+    expect(d.endpoint).toBe("https://api.observer.acme.com/api/ingest");
+    expect(d.apiKeyEnv).toBe("CORP_API_KEY");
+    expect(d.disclosure).toBe("moderate");
+    expect(d.schedule).toBe("hourly");
+    expect(d.anonymize).toBe(true);
+    expect(d.orgs.include).toEqual(["acme-corp"]);
+    expect(d.projects.exclude).toEqual(["/Users/me/personal"]);
+  });
+
+  it("parses N destinations independently", () => {
+    const config = loadConfig(writeConfig(`
+destinations:
+  - name: local
+    endpoint: ~/.observer/traces/normalized
+    disclosure: full
+    schedule: realtime
+  - name: corp
+    endpoint: https://corp.example.com/api/ingest
+    apiKeyEnv: CORP_KEY
+    disclosure: moderate
+    schedule: hourly
+  - name: security
+    endpoint: https://sec.example.com/api/ingest
+    apiKeyEnv: SEC_KEY
+    disclosure: basic
+    schedule: hourly
+`));
+    expect(config.destinations.map((d) => d.name)).toEqual(["local", "corp", "security"]);
+    expect(config.destinations[0]!.kind).toBe("disk");
+    expect(config.destinations[1]!.kind).toBe("http");
+    expect(config.destinations[2]!.kind).toBe("http");
+    // Each destination keeps its own disclosure, no cross-contamination.
+    expect(config.destinations[0]!.disclosure).toBe("full");
+    expect(config.destinations[1]!.disclosure).toBe("moderate");
+    expect(config.destinations[2]!.disclosure).toBe("basic");
+  });
+
+  it("treats absolute paths and ~/-paths as disk; only http(s):// is http", () => {
+    const config = loadConfig(writeConfig(`
+destinations:
+  - { name: a, endpoint: /var/lib/observer }
+  - { name: b, endpoint: ~/observer }
+  - { name: c, endpoint: ./observer }
+  - { name: d, endpoint: file:///tmp/observer }
+  - { name: e, endpoint: http://localhost:19900/api/ingest }
+  - { name: f, endpoint: https://api.example.com/api/ingest }
+`));
+    const kinds = config.destinations.map((d) => d.kind);
+    expect(kinds).toEqual(["disk", "disk", "disk", "disk", "http", "http"]);
+  });
+});
+
+describe("loadConfig — legacy ship: rejection", () => {
+  it("throws a clear error when the legacy `ship:` shape is present", () => {
+    expect(() => loadConfig(writeConfig(`
+ship:
+  endpoint: https://api.example.com/api/ingest
+  disclosure: moderate
+`))).toThrow(/destinations/);
+  });
+
+  it("error message tells the user the new shape", () => {
+    let err: Error | null = null;
+    try {
+      loadConfig(writeConfig(`ship: { endpoint: https://x.example.com }`));
+    } catch (e) { err = e as Error; }
+    expect(err).not.toBeNull();
+    expect(err!.message).toMatch(/destinations:/);
+    expect(err!.message).toMatch(/migrate/i);
+  });
+});
+
+describe("loadConfig — sources / git / privacy / dashboard / pollIntervalMs", () => {
+  it("parses sources", () => {
+    const config = loadConfig(writeConfig(`
 sources:
   claude_code: true
   codex: false
   cursor: true
-ship:
-  endpoint: https://observer.acme.com/api/ingest
-  redactSecrets: true
-developer: alice@acme.com
-`);
-    const config = loadConfig(configFile);
+`));
     expect(config.sources.codex).toBe(false);
-    expect(config.ship.endpoint).toBe("https://observer.acme.com/api/ingest");
-    expect(config.developer).toBe("alice@acme.com");
   });
 
-  it("merges partial config with defaults", () => {
-    const dir = makeTmpDir();
-    const configFile = join(dir, "config.yaml");
-    writeFileSync(configFile, `
-sources:
-  cursor: false
-`);
-    const config = loadConfig(configFile);
-    expect(config.sources.cursor).toBe(false);
-    // Others keep defaults
-    expect(config.sources.claude_code).toBe(true);
-    expect(config.sources.codex).toBe(true);
-    expect(config.ship.redactSecrets).toBe(true);
-  });
-
-  it("respects poll interval", () => {
-    const dir = makeTmpDir();
-    const configFile = join(dir, "config.yaml");
-    writeFileSync(configFile, `
-pollIntervalMs: 30000
-`);
-    const config = loadConfig(configFile);
+  it("parses pollIntervalMs", () => {
+    const config = loadConfig(writeConfig(`pollIntervalMs: 30000`));
     expect(config.pollIntervalMs).toBe(30000);
   });
 
-  it("handles exclude_projects", () => {
-    const dir = makeTmpDir();
-    const configFile = join(dir, "config.yaml");
-    writeFileSync(configFile, `
-privacy:
-  excludeProjects:
-    - client-nda-project
-    - secret-repo
-`);
-    const config = loadConfig(configFile);
-    expect(config.privacy.excludeProjects).toEqual([
-      "client-nda-project",
-      "secret-repo",
-    ]);
-  });
-
-  it("loads localOutputDir from config", () => {
-    const dir = makeTmpDir();
-    const configFile = join(dir, "config.yaml");
-    writeFileSync(configFile, `
-ship:
-  localOutputDir: ~/.observer/traces/normalized
-  disclosure: sensitive
-`);
-    const config = loadConfig(configFile);
-    expect(config.ship.localOutputDir).toBe("~/.observer/traces/normalized");
-    expect(config.ship.disclosure).toBe("sensitive");
-  });
-
-  it("defaults localOutputDir to null", () => {
-    const config = loadConfig("/nonexistent/config.yaml");
-    expect(config.ship.localOutputDir).toBeNull();
-  });
-
-  it("DEFAULT_CONFIG has sane values", () => {
-    expect(DEFAULT_CONFIG.pollIntervalMs).toBeGreaterThan(0);
-    expect(DEFAULT_CONFIG.sources.claude_code).toBe(true);
-    expect(DEFAULT_CONFIG.ship.redactSecrets).toBe(true);
-    expect(DEFAULT_CONFIG.ship.localOutputDir).toBeNull();
-    expect(DEFAULT_CONFIG.privacy.excludeProjects).toEqual([]);
+  it("merges partial config with defaults — destinations missing means none configured", () => {
+    const config = loadConfig(writeConfig(`
+sources:
+  cursor: false
+`));
+    expect(config.sources.cursor).toBe(false);
+    expect(config.sources.claude_code).toBe(true);
+    expect(config.destinations).toEqual([]);
   });
 });

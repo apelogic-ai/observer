@@ -1,5 +1,14 @@
 /**
  * Config — load and merge ~/.observer/config.yaml with defaults.
+ *
+ * The shipping side is structured around N independent **destinations**.
+ * Each destination has its own endpoint, disclosure level, schedule,
+ * scope filters, and cursor. The daemon parses each trace file once
+ * per poll, then applies per-destination filters and ships independently.
+ *
+ * The legacy `ship:` shape is rejected at parse time (the codebase had
+ * not reached production at the time of the cut). The error message
+ * tells the user how to migrate.
  */
 
 import { existsSync, readFileSync } from "node:fs";
@@ -8,18 +17,49 @@ import type { DisclosureLevel } from "./types";
 
 export type LogLevel = "silent" | "error" | "info" | "debug";
 
+export type DestinationKind = "disk" | "http";
+export type Schedule = "realtime" | "hourly" | "daily";
+
+interface BaseDestination {
+  /** Stable, user-friendly name. Also the cursor-file name on disk. */
+  name: string;
+  /** Path (disk) or URL (http). */
+  endpoint: string;
+  disclosure: DisclosureLevel;
+  schedule: Schedule;
+  useLocalTime: boolean;
+  anonymize: boolean;
+  redactSecrets: boolean;
+  /** Repo-org allow/deny lists. Empty `include` means "no scope filter". */
+  orgs: { include: string[]; exclude: string[] };
+  /** Project (path or name) allow/deny lists. */
+  projects: { include: string[]; exclude: string[] };
+}
+
+export interface DiskDestination extends BaseDestination {
+  kind: "disk";
+}
+
+export interface HttpDestination extends BaseDestination {
+  kind: "http";
+  /** Literal API key (use `apiKeyEnv` to avoid baking secrets into config). */
+  apiKey: string | null;
+  /** Name of an env var holding the API key. */
+  apiKeyEnv: string | null;
+}
+
+/** Discriminated union over the kind tag — disk-only fields aren't visible
+ *  to http handlers and vice versa. Kind is inferred from the endpoint:
+ *  http(s)://... → "http", anything else → "disk". */
+export type Destination = DiskDestination | HttpDestination;
+
 export interface DashboardConfig {
-  /** Bun API server port */
   port: number;
-  /** Next UI port (relevant once dashboard is folded into the CLI) */
   uiPort: number;
-  /** Normalized traces dir. null → ~/.observer/traces/normalized */
   dataDir: string | null;
   log: {
     level: LogLevel;
-    /** Log file path. null → ~/.observer/logs/dashboard.log */
     file: string | null;
-    /** Mirror log lines to stderr */
     stderr: boolean;
   };
 }
@@ -30,34 +70,18 @@ export interface ObserverConfig {
     codex: boolean;
     cursor: boolean;
   };
-  ship: {
-    endpoint: string | null;
-    localOutputDir: string | null;
-    redactSecrets: boolean;
-    schedule: "realtime" | "hourly" | "daily";
-    disclosure: DisclosureLevel;
-    useLocalTime: boolean;
-    anonymize: boolean;
-  };
+  destinations: Destination[];
   git: {
     enabled: boolean;
-    /** Extra repo paths to scan, keyed by project name.
-     *  e.g. { "db-mcp": ["/Users/dev/observer"] } */
     repos: Record<string, string[]>;
-    /** When true, only collect commits authored by the configured developer
-     *  (matched against author name + email). Prevents your dashboard from
-     *  filling with teammates' commits in shared repos. Default true. */
     onlySelf: boolean;
   };
   privacy: {
+    /** Hard exclusion list — applied before any destination's filters.
+     *  Sets a global floor: paths here never reach any destination. */
     excludeProjects: string[];
   };
   cursor: {
-    /** When true, the daemon will read Cursor's local auth token from
-     *  state.vscdb and call Cursor's undocumented dashboard API to fetch
-     *  real consumed-token totals (Cursor doesn't write these to disk).
-     *  Off by default — the auth token is account-equivalent; opt in
-     *  consciously. */
     fetchUsage: boolean;
   };
   dashboard: DashboardConfig;
@@ -66,21 +90,23 @@ export interface ObserverConfig {
   machine: string | null;
 }
 
+const DEFAULT_DESTINATION: Omit<BaseDestination, "name" | "endpoint"> = {
+  disclosure: "moderate",
+  schedule: "hourly",
+  useLocalTime: false,
+  anonymize: false,
+  redactSecrets: true,
+  orgs: { include: [], exclude: [] },
+  projects: { include: [], exclude: [] },
+};
+
 export const DEFAULT_CONFIG: ObserverConfig = {
   sources: {
     claude_code: true,
     codex: true,
     cursor: true,
   },
-  ship: {
-    endpoint: null,
-    localOutputDir: null,
-    redactSecrets: true,
-    schedule: "hourly",
-    disclosure: "basic" as DisclosureLevel,
-    useLocalTime: false,
-    anonymize: false,
-  },
+  destinations: [],
   git: {
     enabled: true,
     repos: {},
@@ -102,10 +128,70 @@ export const DEFAULT_CONFIG: ObserverConfig = {
       stderr: false,
     },
   },
-  pollIntervalMs: 300_000, // 5 minutes
+  pollIntervalMs: 300_000,
   developer: null,
   machine: null,
 };
+
+function inferKind(endpoint: string): DestinationKind {
+  return /^https?:\/\//.test(endpoint) ? "http" : "disk";
+}
+
+function asStringArray(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((x) => typeof x === "string") as string[] : [];
+}
+
+function parseDestination(raw: Record<string, unknown>, idx: number): Destination {
+  const name = typeof raw.name === "string" ? raw.name : `destination-${idx}`;
+  const endpoint = typeof raw.endpoint === "string" ? raw.endpoint : "";
+  if (!endpoint) {
+    throw new Error(`destinations[${idx}] (${name}): \`endpoint\` is required`);
+  }
+  const kind = inferKind(endpoint);
+
+  const orgs = (raw.orgs ?? {}) as Record<string, unknown>;
+  const projects = (raw.projects ?? {}) as Record<string, unknown>;
+
+  const base: BaseDestination = {
+    name,
+    endpoint,
+    disclosure: (raw.disclosure as DisclosureLevel) ?? DEFAULT_DESTINATION.disclosure,
+    schedule: (raw.schedule as Schedule) ?? DEFAULT_DESTINATION.schedule,
+    useLocalTime: raw.useLocalTime !== undefined ? Boolean(raw.useLocalTime) : DEFAULT_DESTINATION.useLocalTime,
+    anonymize:    raw.anonymize    !== undefined ? Boolean(raw.anonymize)    : DEFAULT_DESTINATION.anonymize,
+    redactSecrets: raw.redactSecrets !== undefined ? Boolean(raw.redactSecrets) : DEFAULT_DESTINATION.redactSecrets,
+    orgs: {
+      include: asStringArray(orgs.include),
+      exclude: asStringArray(orgs.exclude),
+    },
+    projects: {
+      include: asStringArray(projects.include),
+      exclude: asStringArray(projects.exclude),
+    },
+  };
+
+  if (kind === "disk") {
+    return { ...base, kind: "disk" };
+  }
+  return {
+    ...base,
+    kind: "http",
+    apiKey:    typeof raw.apiKey    === "string" ? raw.apiKey    : null,
+    apiKeyEnv: typeof raw.apiKeyEnv === "string" ? raw.apiKeyEnv : null,
+  };
+}
+
+const LEGACY_SHIP_ERROR =
+  `\`ship:\` config is no longer supported. Migrate to \`destinations:\`:\n\n` +
+  `  destinations:\n` +
+  `    - name: local\n` +
+  `      endpoint: ~/.observer/traces/normalized   # <- was ship.localOutputDir\n` +
+  `      disclosure: full                          # local-only data is fine at full\n` +
+  `    - name: remote\n` +
+  `      endpoint: https://your-ingestor.example.com/api/ingest   # <- was ship.endpoint\n` +
+  `      apiKeyEnv: OBSERVER_API_KEY\n` +
+  `      disclosure: moderate\n\n` +
+  `Each destination has its own disclosure, schedule, scope, and redact settings.\n`;
 
 /**
  * Load config from a YAML file, merging with defaults.
@@ -123,8 +209,12 @@ export function loadConfig(configPath: string): ObserverConfig {
     return { ...DEFAULT_CONFIG };
   }
 
+  if ("ship" in raw) {
+    throw new Error(LEGACY_SHIP_ERROR);
+  }
+
   const rawSources = (raw.sources ?? {}) as Record<string, unknown>;
-  const rawShip = (raw.ship ?? {}) as Record<string, unknown>;
+  const rawDestinations = Array.isArray(raw.destinations) ? raw.destinations as unknown[] : [];
   const rawGit = (raw.git ?? {}) as Record<string, unknown>;
   const rawPrivacy = (raw.privacy ?? {}) as Record<string, unknown>;
   const rawCursor = (raw.cursor ?? {}) as Record<string, unknown>;
@@ -143,23 +233,9 @@ export function loadConfig(configPath: string): ObserverConfig {
         ? Boolean(rawSources.cursor)
         : DEFAULT_CONFIG.sources.cursor,
     },
-    ship: {
-      endpoint: (rawShip.endpoint as string) ?? DEFAULT_CONFIG.ship.endpoint,
-      localOutputDir: (rawShip.localOutputDir as string) ?? DEFAULT_CONFIG.ship.localOutputDir,
-      redactSecrets: rawShip.redactSecrets !== undefined
-        ? Boolean(rawShip.redactSecrets)
-        : DEFAULT_CONFIG.ship.redactSecrets,
-      schedule: (rawShip.schedule as ObserverConfig["ship"]["schedule"]) ??
-        DEFAULT_CONFIG.ship.schedule,
-      disclosure: (rawShip.disclosure as DisclosureLevel) ??
-        DEFAULT_CONFIG.ship.disclosure,
-      useLocalTime: rawShip.useLocalTime !== undefined
-        ? Boolean(rawShip.useLocalTime)
-        : DEFAULT_CONFIG.ship.useLocalTime,
-      anonymize: rawShip.anonymize !== undefined
-        ? Boolean(rawShip.anonymize)
-        : DEFAULT_CONFIG.ship.anonymize,
-    },
+    destinations: rawDestinations.map((d, i) =>
+      parseDestination((d ?? {}) as Record<string, unknown>, i),
+    ),
     git: {
       enabled: rawGit.enabled !== undefined
         ? Boolean(rawGit.enabled)
