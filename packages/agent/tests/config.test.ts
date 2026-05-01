@@ -129,23 +129,73 @@ destinations:
   });
 });
 
-describe("loadConfig — legacy ship: rejection", () => {
-  it("throws a clear error when the legacy `ship:` shape is present", () => {
-    expect(() => loadConfig(writeConfig(`
+describe("loadConfig — legacy ship: auto-migration", () => {
+  it("translates legacy ship.localOutputDir into a disk destination", () => {
+    const config = loadConfig(writeConfig(`
 ship:
-  endpoint: https://api.example.com/api/ingest
-  disclosure: moderate
-`))).toThrow(/destinations/);
+  localOutputDir: ~/.observer/traces/normalized
+  disclosure: full
+  redactSecrets: true
+  useLocalTime: true
+`));
+    expect(config.destinations).toHaveLength(1);
+    const d = config.destinations[0]!;
+    expect(d.kind).toBe("disk");
+    expect(d.name).toBe("local");
+    expect(d.endpoint).toBe("~/.observer/traces/normalized");
+    expect(d.disclosure).toBe("full");
+    expect(d.redactSecrets).toBe(true);
+    expect(d.useLocalTime).toBe(true);
   });
 
-  it("error message tells the user the new shape", () => {
-    let err: Error | null = null;
-    try {
-      loadConfig(writeConfig(`ship: { endpoint: https://x.example.com }`));
-    } catch (e) { err = e as Error; }
-    expect(err).not.toBeNull();
-    expect(err!.message).toMatch(/destinations:/);
-    expect(err!.message).toMatch(/migrate/i);
+  it("translates legacy ship.endpoint into an http destination", () => {
+    const config = loadConfig(writeConfig(`
+ship:
+  endpoint: https://api.example.com/api/ingest
+  apiKey: key_legacy_123
+  disclosure: moderate
+`));
+    expect(config.destinations).toHaveLength(1);
+    const d = config.destinations[0]!;
+    expect(d.kind).toBe("http");
+    expect(d.name).toBe("remote");
+    expect(d.endpoint).toBe("https://api.example.com/api/ingest");
+    expect(d.disclosure).toBe("moderate");
+    if (d.kind === "http") expect(d.apiKey).toBe("key_legacy_123");
+  });
+
+  it("translates a fully-populated legacy ship: into two destinations", () => {
+    const config = loadConfig(writeConfig(`
+ship:
+  endpoint: https://corp.example.com/api/ingest
+  apiKeyEnv: CORP_KEY
+  localOutputDir: /var/observer/traces
+  disclosure: sensitive
+  schedule: hourly
+  useLocalTime: false
+  anonymize: true
+  redactSecrets: true
+`));
+    expect(config.destinations).toHaveLength(2);
+    const local = config.destinations.find((d) => d.kind === "disk")!;
+    const remote = config.destinations.find((d) => d.kind === "http")!;
+    expect(local.endpoint).toBe("/var/observer/traces");
+    expect(local.disclosure).toBe("sensitive");
+    expect(local.anonymize).toBe(true);
+    expect(remote.endpoint).toBe("https://corp.example.com/api/ingest");
+    expect(remote.disclosure).toBe("sensitive");
+    expect(remote.anonymize).toBe(true);
+    if (remote.kind === "http") expect(remote.apiKeyEnv).toBe("CORP_KEY");
+  });
+
+  it("rejects configs that set BOTH ship: and destinations: — pick one", () => {
+    expect(() => loadConfig(writeConfig(`
+ship:
+  endpoint: https://old.example.com/api/ingest
+destinations:
+  - name: new
+    endpoint: https://new.example.com/api/ingest
+`))).toThrow(/both/i);
   });
 });
 

@@ -181,17 +181,58 @@ function parseDestination(raw: Record<string, unknown>, idx: number): Destinatio
   };
 }
 
-const LEGACY_SHIP_ERROR =
-  `\`ship:\` config is no longer supported. Migrate to \`destinations:\`:\n\n` +
-  `  destinations:\n` +
-  `    - name: local\n` +
-  `      endpoint: ~/.observer/traces/normalized   # <- was ship.localOutputDir\n` +
-  `      disclosure: full                          # local-only data is fine at full\n` +
-  `    - name: remote\n` +
-  `      endpoint: https://your-ingestor.example.com/api/ingest   # <- was ship.endpoint\n` +
-  `      apiKeyEnv: OBSERVER_API_KEY\n` +
-  `      disclosure: moderate\n\n` +
-  `Each destination has its own disclosure, schedule, scope, and redact settings.\n`;
+/**
+ * Translate a legacy `ship:` block into one or two destinations. Pure
+ * in-memory transform; the user's config.yaml is never rewritten. The
+ * caller is expected to log a one-line note so the user knows their
+ * old shape is being adapted.
+ *
+ * Mapping:
+ *   ship.localOutputDir → disk destination "local"
+ *   ship.endpoint       → http destination "remote"
+ *   ship.disclosure / redactSecrets / schedule / useLocalTime /
+ *     anonymize → applied to BOTH destinations identically (the legacy
+ *     shape conflated them, which is exactly the bug the new shape
+ *     fixes — but we honour what the user wrote).
+ */
+function migrateLegacyShip(
+  rawShip: Record<string, unknown>,
+  developerOrgs: string[],
+): Destination[] {
+  const out: Destination[] = [];
+  const disclosure = (rawShip.disclosure as DisclosureLevel) ?? DEFAULT_DESTINATION.disclosure;
+  const schedule = (rawShip.schedule as Schedule) ?? DEFAULT_DESTINATION.schedule;
+  const useLocalTime = rawShip.useLocalTime !== undefined ? Boolean(rawShip.useLocalTime) : DEFAULT_DESTINATION.useLocalTime;
+  const anonymize = rawShip.anonymize !== undefined ? Boolean(rawShip.anonymize) : DEFAULT_DESTINATION.anonymize;
+  const redactSecrets = rawShip.redactSecrets !== undefined ? Boolean(rawShip.redactSecrets) : DEFAULT_DESTINATION.redactSecrets;
+  const orgs = { include: developerOrgs, exclude: [] as string[] };
+  const projects = { include: [] as string[], exclude: [] as string[] };
+  const baseFields = { disclosure, schedule, useLocalTime, anonymize, redactSecrets, orgs, projects };
+
+  if (typeof rawShip.localOutputDir === "string" && rawShip.localOutputDir) {
+    out.push({
+      kind: "disk",
+      name: "local",
+      endpoint: rawShip.localOutputDir,
+      ...baseFields,
+    });
+  }
+  if (typeof rawShip.endpoint === "string" && rawShip.endpoint) {
+    out.push({
+      kind: "http",
+      name: "remote",
+      endpoint: rawShip.endpoint,
+      apiKey:    typeof rawShip.apiKey    === "string" ? rawShip.apiKey    : null,
+      apiKeyEnv: typeof rawShip.apiKeyEnv === "string" ? rawShip.apiKeyEnv : null,
+      ...baseFields,
+    });
+  }
+  return out;
+}
+
+const LEGACY_AND_NEW_BOTH_SET =
+  `\`ship:\` and \`destinations:\` are both set. Pick one — \`destinations:\` ` +
+  `is the supported shape; \`ship:\` is auto-migrated when present alone.`;
 
 /**
  * Load config from a YAML file, merging with defaults.
@@ -209,8 +250,10 @@ export function loadConfig(configPath: string): ObserverConfig {
     return { ...DEFAULT_CONFIG };
   }
 
-  if ("ship" in raw) {
-    throw new Error(LEGACY_SHIP_ERROR);
+  const hasLegacyShip = "ship" in raw && typeof raw.ship === "object" && raw.ship !== null;
+  const hasNewDestinations = "destinations" in raw && Array.isArray(raw.destinations);
+  if (hasLegacyShip && hasNewDestinations) {
+    throw new Error(LEGACY_AND_NEW_BOTH_SET);
   }
 
   const rawSources = (raw.sources ?? {}) as Record<string, unknown>;
@@ -233,9 +276,11 @@ export function loadConfig(configPath: string): ObserverConfig {
         ? Boolean(rawSources.cursor)
         : DEFAULT_CONFIG.sources.cursor,
     },
-    destinations: rawDestinations.map((d, i) =>
-      parseDestination((d ?? {}) as Record<string, unknown>, i),
-    ),
+    destinations: hasLegacyShip
+      ? migrateLegacyShip(raw.ship as Record<string, unknown>, [])
+      : rawDestinations.map((d, i) =>
+          parseDestination((d ?? {}) as Record<string, unknown>, i),
+        ),
     git: {
       enabled: rawGit.enabled !== undefined
         ? Boolean(rawGit.enabled)
