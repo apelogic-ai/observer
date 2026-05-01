@@ -67,6 +67,47 @@ export function loadKeypair(stateDir: string): Keypair | null {
 }
 
 /**
+ * Load a keypair, preferring the keychain when configured.
+ *
+ * Resolution order:
+ *   1. keychain (if `keychainService` is set and a SecureStore is given)
+ *   2. file-based (~/.observer/observer.key + observer.pub)
+ *
+ * Public key always comes from the .pub file — keychain stores only the
+ * private half. Public is non-secret and the file form makes
+ * `observer auth status`-style ergonomics free.
+ */
+export async function loadKeypairWithKeychain(
+  stateDir: string,
+  options: {
+    keychainService?: string | null;
+    account?: string;
+    secureStore?: { get(service: string, account: string): Promise<string | null> } | null;
+  } = {},
+): Promise<Keypair | null> {
+  const fileKeypair = loadKeypair(stateDir);
+
+  if (options.keychainService && options.secureStore) {
+    const fromKeychain = await options.secureStore.get(
+      options.keychainService,
+      options.account ?? "default",
+    );
+    if (fromKeychain) {
+      // Public key still comes from the on-disk pub file (it's not
+      // secret; keeps fingerprint display + registration simple).
+      const pubPath = join(stateDir, PUBLIC_KEY_FILE);
+      if (!existsSync(pubPath)) return null;
+      return {
+        privateKeyPem: fromKeychain,
+        publicKeyPem: readFileSync(pubPath, "utf-8"),
+      };
+    }
+  }
+
+  return fileKeypair;
+}
+
+/**
  * Sign a payload string with the private key.
  * Returns a base64-encoded Ed25519 signature.
  */

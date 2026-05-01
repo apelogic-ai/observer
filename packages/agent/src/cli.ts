@@ -478,7 +478,9 @@ async function defaultAction(): Promise<void> {
 
 async function daemonAction(opts: { stateDir: string }): Promise<void> {
   const { loadConfig, resolveDestinationApiKey } = await import("./config");
+  const { detectSecureStore } = await import("./secure-store");
   const config = loadConfig(join(opts.stateDir, "config.yaml"));
+  const secureStore = detectSecureStore();
 
   console.log("Observer daemon starting...");
   console.log(`  Developer: ${config.developer ?? "(auto)"}`);
@@ -489,7 +491,12 @@ async function daemonAction(opts: { stateDir: string }): Promise<void> {
   console.log();
 
   generateKeypair(opts.stateDir);
-  const keypair = loadKeypair(opts.stateDir) ?? undefined;
+  const { loadKeypairWithKeychain } = await import("./identity");
+  const keypair = (await loadKeypairWithKeychain(opts.stateDir, {
+    keychainService: config.keypairKeychain,
+    account: config.developer ?? "default",
+    secureStore,
+  })) ?? undefined;
 
   // TODO follow-up: push destinations[] all the way into Daemon so each
   // gets its own cursor + per-poll iteration. This first step picks the
@@ -499,7 +506,12 @@ async function daemonAction(opts: { stateDir: string }): Promise<void> {
   const firstHttp = config.destinations.find((d) => d.kind === "http");
   const firstDisk = config.destinations.find((d) => d.kind === "disk");
 
-  const httpApiKey = firstHttp ? resolveDestinationApiKey(firstHttp) : null;
+  const httpApiKey = firstHttp
+    ? await resolveDestinationApiKey(firstHttp, {
+        secureStore,
+        account: config.developer ?? "default",
+      })
+    : null;
   if (firstHttp && !httpApiKey && !keypair) {
     console.log(`  ! Warning: destination ${firstHttp.name} has neither resolved apiKey nor keypair — requests will be unauthenticated`);
   }
@@ -733,6 +745,70 @@ interface CursorUsageOptions {
   days: string;
   force?: boolean;
   stateDir: string;
+}
+
+// ── Keychain actions ─────────────────────────────────────────────
+
+interface KeychainOptions {
+  stateDir: string;
+}
+
+async function getSecureStoreOrFail() {
+  const { detectSecureStore } = await import("./secure-store");
+  const store = detectSecureStore();
+  if (!store) {
+    console.error(`No supported keychain found on ${process.platform}.`);
+    console.error(`macOS uses /usr/bin/security; Linux uses secret-tool (install libsecret-tools).`);
+    process.exit(1);
+  }
+  return store;
+}
+
+async function keychainAccount(stateDir: string): Promise<string> {
+  const { loadConfig } = await import("./config");
+  const cfg = loadConfig(join(stateDir, "config.yaml"));
+  return cfg.developer ?? "default";
+}
+
+async function readStdin(): Promise<string> {
+  if (process.stdin.isTTY) {
+    console.error("Refusing to read a secret from a TTY — pipe the value in:");
+    console.error(`  echo -n 'your-secret' | observer keychain set <service>`);
+    process.exit(2);
+  }
+  let buf = "";
+  for await (const chunk of process.stdin) buf += chunk.toString("utf-8");
+  return buf.replace(/\r?\n$/, "");
+}
+
+async function keychainSetAction(service: string, opts: KeychainOptions): Promise<void> {
+  const store = await getSecureStoreOrFail();
+  const account = await keychainAccount(opts.stateDir);
+  const value = await readStdin();
+  if (!value) {
+    console.error("Refusing to store an empty value.");
+    process.exit(2);
+  }
+  await store.put(service, account, value);
+  console.log(`✓ Stored ${service} (account=${account}) in ${store.name}`);
+}
+
+async function keychainGetAction(service: string, opts: KeychainOptions): Promise<void> {
+  const store = await getSecureStoreOrFail();
+  const account = await keychainAccount(opts.stateDir);
+  const v = await store.get(service, account);
+  if (v === null) {
+    console.error(`Not found: ${service} (account=${account})`);
+    process.exit(1);
+  }
+  process.stdout.write(v);
+}
+
+async function keychainDeleteAction(service: string, opts: KeychainOptions): Promise<void> {
+  const store = await getSecureStoreOrFail();
+  const account = await keychainAccount(opts.stateDir);
+  await store.delete(service, account);
+  console.log(`✓ Removed ${service} (account=${account}) from ${store.name}`);
 }
 
 async function cursorUsageAction(opts: CursorUsageOptions): Promise<void> {
@@ -1009,6 +1085,30 @@ program
   .option("--force", "Re-fetch even if a recent sidecar exists")
   .option("--state-dir <path>", "State directory", DEFAULT_STATE_DIR)
   .action(cursorUsageAction);
+
+// Keychain — manage OS-keychain-backed secrets referenced by config
+// (apiKeyKeychain, keypairKeychain). Account name = config.developer.
+const keychain = program
+  .command("keychain")
+  .description("Manage secrets stored in the OS keychain (macOS Keychain / libsecret)");
+
+keychain
+  .command("set <service>")
+  .description("Store a secret. Reads from stdin (so it doesn't land in shell history).")
+  .option("--state-dir <path>", "State directory", DEFAULT_STATE_DIR)
+  .action(keychainSetAction);
+
+keychain
+  .command("get <service>")
+  .description("Print a stored secret to stdout.")
+  .option("--state-dir <path>", "State directory", DEFAULT_STATE_DIR)
+  .action(keychainGetAction);
+
+keychain
+  .command("delete <service>")
+  .description("Remove a stored secret.")
+  .option("--state-dir <path>", "State directory", DEFAULT_STATE_DIR)
+  .action(keychainDeleteAction);
 
 program
   .command("update")

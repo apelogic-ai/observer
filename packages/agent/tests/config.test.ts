@@ -214,35 +214,61 @@ function httpDest(over: Partial<HttpDestination> = {}): HttpDestination {
     redactSecrets: true,
     apiKey: null,
     apiKeyEnv: null,
+    apiKeyKeychain: null,
     orgs: { include: [], exclude: [] },
     projects: { include: [], exclude: [] },
     ...over,
   };
 }
 
+class FakeStore {
+  constructor(private map: Map<string, string>) {}
+  async get(service: string, account: string): Promise<string | null> {
+    return this.map.get(`${service}\t${account}`) ?? null;
+  }
+}
+
 describe("resolveDestinationApiKey", () => {
-  it("returns the literal apiKey when set", () => {
-    const dest = httpDest({ apiKey: "literal_key", apiKeyEnv: "SHOULD_NOT_BE_USED" });
-    expect(resolveDestinationApiKey(dest, { SHOULD_NOT_BE_USED: "env_value" })).toBe("literal_key");
+  it("keychain wins over env and literal", async () => {
+    const dest = httpDest({
+      apiKey: "literal", apiKeyEnv: "ENV_KEY", apiKeyKeychain: "observer.dest",
+    });
+    const store = new FakeStore(new Map([["observer.dest\talice@x", "from_keychain"]]));
+    const v = await resolveDestinationApiKey(dest, {
+      env: { ENV_KEY: "env_value" }, secureStore: store, account: "alice@x",
+    });
+    expect(v).toBe("from_keychain");
   });
 
-  it("reads from the env var named in apiKeyEnv when apiKey is null", () => {
-    const dest = httpDest({ apiKey: null, apiKeyEnv: "OBSERVER_API_KEY" });
-    expect(resolveDestinationApiKey(dest, { OBSERVER_API_KEY: "from_env" })).toBe("from_env");
+  it("falls through keychain → env when keychain misses", async () => {
+    const dest = httpDest({ apiKeyEnv: "ENV_KEY", apiKeyKeychain: "missing" });
+    const store = new FakeStore(new Map());
+    const v = await resolveDestinationApiKey(dest, {
+      env: { ENV_KEY: "env_value" }, secureStore: store, account: "alice@x",
+    });
+    expect(v).toBe("env_value");
   });
 
-  it("returns null when apiKeyEnv names a missing env var", () => {
-    const dest = httpDest({ apiKey: null, apiKeyEnv: "NOT_SET" });
-    expect(resolveDestinationApiKey(dest, {})).toBeNull();
+  it("falls through env → literal when env unset", async () => {
+    const dest = httpDest({ apiKey: "literal", apiKeyEnv: "MISSING" });
+    expect(await resolveDestinationApiKey(dest, { env: {} })).toBe("literal");
   });
 
-  it("returns null when neither apiKey nor apiKeyEnv is set", () => {
-    expect(resolveDestinationApiKey(httpDest())).toBeNull();
+  it("returns null when nothing is configured", async () => {
+    expect(await resolveDestinationApiKey(httpDest())).toBeNull();
   });
 
-  it("treats empty-string env var as missing", () => {
-    const dest = httpDest({ apiKey: null, apiKeyEnv: "BLANK" });
-    expect(resolveDestinationApiKey(dest, { BLANK: "" })).toBeNull();
+  it("treats empty-string env var as missing", async () => {
+    const dest = httpDest({ apiKeyEnv: "BLANK" });
+    expect(await resolveDestinationApiKey(dest, { env: { BLANK: "" } })).toBeNull();
+  });
+
+  it("works without a secureStore — no keychain attempted", async () => {
+    const dest = httpDest({ apiKeyKeychain: "configured", apiKeyEnv: "ENV" });
+    const v = await resolveDestinationApiKey(dest, {
+      env: { ENV: "env_value" }, secureStore: null,
+    });
+    expect(v).toBe("env_value");
   });
 });
 
