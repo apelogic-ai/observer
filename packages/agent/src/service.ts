@@ -10,7 +10,7 @@
 
 import { mkdirSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 
 export interface ServiceConfig {
   /** Short name, used in the service label / filename. "agent" by default. */
@@ -139,12 +139,15 @@ export function installService(config: ServiceConfig): {
     writeFileSync(paths.plistPath, plist);
 
     try {
-      // Unload first if already loaded (idempotent)
+      // Argv-form invocation — paths are passed as a separate arg, no
+      // shell interpolation, no risk of word-splitting on spaces or
+      // injection through path components.
+      // Unload first if already loaded (idempotent).
       try {
-        execSync(`launchctl unload ${paths.plistPath}`, { stdio: "pipe" });
+        execFileSync("launchctl", ["unload", paths.plistPath], { stdio: "pipe" });
       } catch { /* not loaded, fine */ }
 
-      execSync(`launchctl load ${paths.plistPath}`, { stdio: "pipe" });
+      execFileSync("launchctl", ["load", paths.plistPath], { stdio: "pipe" });
       return {
         success: true,
         message: `${prettyName} installed: ${paths.plistPath}\nStarted via launchd. Will run on login.`,
@@ -165,8 +168,8 @@ export function installService(config: ServiceConfig): {
     writeFileSync(paths.unitPath, unit);
 
     try {
-      execSync("systemctl --user daemon-reload", { stdio: "pipe" });
-      execSync(`systemctl --user enable --now ${unitFile}`, { stdio: "pipe" });
+      execFileSync("systemctl", ["--user", "daemon-reload"], { stdio: "pipe" });
+      execFileSync("systemctl", ["--user", "enable", "--now", unitFile], { stdio: "pipe" });
       return {
         success: true,
         message: `${prettyName} installed: ${paths.unitPath}\nStarted via systemd. Will run on login.`,
@@ -196,7 +199,7 @@ export function uninstallService(homeDir: string, name: string = "agent"): {
   if (platform === "darwin" && paths.plistPath) {
     try {
       if (existsSync(paths.plistPath)) {
-        execSync(`launchctl unload ${paths.plistPath}`, { stdio: "pipe" });
+        execFileSync("launchctl", ["unload", paths.plistPath], { stdio: "pipe" });
         unlinkSync(paths.plistPath);
       }
       return { success: true, message: `${prettyName} stopped and uninstalled.` };
@@ -211,11 +214,11 @@ export function uninstallService(homeDir: string, name: string = "agent"): {
   if (platform === "linux" && paths.unitPath) {
     const unitFile = systemdUnitName(name);
     try {
-      execSync(`systemctl --user disable --now ${unitFile}`, { stdio: "pipe" });
+      execFileSync("systemctl", ["--user", "disable", "--now", unitFile], { stdio: "pipe" });
       if (existsSync(paths.unitPath)) {
         unlinkSync(paths.unitPath);
       }
-      execSync("systemctl --user daemon-reload", { stdio: "pipe" });
+      execFileSync("systemctl", ["--user", "daemon-reload"], { stdio: "pipe" });
       return { success: true, message: `${prettyName} stopped and uninstalled.` };
     } catch (err) {
       return {
