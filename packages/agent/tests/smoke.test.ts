@@ -1,6 +1,12 @@
 /**
  * Smoke tests against real agent trace data on this machine.
- * These tests read actual trace files — they skip if the data isn't present.
+ *
+ * Opt-in only: set OBSERVER_SMOKE_TEST=1 to run. By default these are
+ * skipped — they read ~/.claude and ~/.codex and log project names +
+ * secret-finding counts to stdout, which leaks local/private metadata
+ * into ordinary `bun test` runs (and into CI logs if the env was ever
+ * available there). Belongs in an explicit smoke script, not the
+ * default suite.
  */
 
 import { describe, it, expect } from "bun:test";
@@ -12,13 +18,14 @@ import { parseClaudeEntry } from "../src/parsers/claude";
 import { parseCodexEntry } from "../src/parsers/codex";
 import { scanForSecrets } from "../src/security/scanner";
 
+const SMOKE_ENABLED = process.env.OBSERVER_SMOKE_TEST === "1";
 const CLAUDE_DIR = join(homedir(), ".claude");
 const CODEX_DIR = join(homedir(), ".codex");
 
-const hasClaude = existsSync(join(CLAUDE_DIR, "projects"));
-const hasCodex = existsSync(join(CODEX_DIR, "sessions"));
+const hasClaude = SMOKE_ENABLED && existsSync(join(CLAUDE_DIR, "projects"));
+const hasCodex  = SMOKE_ENABLED && existsSync(join(CODEX_DIR, "sessions"));
 
-describe("Smoke: discovery", () => {
+describe.skipIf(!SMOKE_ENABLED)("Smoke: discovery", () => {
   it("finds real sources on this machine", () => {
     const sources = discoverTraceSources({
       claudeCodeDir: CLAUDE_DIR,

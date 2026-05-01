@@ -3,13 +3,29 @@ name: CI
 on:
   push:
     branches: [master]
+    # Path filters intentionally broad — release-critical files outside
+    # packages/ (lockfile, release script, install script, deploy infra,
+    # CI/release workflow) need to gate the same way. Anything that
+    # could change a shipped binary or its install path is in here.
     paths:
       - "packages/**"
+      - "package.json"
+      - "bun.lock"
+      - "scripts/**"
+      - "install.sh"
+      - "deploy/**"
       - ".github/workflows/ci.yml"
+      - ".github/workflows/release.yml"
   pull_request:
     paths:
       - "packages/**"
+      - "package.json"
+      - "bun.lock"
+      - "scripts/**"
+      - "install.sh"
+      - "deploy/**"
       - ".github/workflows/ci.yml"
+      - ".github/workflows/release.yml"
 
 jobs:
   agent-tests:

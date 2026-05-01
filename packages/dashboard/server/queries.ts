@@ -276,7 +276,7 @@ export async function getMotifs(f: Filters = {}, limit = 25): Promise<MotifRow[]
   const buckets = new Map<string, Bucket>();
   for (const r of rows) {
     const shape = motifShape(r.toolName, r.command, r.filePath);
-    const key = `${r.toolName} ${shape}`;
+    const key = `${r.toolName}\t${shape}`;
     let b = buckets.get(key);
     if (!b) {
       b = { toolName: r.toolName, shape, occurrences: 0, sessions: new Set(), tokens: 0 };

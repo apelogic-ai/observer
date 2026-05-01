@@ -108,19 +108,23 @@ const routes: Record<string, Handler> = {
   }),
 };
 
-const CORS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
-};
+/**
+ * No CORS headers. The dashboard UI is served from the same origin
+ * (localhost:3457); browsers send same-origin requests without
+ * preflight or `Origin: *` enforcement. The previous wildcard
+ * `Access-Control-Allow-Origin: *` allowed any website the user
+ * happened to visit to read session prompts and assistant text from
+ * `http://localhost:3457/api/*`. Default-deny is the right posture
+ * for a local single-user surface.
+ */
 
-/** DuckDB returns BIGINT as JS BigInt — convert to Number for JSON. */
-function jsonResponse(data: unknown, headers: Record<string, string>): Response {
+/** Bun returns BIGINT as JS BigInt — convert to Number for JSON. */
+function jsonResponse(data: unknown): Response {
   const body = JSON.stringify(data, (_, v) =>
     typeof v === "bigint" ? Number(v) : v,
   );
   return new Response(body, {
-    headers: { "Content-Type": "application/json", ...headers },
+    headers: { "Content-Type": "application/json" },
   });
 }
 
@@ -131,7 +135,13 @@ function jsonResponse(data: unknown, headers: Record<string, string>): Response 
  * argv/env/config.yaml produce — used by the compiled binary to force the
  * staticDir to the extracted-assets path.
  */
-export async function start(overrides: Partial<CliOverrides> = {}): Promise<void> {
+export interface StartedServer {
+  /** Bun server handle. Has `.stop()` and `.port`. */
+  server: ReturnType<typeof Bun.serve>;
+  port: number;
+}
+
+export async function start(overrides: Partial<CliOverrides> = {}): Promise<StartedServer> {
   // overrides are defaults injected by callers (e.g. compiled-entry passes
   // staticDir from the extracted tarball). argv still wins so the user can
   // --static-dir a local out/ for debugging.
@@ -170,8 +180,11 @@ export async function start(overrides: Partial<CliOverrides> = {}): Promise<void
     async fetch(req) {
       const url = new URL(req.url);
 
+      // Same-origin only: drop preflight handling. Browsers don't send
+      // OPTIONS for same-origin requests; if one arrives, treat it as a
+      // method-not-allowed.
       if (req.method === "OPTIONS") {
-        return new Response(null, { status: 204, headers: CORS });
+        return new Response(null, { status: 405 });
       }
 
       const handler = routes[url.pathname];
@@ -180,7 +193,7 @@ export async function start(overrides: Partial<CliOverrides> = {}): Promise<void
       // /api/* → JSON handlers; everything else → static assets.
       if (!handler) {
         if (url.pathname.startsWith("/api/")) {
-          return Response.json({ error: "not found" }, { status: 404, headers: CORS });
+          return Response.json({ error: "not found" }, { status: 404 });
         }
         try {
           const res = await serveStatic(url.pathname);
@@ -205,7 +218,7 @@ export async function start(overrides: Partial<CliOverrides> = {}): Promise<void
 
       try {
         const data = await handler(url);
-        const res = jsonResponse(data, CORS);
+        const res = jsonResponse(data);
         log("http", {
           path: url.pathname,
           q: url.search || undefined,
@@ -220,7 +233,7 @@ export async function start(overrides: Partial<CliOverrides> = {}): Promise<void
           status: 500,
           err: String(err),
         });
-        return Response.json({ error: String(err) }, { status: 500, headers: CORS });
+        return Response.json({ error: String(err) }, { status: 500 });
       }
     },
   });
@@ -236,6 +249,11 @@ export async function start(overrides: Partial<CliOverrides> = {}): Promise<void
   }
   process.on("SIGINT",  () => { void shutdown("SIGINT"); });
   process.on("SIGTERM", () => { void shutdown("SIGTERM"); });
+
+  // server.port is typed as number | undefined because Bun.serve in
+  // unix-socket mode has no port; with a numeric port (or 0) it's
+  // always defined.
+  return { server, port: server.port ?? cfg.port };
 }
 
 // Script mode: running `bun server/index.ts` directly.
