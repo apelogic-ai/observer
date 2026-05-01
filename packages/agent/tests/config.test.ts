@@ -199,6 +199,53 @@ destinations:
   });
 });
 
+import { resolveDestinationApiKey } from "../src/config";
+import type { HttpDestination } from "../src/config";
+
+function httpDest(over: Partial<HttpDestination> = {}): HttpDestination {
+  return {
+    kind: "http",
+    name: "test",
+    endpoint: "https://x.example.com/api/ingest",
+    disclosure: "moderate",
+    schedule: "hourly",
+    useLocalTime: false,
+    anonymize: false,
+    redactSecrets: true,
+    apiKey: null,
+    apiKeyEnv: null,
+    orgs: { include: [], exclude: [] },
+    projects: { include: [], exclude: [] },
+    ...over,
+  };
+}
+
+describe("resolveDestinationApiKey", () => {
+  it("returns the literal apiKey when set", () => {
+    const dest = httpDest({ apiKey: "literal_key", apiKeyEnv: "SHOULD_NOT_BE_USED" });
+    expect(resolveDestinationApiKey(dest, { SHOULD_NOT_BE_USED: "env_value" })).toBe("literal_key");
+  });
+
+  it("reads from the env var named in apiKeyEnv when apiKey is null", () => {
+    const dest = httpDest({ apiKey: null, apiKeyEnv: "OBSERVER_API_KEY" });
+    expect(resolveDestinationApiKey(dest, { OBSERVER_API_KEY: "from_env" })).toBe("from_env");
+  });
+
+  it("returns null when apiKeyEnv names a missing env var", () => {
+    const dest = httpDest({ apiKey: null, apiKeyEnv: "NOT_SET" });
+    expect(resolveDestinationApiKey(dest, {})).toBeNull();
+  });
+
+  it("returns null when neither apiKey nor apiKeyEnv is set", () => {
+    expect(resolveDestinationApiKey(httpDest())).toBeNull();
+  });
+
+  it("treats empty-string env var as missing", () => {
+    const dest = httpDest({ apiKey: null, apiKeyEnv: "BLANK" });
+    expect(resolveDestinationApiKey(dest, { BLANK: "" })).toBeNull();
+  });
+});
+
 describe("loadConfig — sources / git / privacy / dashboard / pollIntervalMs", () => {
   it("parses sources", () => {
     const config = loadConfig(writeConfig(`

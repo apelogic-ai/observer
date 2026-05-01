@@ -477,7 +477,7 @@ async function defaultAction(): Promise<void> {
 // --- Daemon foreground ---
 
 async function daemonAction(opts: { stateDir: string }): Promise<void> {
-  const { loadConfig } = await import("./config");
+  const { loadConfig, resolveDestinationApiKey } = await import("./config");
   const config = loadConfig(join(opts.stateDir, "config.yaml"));
 
   console.log("Observer daemon starting...");
@@ -499,8 +499,16 @@ async function daemonAction(opts: { stateDir: string }): Promise<void> {
   const firstHttp = config.destinations.find((d) => d.kind === "http");
   const firstDisk = config.destinations.find((d) => d.kind === "disk");
 
+  const httpApiKey = firstHttp ? resolveDestinationApiKey(firstHttp) : null;
+  if (firstHttp && !httpApiKey && !keypair) {
+    console.log(`  ! Warning: destination ${firstHttp.name} has neither resolved apiKey nor keypair — requests will be unauthenticated`);
+  }
   const httpShipDaemon = firstHttp
-    ? createHttpShipper({ endpoint: firstHttp.endpoint, keypair })
+    ? createHttpShipper({
+        endpoint: firstHttp.endpoint,
+        apiKey: httpApiKey ?? undefined,
+        keypair,
+      })
     : null;
   const diskShipDaemon = firstDisk
     ? createDiskShipper({
