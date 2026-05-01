@@ -105,54 +105,38 @@ works. If a parser encounters unknown entry types, they are skipped
 
 ## 4. Architecture
 
-```
-Developer Machine                                   Centralized Infrastructure
-─────────────────                                   ─────────────────────────────
+**Rendered diagrams** (drag into Google Docs):
+[SVG](img/architecture.svg) · [PNG](img/architecture.png).
 
-Agent trace dirs                                    API server (ingestor)
-  ~/.claude/projects/                                 stateless HTTP, S3-backed
-  ~/.codex/sessions/                                    │
-  ~/.cursor/  (SQLite)                                  │  authenticate
-        │                                               │  deduplicate
-        ▼                                               │  store
-  ┌─────────────────────┐                               ▼
-  │  observer daemon    │                        ┌──────────────────┐
-  │                     │   HTTP POST            │  Lakehouse (S3)  │
-  │  discover           │ ──────────────────►    │                  │
-  │  parse              │   + Auth header        │  Raw zone        │
-  │  classify fields    │   + Ed25519 sig        │  (JSONL, Hive)   │
-  │  scan secrets       │                        │                  │
-  │  enforce disclosure │   ───── OR ─────►      │  Normalized zone │
-  │  ship (idempotent)  │                        │  (Parquet)       │
-  └──────────┬──────────┘   local-only path      └────────┬─────────┘
-             │              (full disclosure)             │
-             ▼                                            │
-  ~/.observer/traces/normalized/  ◄──── reads ────┐       ▼
-  (Hive-partitioned JSONL)                        │   Downstream
-             │                                    │   pipelines
-             ▼                                    │
-  ┌─────────────────────┐                         │
-  │  observer dashboard │                         │
-  │  (embedded in       │                         │
-  │   binary as static  │                         │
-  │   Next.js export)   │                         │
-  │                     │                         │
-  │  in-memory SQLite   │                         │
-  │  + Bun HTTP server  │                         │
-  │                     │                         │
-  │  Pages:             │                         │
-  │  - Overview         │                         │
-  │  - Stumbles         │                         │
-  │  - Dark spend       │                         │
-  │  - Zero code        │                         │
-  │  - Session drill-in │                         │
-  └─────────────────────┘                         │
-                                                  │
-                                  ┌───────────────┼───────────────┐
-                                  ▼               ▼               ▼
-                            Knowledge       Analytics       Security
-                            extractor       (Grafana)       scanner
-                            (dreamer)
+The Mermaid source below renders natively on GitHub. To regenerate
+the SVG/PNG after edits: `bunx -p @mermaid-js/mermaid-cli mmdc -i
+docs/img/architecture.mmd -o docs/img/architecture.svg`.
+
+```mermaid
+flowchart LR
+    classDef local   fill:#E8F4FD,stroke:#3498DB,color:#000
+    classDef central fill:#FDF2E8,stroke:#E67E22,color:#000
+    classDef store   fill:#FEF9E7,stroke:#F39C12,color:#000
+
+    subgraph DEV["Developer machine"]
+        TRACES["Agent trace dirs<br/>~/.claude/projects/<br/>~/.codex/sessions/<br/>~/.cursor/ (SQLite)"]:::local
+        DAEMON["observer daemon<br/>discover · parse<br/>classify fields<br/>scan secrets<br/>enforce disclosure<br/>ship (idempotent)"]:::local
+        LOCAL["~/.observer/traces/normalized/<br/>Hive-partitioned JSONL<br/>(full disclosure, local-only)"]:::store
+        DASH["observer dashboard<br/>embedded static export + Bun server<br/>in-memory SQLite<br/><br/>Overview · Stumbles<br/>Dark spend · Zero code<br/>Session drill-in"]:::local
+    end
+
+    subgraph CORP["Centralized infrastructure"]
+        API["API server (ingestor)<br/>stateless HTTP<br/>auth · dedupe · store"]:::central
+        S3[("Lakehouse (S3)<br/>versioned, AES256<br/>raw + normalized zones")]:::store
+        DOWN["Downstream pipelines<br/>knowledge mining (dreamer)<br/>analytics (Grafana)<br/>security scanning"]:::central
+    end
+
+    TRACES --> DAEMON
+    DAEMON -- "local disk shipper<br/>(full disclosure)" --> LOCAL
+    LOCAL --> DASH
+    DAEMON -- "HTTP POST<br/>Bearer key OR Ed25519 sig<br/>(filtered disclosure)" --> API
+    API --> S3
+    S3 --> DOWN
 ```
 
 ### Two data flows
