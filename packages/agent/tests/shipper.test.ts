@@ -26,6 +26,37 @@ describe("Shipper", () => {
     };
   });
 
+  it("logs to stderr when a ship fails — no silent swallowing", async () => {
+    const traceDir = makeTmpDir();
+    const traceFile = join(traceDir, "session.jsonl");
+    writeFileSync(traceFile, '{"line":1}\n');
+
+    const failingConfig: ShipperConfig = {
+      developer: "test-user@example.com",
+      machine: "test-machine",
+      stateDir,
+      ship: async () => { throw new Error("Ingestor returned 401: unauthorized"); },
+    };
+
+    // Capture console.error for the duration of this call. A bare
+    // `catch {}` lets the failure pass without writing anything;
+    // the test fails in that case.
+    const writes: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => { writes.push(args.map(String).join(" ")); };
+
+    try {
+      const shipper = new Shipper(failingConfig);
+      await shipper.processFile(traceFile, "claude_code", "test-project");
+    } finally {
+      console.error = originalError;
+    }
+
+    const combined = writes.join("\n");
+    expect(combined).toContain("[shipper]");
+    expect(combined).toContain("401");
+  });
+
   it("tracks cursor per file — only ships new lines", async () => {
     const traceDir = makeTmpDir();
     const traceFile = join(traceDir, "session.jsonl");

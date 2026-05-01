@@ -148,7 +148,19 @@ export class Shipper {
     try {
       await this.config.ship(batch);
       return true;
-    } catch {
+    } catch (err) {
+      // Surface the failure. Earlier this was a bare `catch {}` which made
+      // 401s, network errors, and 5xx invisible to the operator —
+      // shipBatch returned false, the cursor stalled, and the next poll
+      // tried the same window again, forever. Stderr keeps it visible
+      // to launchd's StandardErrorPath without pulling in the log module
+      // (avoids a circular dep with the test harness).
+      const msg = err instanceof Error ? err.message : String(err);
+      const trimmed = msg.length > 240 ? msg.slice(0, 240) + "…" : msg;
+      // eslint-disable-next-line no-console
+      console.error(
+        `[shipper] failed to ship batch ${batch.batchId} (${entries.length} entries) from ${filePath}: ${trimmed}`,
+      );
       return false;
     }
   }
