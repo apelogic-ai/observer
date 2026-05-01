@@ -320,6 +320,27 @@ export function loadConfig(configPath: string): ObserverConfig {
   };
 }
 
+/**
+ * Resolve the API key for an HTTP destination from its config plus the
+ * process environment. `apiKey` wins (literal value); `apiKeyEnv` falls
+ * back to `process.env[<name>]`. Returns null if neither yields a value.
+ *
+ * Surfaced here as a pure function so the daemon-startup code can stay
+ * trivial and the resolution can be unit-tested without spinning up the
+ * shipper.
+ */
+export function resolveDestinationApiKey(
+  dest: HttpDestination,
+  env: Record<string, string | undefined> = process.env,
+): string | null {
+  if (dest.apiKey) return dest.apiKey;
+  if (dest.apiKeyEnv) {
+    const v = env[dest.apiKeyEnv];
+    if (v) return v;
+  }
+  return null;
+}
+
 function isLogLevel(v: unknown): v is LogLevel {
   return v === "silent" || v === "error" || v === "info" || v === "debug";
 }
