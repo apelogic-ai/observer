@@ -64,11 +64,29 @@ export function generateConfig(answers: InitAnswers): string {
   // Local destination — drives the dashboard. Always enabled at full
   // disclosure since data never leaves the machine.
   const localBlock = `  - name: local-dashboard
+    # endpoint: file path on this machine. Must match what
+    # \`observer dashboard run\` reads (~/.observer/traces/normalized
+    # by default). Change only if you also change the dashboard's
+    # data-dir.
     endpoint: ${localOutputDir}
+    # disclosure: full | sensitive | moderate | basic
+    # full — keeps tool outputs and file contents (LOCAL ONLY; safe
+    #   here because data never leaves the machine).
     disclosure: full
+    # schedule: realtime | hourly | daily — flushes at this cadence.
+    # Use realtime so the dashboard reflects new sessions promptly.
     schedule: realtime
+    # useLocalTime: true bucket date partitions in your local TZ.
+    # The dashboard groups by these buckets, so keeping it true makes
+    # "today" mean today.
     useLocalTime: true
-    redactSecrets: true`;
+    # redactSecrets: 11 regex patterns mask AWS/GH/JWT/etc. Strongly
+    # recommend leaving on even for the local destination — agent
+    # traces routinely contain credentials in command output.
+    redactSecrets: true
+    # anonymize: replaces developer identity with a one-way hash. Off
+    # locally — your dashboard should show your real identity.
+    anonymize: false`;
 
   // Remote destination — only when the user specified an ingestor URL.
   // Disclosure follows the wizard's choice. Disk-only data can stay
@@ -98,12 +116,29 @@ export function generateConfig(answers: InitAnswers): string {
 
   const remoteBlock = answers.endpoint
     ? `  - name: remote
+    # endpoint: HTTPS URL of the central ingestor.
     endpoint: ${answers.endpoint}
 ${authLine}
+    # disclosure: full disclosure is forbidden over HTTP (would leak
+    # tool outputs + file contents). The wizard caps remote at
+    # sensitive even if you picked full above.
     disclosure: ${answers.disclosure === "full" ? "sensitive" : answers.disclosure}
+    # schedule: hourly batches kindly to the ingestor; switch to
+    # realtime if you want live cross-developer dashboards (more
+    # requests/second).
     schedule: hourly
+    # useLocalTime: false → UTC partitioning. Cross-developer
+    # analytics need a single timezone; UTC is the lingua franca.
     useLocalTime: false
-    redactSecrets: true${answers.includeOrgs.length > 0 ? `
+    # redactSecrets: true is the right answer for any remote
+    # destination. Setting false leaks credentials.
+    redactSecrets: true
+    # anonymize: replace developer identity with a hash. Useful for
+    # corporate ingestors where the dashboard shouldn't tie token
+    # spend to a specific person without explicit consent.
+    anonymize: false${answers.includeOrgs.length > 0 ? `
+    # orgs.include: only ship traces from repos under these GitHub
+    # orgs. Empty includes = no scope filter (everything ships).
     orgs:
       include:
 ${answers.includeOrgs.map((o) => `        - ${o}`).join("\n")}` : ""}`

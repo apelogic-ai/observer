@@ -475,6 +475,8 @@ Data capture level — how much detail to keep in each trace entry:
   const configYaml = generateConfig(answers);
   writeConfig(DEFAULT_STATE_DIR, configYaml, true);
   console.log(`\n✓ Config written to ~/.observer/config.yaml`);
+  console.log(`  Each destination has its own disclosure, schedule, redact, anonymize, and scope.`);
+  console.log(`  Edit the file to customize per-destination — every field has an inline comment.`);
 
   // Install daemon
   if (enableDaemon) {
