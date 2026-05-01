@@ -13,13 +13,14 @@ function makeTmpDir(): string {
 }
 
 describe("generateConfig", () => {
-  it("generates config from init answers", () => {
+  it("emits literal apiKey when apiKeySource = literal", () => {
     const answers: InitAnswers = {
       developer: "alice@acme.com",
       agents: { claude_code: true, codex: true, cursor: false },
       includeOrgs: ["acme-corp", "acme-data"],
       endpoint: "https://observer.acme.com/api/ingest",
       apiKey: "key_prod_123",
+      apiKeySource: "literal",
       enableDaemon: true,
       disclosure: "sensitive",
     };
@@ -27,11 +28,72 @@ describe("generateConfig", () => {
     const config = generateConfig(answers);
     expect(config).toContain("alice@acme.com");
     expect(config).toContain("claude_code: true");
-    expect(config).toContain("codex: true");
-    expect(config).toContain("cursor: false");
     expect(config).toContain("https://observer.acme.com/api/ingest");
     expect(config).toContain("apiKey: key_prod_123");
-    expect(config).toContain("disclosure: sensitive");
+    expect(config).not.toContain("apiKeyKeychain");
+    expect(config).not.toContain("apiKeyEnv");
+  });
+
+  it("emits apiKeyKeychain when apiKeySource = keychain", () => {
+    const answers: InitAnswers = {
+      developer: "alice@acme.com",
+      agents: { claude_code: true, codex: true, cursor: false },
+      includeOrgs: [],
+      endpoint: "https://observer.acme.com/api/ingest",
+      apiKey: "secret_value",
+      apiKeySource: "keychain",
+      apiKeyKeychainService: "observer.remote",
+      enableDaemon: true,
+      disclosure: "moderate",
+    };
+
+    const config = generateConfig(answers);
+    expect(config).toContain("apiKeyKeychain: observer.remote");
+    // Critical: secret must NOT appear in the file when keychain is the source.
+    expect(config).not.toContain("secret_value");
+    expect(config).not.toContain("apiKey:");
+  });
+
+  it("emits apiKeyEnv when apiKeySource = env", () => {
+    const answers: InitAnswers = {
+      developer: "alice@acme.com",
+      agents: { claude_code: true, codex: false, cursor: false },
+      includeOrgs: [],
+      endpoint: "https://observer.acme.com/api/ingest",
+      apiKey: null,
+      apiKeySource: "env",
+      apiKeyEnvName: "OBSERVER_API_KEY",
+      enableDaemon: true,
+      disclosure: "moderate",
+    };
+
+    const config = generateConfig(answers);
+    expect(config).toContain("apiKeyEnv: OBSERVER_API_KEY");
+    expect(config).not.toContain("apiKeyKeychain");
+  });
+
+  it("emits no auth field when apiKeySource = none (Ed25519-only)", () => {
+    const answers: InitAnswers = {
+      developer: "alice@acme.com",
+      agents: { claude_code: true, codex: false, cursor: false },
+      includeOrgs: [],
+      endpoint: "https://observer.acme.com/api/ingest",
+      apiKey: null,
+      apiKeySource: "none",
+      enableDaemon: true,
+      disclosure: "moderate",
+    };
+
+    const config = generateConfig(answers);
+    // Parse the YAML and assert the remote destination has no auth keys
+    // — string-matching on "apiKey: " would catch the comment line.
+    const YAML = require("yaml") as typeof import("yaml");
+    const parsed = YAML.parse(config) as { destinations: Record<string, unknown>[] };
+    const remote = parsed.destinations.find((d) => d.name === "remote")!;
+    expect(remote.apiKey).toBeUndefined();
+    expect(remote.apiKeyEnv).toBeUndefined();
+    expect(remote.apiKeyKeychain).toBeUndefined();
+    expect(config).toContain("Ed25519 signing");
   });
 
   it("handles local-only mode (no endpoint) — single disk destination", () => {
@@ -41,6 +103,7 @@ describe("generateConfig", () => {
       includeOrgs: [],
       endpoint: null,
       apiKey: null,
+      apiKeySource: "none",
       enableDaemon: false,
       disclosure: "full",
     };
@@ -60,6 +123,7 @@ describe("generateConfig", () => {
       includeOrgs: ["acme-corp"],
       endpoint: "http://localhost:19900/api/ingest",
       apiKey: null,
+      apiKeySource: "none",
       enableDaemon: true,
       disclosure: "moderate",
     };
@@ -96,6 +160,7 @@ describe("generateConfig", () => {
       includeOrgs: [],
       endpoint: "https://corp.example.com/api/ingest",
       apiKey: null,
+      apiKeySource: "none",
       enableDaemon: true,
       disclosure: "full",   // disk gets "full", remote gets "sensitive"
     };

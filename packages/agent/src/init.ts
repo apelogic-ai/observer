@@ -18,6 +18,8 @@ import { join } from "node:path";
 
 export type DisclosureChoice = "basic" | "moderate" | "sensitive" | "full";
 
+export type ApiKeySource = "keychain" | "env" | "literal" | "none";
+
 export interface InitAnswers {
   developer: string;
   agents: {
@@ -28,6 +30,16 @@ export interface InitAnswers {
   includeOrgs: string[];
   endpoint: string | null;
   apiKey: string | null;
+  /** How the API key is referenced in config.yaml. The actual key value
+   *  (when not "literal") is delivered out-of-band — keychain entries
+   *  are populated by the wizard at write time, env vars set by the
+   *  user. "none" emits no auth field at all (Ed25519-only mode). */
+  apiKeySource: ApiKeySource;
+  /** Service name to use when apiKeySource = "keychain". Defaults to
+   *  "observer.<destname>" but the wizard exposes it for clarity. */
+  apiKeyKeychainService?: string;
+  /** Env var name for apiKeySource = "env". Defaults to OBSERVER_API_KEY. */
+  apiKeyEnvName?: string;
   enableDaemon: boolean;
   disclosure: DisclosureChoice;
   /** Where the disk-shipper writes normalized JSONL. Defaults to
@@ -62,10 +74,32 @@ export function generateConfig(answers: InitAnswers): string {
   // Disclosure follows the wizard's choice. Disk-only data can stay
   // "full" without leaking; HTTP egress should generally be at most
   // "sensitive" (no HIGH_RISK fields).
+  let authLine = "    # auth not configured — set apiKey, apiKeyEnv, or apiKeyKeychain";
+  switch (answers.apiKeySource) {
+    case "keychain": {
+      const svc = answers.apiKeyKeychainService ?? "observer.remote";
+      authLine = `    apiKeyKeychain: ${svc}`;
+      break;
+    }
+    case "env": {
+      const name = answers.apiKeyEnvName ?? "OBSERVER_API_KEY";
+      authLine = `    apiKeyEnv: ${name}`;
+      break;
+    }
+    case "literal":
+      authLine = answers.apiKey
+        ? `    apiKey: ${answers.apiKey}`
+        : "    # apiKey: null (using Ed25519 signing)";
+      break;
+    case "none":
+      authLine = "    # apiKey: null (using Ed25519 signing)";
+      break;
+  }
+
   const remoteBlock = answers.endpoint
     ? `  - name: remote
     endpoint: ${answers.endpoint}
-${answers.apiKey ? `    apiKey: ${answers.apiKey}` : "    # apiKey: null (using Ed25519 signing)"}
+${authLine}
     disclosure: ${answers.disclosure === "full" ? "sensitive" : answers.disclosure}
     schedule: hourly
     useLocalTime: false

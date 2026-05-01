@@ -50,6 +50,26 @@ function ttyAsk(prompt: string): string {
 }
 
 /**
+ * Read a secret from /dev/tty with input hidden (like `sudo` or `ssh`).
+ * Uses bash `read -s` which disables terminal echo for the duration of
+ * the read; restores it on exit so a Ctrl-C doesn't leave the user's
+ * terminal in no-echo mode. Prints a newline after the input since the
+ * user's Enter doesn't echo either.
+ */
+function ttyAskSecret(prompt: string): string {
+  process.stdout.write(prompt);
+  const proc = Bun.spawnSync(
+    ["bash", "-c", "IFS= read -rs REPLY </dev/tty || true; printf %s \"$REPLY\""],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  process.stdout.write("\n");
+  if (proc.exitCode !== 0) {
+    throw new Error("could not read from /dev/tty (no controlling terminal?)");
+  }
+  return new TextDecoder().decode(proc.stdout);
+}
+
+/**
  * Resolve the path to the observer binary.
  * When compiled: process.execPath is the binary itself.
  * When dev (bun src/cli.ts): fall back to ~/.local/bin/observer.
@@ -309,6 +329,7 @@ function statusAction(opts: StatusOpts): void {
 
 async function initAction(): Promise<void> {
   const ask = (q: string): Promise<string> => Promise.resolve(ttyAsk(q));
+  const askSecret = (q: string): Promise<string> => Promise.resolve(ttyAskSecret(q));
   const cleanupTty = (): void => { /* no readline state to clean up */ };
 
   console.log("Observer — AI agent trace collection\n");
@@ -354,9 +375,53 @@ async function initAction(): Promise<void> {
   const endpoint = endpointInput.trim() || null;
 
   let apiKey: string | null = null;
+  let apiKeySource: import("./init").ApiKeySource = "none";
+  let apiKeyKeychainService: string | undefined;
+  let apiKeyEnvName: string | undefined;
+
   if (endpoint) {
-    const keyInput = await ask("API key (or Enter for Ed25519 signing): ");
-    apiKey = keyInput.trim() || null;
+    // Detect keychain availability first so we don't offer it as an
+    // option on platforms where it'd just throw on save.
+    const { detectSecureStore } = await import("./secure-store");
+    const store = detectSecureStore();
+    const keychainOption = store ? "1" : null;
+
+    console.log(`
+How do you want to store the API key for ${endpoint}?
+${keychainOption ? `  1) Keychain (recommended) — ${store!.name}` : `  1) Keychain (not available on ${process.platform})`}
+  2) Environment variable — set OBSERVER_API_KEY in your shell or launchd
+  3) Literal in config.yaml — fastest, but plaintext on disk
+  4) Skip — use Ed25519 signing only (ingestor must trust your public key)
+`);
+    const choice = (await ask(`Choice [1-4] [${keychainOption ?? "3"}]: `)).trim() || (keychainOption ?? "3");
+
+    if (choice === "1" && store) {
+      const value = await askSecret("Paste API key (input hidden): ");
+      if (value) {
+        apiKeyKeychainService = "observer.remote";
+        await store.put(apiKeyKeychainService, developer || "default", value);
+        apiKeySource = "keychain";
+        apiKey = value;   // for any in-process use; not written to config
+        console.log(`  ✓ Stored in ${store.name} as ${apiKeyKeychainService} (account=${developer || "default"})`);
+      } else {
+        console.log("  No value provided — skipping auth");
+      }
+    } else if (choice === "2") {
+      apiKeyEnvName = "OBSERVER_API_KEY";
+      apiKeySource = "env";
+      console.log(`  Set the env var before starting the daemon:`);
+      console.log(`    launchctl setenv ${apiKeyEnvName} <your-key>     # macOS, persists until reboot`);
+      console.log(`    export ${apiKeyEnvName}=<your-key>               # for foreground use`);
+    } else if (choice === "3") {
+      const value = await askSecret("Paste API key (input hidden): ");
+      apiKey = value || null;
+      apiKeySource = apiKey ? "literal" : "none";
+      if (apiKey) {
+        console.log(`  ! Warning: stored in plaintext in ~/.observer/config.yaml`);
+      }
+    } else {
+      apiKeySource = "none";
+    }
   }
 
   // Disclosure — what to keep in captured traces.
@@ -401,6 +466,9 @@ Data capture level — how much detail to keep in each trace entry:
     includeOrgs,
     endpoint,
     apiKey,
+    apiKeySource,
+    apiKeyKeychainService,
+    apiKeyEnvName,
     enableDaemon,
     disclosure,
   };
