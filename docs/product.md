@@ -1,7 +1,7 @@
 # Observer: Product Description
 
-**Version:** 0.1.13 (next: 0.1.14, unreleased)
-**Date:** 2026-04-29
+**Version:** 0.1.15 (next: 0.1.16, unreleased — adds OS keychain backend for secrets, init wizard prompts for storage choice)
+**Date:** 2026-05-01
 
 ---
 
@@ -105,54 +105,38 @@ works. If a parser encounters unknown entry types, they are skipped
 
 ## 4. Architecture
 
-```
-Developer Machine                                   Centralized Infrastructure
-─────────────────                                   ─────────────────────────────
+**Rendered diagrams** (drag into Google Docs):
+[SVG](img/architecture.svg) · [PNG](img/architecture.png).
 
-Agent trace dirs                                    API server (ingestor)
-  ~/.claude/projects/                                 stateless HTTP, S3-backed
-  ~/.codex/sessions/                                    │
-  ~/.cursor/  (SQLite)                                  │  authenticate
-        │                                               │  deduplicate
-        ▼                                               │  store
-  ┌─────────────────────┐                               ▼
-  │  observer daemon    │                        ┌──────────────────┐
-  │                     │   HTTP POST            │  Lakehouse (S3)  │
-  │  discover           │ ──────────────────►    │                  │
-  │  parse              │   + Auth header        │  Raw zone        │
-  │  classify fields    │   + Ed25519 sig        │  (JSONL, Hive)   │
-  │  scan secrets       │                        │                  │
-  │  enforce disclosure │   ───── OR ─────►      │  Normalized zone │
-  │  ship (idempotent)  │                        │  (Parquet)       │
-  └──────────┬──────────┘   local-only path      └────────┬─────────┘
-             │              (full disclosure)             │
-             ▼                                            │
-  ~/.observer/traces/normalized/  ◄──── reads ────┐       ▼
-  (Hive-partitioned JSONL)                        │   Downstream
-             │                                    │   pipelines
-             ▼                                    │
-  ┌─────────────────────┐                         │
-  │  observer dashboard │                         │
-  │  (embedded in       │                         │
-  │   binary as static  │                         │
-  │   Next.js export)   │                         │
-  │                     │                         │
-  │  in-memory SQLite   │                         │
-  │  + Bun HTTP server  │                         │
-  │                     │                         │
-  │  Pages:             │                         │
-  │  - Overview         │                         │
-  │  - Stumbles         │                         │
-  │  - Dark spend       │                         │
-  │  - Zero code        │                         │
-  │  - Session drill-in │                         │
-  └─────────────────────┘                         │
-                                                  │
-                                  ┌───────────────┼───────────────┐
-                                  ▼               ▼               ▼
-                            Knowledge       Analytics       Security
-                            extractor       (Grafana)       scanner
-                            (dreamer)
+The Mermaid source below renders natively on GitHub. To regenerate
+the SVG/PNG after edits: `bunx -p @mermaid-js/mermaid-cli mmdc -i
+docs/img/architecture.mmd -o docs/img/architecture.svg`.
+
+```mermaid
+flowchart LR
+    classDef local   fill:#E8F4FD,stroke:#3498DB,color:#000
+    classDef central fill:#FDF2E8,stroke:#E67E22,color:#000
+    classDef store   fill:#FEF9E7,stroke:#F39C12,color:#000
+
+    subgraph DEV["Developer machine"]
+        TRACES["Agent trace dirs<br/>~/.claude/projects/<br/>~/.codex/sessions/<br/>~/.cursor/ (SQLite)"]:::local
+        DAEMON["observer daemon<br/>discover · parse<br/>classify fields<br/>scan secrets<br/>enforce disclosure<br/>ship (idempotent)"]:::local
+        LOCAL["~/.observer/traces/normalized/<br/>Hive-partitioned JSONL<br/>(full disclosure, local-only)"]:::store
+        DASH["observer dashboard<br/>embedded static export + Bun server<br/>in-memory SQLite<br/><br/>Overview · Stumbles<br/>Dark spend · Zero code<br/>Session drill-in"]:::local
+    end
+
+    subgraph CORP["Centralized infrastructure"]
+        API["API server (ingestor)<br/>stateless HTTP<br/>auth · dedupe · store"]:::central
+        S3[("Lakehouse (S3)<br/>versioned, AES256<br/>raw + normalized zones")]:::store
+        DOWN["Downstream pipelines<br/>knowledge mining (dreamer)<br/>analytics (Grafana)<br/>security scanning"]:::central
+    end
+
+    TRACES --> DAEMON
+    DAEMON -- "local disk shipper<br/>(full disclosure)" --> LOCAL
+    LOCAL --> DASH
+    DAEMON -- "HTTP POST<br/>Bearer key OR Ed25519 sig<br/>(filtered disclosure)" --> API
+    API --> S3
+    S3 --> DOWN
 ```
 
 ### Two data flows
@@ -199,7 +183,7 @@ binary that also embeds the dashboard's static export.
 
 | Module | File | Purpose |
 |--------|------|---------|
-| **CLI** | `src/cli.ts` | Commands: `init`, `scan`, `status`, `daemon`, `start`, `stop`, `dashboard`, `logs`, `cursor-usage`, `update`, `uninstall`. See Appendix A. |
+| **CLI** | `src/cli.ts` | Commands: `init`, `scan`, `status`, `daemon`, `start`, `stop`, `dashboard`, `logs`, `cursor-usage`, `keychain`, `update`, `uninstall`. See Appendix A. |
 | **Daemon** | `src/daemon.ts` | Continuous poll loop: discover → parse → scan → ship. Configurable interval (default 5 min). |
 | **Discovery** | `src/discover.ts` | Scans standard agent directories. Returns trace file paths grouped by agent. |
 | **Parsers** | `src/parsers/claude.ts` | Claude Code JSONL → `TraceEntry[]`. Handles message, tool_use, tool_result, thinking. |
@@ -207,14 +191,15 @@ binary that also embeds the dashboard's static export.
 | | `src/parsers/cursor.ts` | Cursor SQLite `.vscdb` → `TraceEntry[]`. Reads `cursorDiskKV` table. |
 | **Type system** | `src/types.ts` | `TraceEntry` schema with per-field sensitivity. Per-vendor raw entry types. |
 | **Secret scanner** | `src/security/scanner.ts` | 11 regex patterns (AWS, DB URLs, GitHub tokens, JWTs, OpenAI keys, etc.). Three-layer filtering: regex + entry-type + project exclusions. |
-| **Shipper (HTTP)** | `src/http-shipper.ts` | POSTs batches to ingestor. Cursor-based, idempotent. |
-| **Shipper (disk)** | `src/disk-shipper.ts` | Writes to `~/.observer/traces/normalized/` for the local dashboard. Uses `full` disclosure (no stripping; local-only). |
+| **Shipper (HTTP)** | `src/http-shipper.ts` | POSTs batches to ingestor. Cursor-based, idempotent. Surfaces 4xx/5xx via stderr — no silent failures. |
+| **Shipper (disk)** | `src/disk-shipper.ts` | Writes to a local destination's `endpoint` (typically `~/.observer/traces/normalized/`) for the local dashboard. |
 | **Git scanner** | `src/git/scanner.ts` | Walks configured project repos, emits `git_event` rows for commits. Links commits back to sessions by timestamp + author + Co-Authored-By trailer. |
-| **Identity** | `src/identity.ts` | Ed25519 keypair generation, signing, verification, fingerprinting. Keys at `~/.observer/observer.key`. |
+| **Identity** | `src/identity.ts` | Ed25519 keypair generation, signing, verification, fingerprinting. `loadKeypairWithKeychain` reads from the OS keychain when configured (§ 5.9), else from `~/.observer/observer.key`. |
 | **Repo resolver** | `src/repo-resolver.ts` | Maps trace file paths to git repos. Extracts org/repo from remote for scope filtering. |
-| **Config** | `src/config.ts` | YAML config loader (`~/.observer/config.yaml`). Merges defaults with user overrides. |
-| **Init wizard** | `src/init.ts` | Interactive setup: detect agents, configure identity, set org scope, generate keypair, install service. |
-| **Service** | `src/service.ts` | Platform-native service management: launchd (macOS), systemd (Linux). |
+| **Config** | `src/config.ts` | YAML config loader. New `destinations[]` shape (§ 5.8) with auto-migration of legacy `ship:` blocks at parse time. |
+| **Secure store** | `src/secure-store.ts` | OS-keychain abstraction for API keys + Ed25519 private key. macOS Keychain, Linux libsecret, NoOp fallback elsewhere. |
+| **Init wizard** | `src/init.ts` | Interactive setup: detect agents, configure scope, generate keypair, ask where to store the API key (keychain / env / literal / Ed25519-only), install service. |
+| **Service** | `src/service.ts` | Platform-native service management: launchd (macOS), systemd (Linux). Argv-form invocations (no shell interpolation). |
 
 **Test suite:** ~80 tests across parsers, shipper idempotency, security
 scanner, config, identity, repo resolver, discovery, CLI, daemon, git
@@ -370,6 +355,146 @@ across days don't appear as multi-day.
 These detectors are intentionally cheap and shallow. Their value is as
 the work queue for an LLM-based "dreamer" pass that turns surfaced
 patterns into skill drafts or `AGENTS.md` rules.
+
+### 5.8 Configuration shape
+
+The agent config is a list of independent **destinations**. Each owns
+its own disclosure, schedule, redact, anonymize, and scope.
+
+```yaml
+developer: jane@acme.com
+sources:
+  claude_code: true
+  codex: true
+  cursor: false
+
+destinations:
+  - name: local-dashboard
+    endpoint: ~/.observer/traces/normalized   # path → disk shipper
+    disclosure: full
+    schedule: realtime
+    useLocalTime: true
+    redactSecrets: true
+    anonymize: false
+
+  - name: corp-ingestor
+    endpoint: https://api.observer.acme.com/api/ingest   # https → http shipper
+    apiKeyKeychain: observer.corp                        # see § 5.9
+    disclosure: moderate
+    schedule: hourly
+    useLocalTime: false
+    redactSecrets: true
+    anonymize: true
+    orgs:
+      include: [acme-corp]
+    projects:
+      exclude: [/Users/me/personal]
+
+git:
+  enabled: true
+  onlySelf: true
+  repos: {}
+
+privacy:
+  excludeProjects: []     # global hard floor — never reaches any destination
+
+pollIntervalMs: 300000    # daemon poll cadence (each destination's schedule
+                          # decides whether THIS tick flushes)
+```
+
+**Endpoint kind is inferred** from the value: `http://` / `https://` →
+HTTP shipper; anything else (absolute path, `~/...`, `./...`,
+`file://...`) → disk shipper. Discriminated union at the type level so
+HTTP-only fields like `apiKeyKeychain` can't be set on disk
+destinations.
+
+**Auto-migration of legacy `ship:` blocks** happens at parse time, in
+memory only — the file on disk is never rewritten. A pre-existing
+`ship: { endpoint, localOutputDir, disclosure, ... }` translates to one
+or two destinations carrying the legacy shared values. Setting BOTH
+`ship:` and `destinations:` is an authoring error and fails at load.
+
+**Per-destination scope filters** apply on top of the global
+`privacy.excludeProjects` floor. A path listed in `privacy` cannot be
+re-included by a destination's `projects.include`.
+
+### 5.9 Secret storage
+
+API keys and the Ed25519 private key live in OS-native keychains by
+default; file/env paths remain available as fallbacks.
+
+**Backends** (auto-detected at daemon start):
+
+| OS | Backend | Mechanism |
+|----|---------|-----------|
+| macOS | macOS Keychain (`/usr/bin/security`) | login keychain; on Apple Silicon the keychain master key is Secure-Enclave-protected |
+| Linux | libsecret (`secret-tool`) | gnome-keyring / kwallet bridge; falls back to file/env if libsecret-tools isn't installed |
+| Other | NoOp | `get` returns null (callers fall through to env/literal); `put` throws so misconfiguration is loud |
+
+Secrets travel over stdin (never argv) so they don't appear in `ps` or
+shell history. The `observer keychain set/get/delete` subcommand is
+the supported way to populate entries.
+
+**API-key resolution per HTTP destination** (first match wins):
+
+```
+apiKeyKeychain → apiKeyEnv (process.env lookup) → apiKey (literal in config)
+```
+
+**Ed25519 private key resolution**:
+
+```
+keypairKeychain (top-level) → ~/.observer/observer.key (file)
+```
+
+The public key always comes from `~/.observer/observer.pub` — it isn't
+secret, and the file form keeps fingerprint display + ingestor
+registration trivial.
+
+**The init wizard** asks where to store the key on first run. Choices:
+keychain (default when available), environment variable, literal,
+Ed25519-only. Picking `keychain` populates the entry and writes only
+the service name to `config.yaml` — the secret value never touches the
+file.
+
+**Hardware-bound keys (Phase 3, design only)**: Apple's Secure Enclave
+supports P-256 ECDSA but not Ed25519. A future native helper using
+`Security.framework` with `kSecAttrTokenIDSecureEnclave` would generate
+a P-256 key inside the Enclave (non-exportable; signing happens via
+SecKey API). Out of scope for this version — current keychain-stored
+Ed25519 is encrypted at rest, which is meaningfully better than the
+file form for solo-dev threat models.
+
+### 5.10 Enterprise / MDM (Phase 2, design only)
+
+Two-layer config for org-managed deployments:
+
+| Layer | Path (macOS / Linux) | Owner | Writeable by user? |
+|-------|----------------------|-------|--------------------|
+| Managed | `/Library/Application Support/Observer/config.yaml` / `/etc/observer/config.yaml` | IT (root, 0644) | No |
+| User | `~/.observer/config.yaml` | Developer | Yes (only on whitelisted fields) |
+
+A managed config declares which fields the user can override:
+
+```yaml
+managed:
+  policy: deny-by-default        # or allow-by-default
+  userOverridable:
+    - sources.*
+    - pollIntervalMs
+    - dashboard.port
+    - destinations.local-dashboard.endpoint
+```
+
+Anything else (corp endpoint, API key, disclosure, redact,
+`orgs.include`) is fixed by IT. `observer config show --provenance`
+annotates each line with where it came from. The `.pkg` installer
+drops the managed config + sets perms; a `.mobileconfig` profile
+delivers the secrets via system keychain. Reuses the same
+`SecureStore` interface as Phase 1 — only the keychain *scope* changes
+(system vs user).
+
+Not yet implemented; documented as the enterprise target.
 
 ---
 
@@ -816,10 +941,10 @@ local disk shipper writing into `~/.observer/traces/normalized/`.
 
 **Currently implemented:**
 
-| Method | What it proves | Header |
-|--------|---------------|--------|
-| API key | Caller possesses a shared secret | `Authorization: Bearer key_xyz` |
-| Ed25519 signature | This specific machine signed this exact payload | `X-Observer-Signature` + `X-Observer-Key-Fingerprint` |
+| Method | What it proves | Header / source |
+|--------|----------------|-----------------|
+| API key | Caller possesses a shared secret | `Authorization: Bearer key_xyz`. Resolved per destination via keychain → env → literal (§ 5.9). |
+| Ed25519 signature | This specific machine signed this exact payload | `X-Observer-Signature` + `X-Observer-Key-Fingerprint`. Private key from keychain when configured (`keypairKeychain`), else `~/.observer/observer.key`. |
 
 **Target (enterprise, planned):**
 
@@ -896,6 +1021,9 @@ observer dashboard start       Install dashboard as a background service
 observer dashboard stop        Stop and uninstall the dashboard service
 observer logs                  Tail recent daemon logs
 observer cursor-usage          Fetch real Cursor token usage from Cursor's API
+observer keychain set <svc>    Store a secret in the OS keychain (reads stdin; refuses TTY input)
+observer keychain get <svc>    Print a stored secret to stdout
+observer keychain delete <svc> Remove a stored secret
 observer update                Download and install the latest version
 observer uninstall             Stop services, remove ~/.observer/, delete the binary
 ```

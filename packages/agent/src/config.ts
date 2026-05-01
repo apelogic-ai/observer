@@ -42,10 +42,14 @@ export interface DiskDestination extends BaseDestination {
 
 export interface HttpDestination extends BaseDestination {
   kind: "http";
-  /** Literal API key (use `apiKeyEnv` to avoid baking secrets into config). */
+  /** Literal API key (use keychain or env to avoid baking secrets into config). */
   apiKey: string | null;
   /** Name of an env var holding the API key. */
   apiKeyEnv: string | null;
+  /** Keychain service name. When set, the agent reads the API key from
+   *  the OS-native keychain (macOS Keychain / libsecret on Linux),
+   *  account = config.developer. Wins over apiKeyEnv and apiKey. */
+  apiKeyKeychain: string | null;
 }
 
 /** Discriminated union over the kind tag — disk-only fields aren't visible
@@ -85,6 +89,10 @@ export interface ObserverConfig {
     fetchUsage: boolean;
   };
   dashboard: DashboardConfig;
+  /** Keychain service name for the Ed25519 private key. When set, the
+   *  agent reads the keypair from the OS keychain instead of
+   *  ~/.observer/observer.key. Account = `developer`. */
+  keypairKeychain: string | null;
   pollIntervalMs: number;
   developer: string | null;
   machine: string | null;
@@ -128,6 +136,7 @@ export const DEFAULT_CONFIG: ObserverConfig = {
       stderr: false,
     },
   },
+  keypairKeychain: null,
   pollIntervalMs: 300_000,
   developer: null,
   machine: null,
@@ -176,8 +185,9 @@ function parseDestination(raw: Record<string, unknown>, idx: number): Destinatio
   return {
     ...base,
     kind: "http",
-    apiKey:    typeof raw.apiKey    === "string" ? raw.apiKey    : null,
-    apiKeyEnv: typeof raw.apiKeyEnv === "string" ? raw.apiKeyEnv : null,
+    apiKey:         typeof raw.apiKey         === "string" ? raw.apiKey         : null,
+    apiKeyEnv:      typeof raw.apiKeyEnv      === "string" ? raw.apiKeyEnv      : null,
+    apiKeyKeychain: typeof raw.apiKeyKeychain === "string" ? raw.apiKeyKeychain : null,
   };
 }
 
@@ -222,8 +232,9 @@ function migrateLegacyShip(
       kind: "http",
       name: "remote",
       endpoint: rawShip.endpoint,
-      apiKey:    typeof rawShip.apiKey    === "string" ? rawShip.apiKey    : null,
-      apiKeyEnv: typeof rawShip.apiKeyEnv === "string" ? rawShip.apiKeyEnv : null,
+      apiKey:         typeof rawShip.apiKey    === "string" ? rawShip.apiKey    : null,
+      apiKeyEnv:      typeof rawShip.apiKeyEnv === "string" ? rawShip.apiKeyEnv : null,
+      apiKeyKeychain: null,   // legacy `ship:` shape never had a keychain field
       ...baseFields,
     });
   }
@@ -312,6 +323,7 @@ export function loadConfig(configPath: string): ObserverConfig {
           : DEFAULT_CONFIG.dashboard.log.stderr,
       },
     },
+    keypairKeychain: typeof raw.keypairKeychain === "string" ? raw.keypairKeychain : null,
     pollIntervalMs: typeof raw.pollIntervalMs === "number"
       ? raw.pollIntervalMs
       : DEFAULT_CONFIG.pollIntervalMs,
@@ -321,23 +333,38 @@ export function loadConfig(configPath: string): ObserverConfig {
 }
 
 /**
- * Resolve the API key for an HTTP destination from its config plus the
- * process environment. `apiKey` wins (literal value); `apiKeyEnv` falls
- * back to `process.env[<name>]`. Returns null if neither yields a value.
+ * Resolve the API key for an HTTP destination. Resolution order:
  *
- * Surfaced here as a pure function so the daemon-startup code can stay
- * trivial and the resolution can be unit-tested without spinning up the
- * shipper.
+ *   1. apiKeyKeychain  — read from OS keychain (account = developer)
+ *   2. apiKeyEnv       — process.env lookup
+ *   3. apiKey          — literal value (last resort, leaks into config file)
+ *
+ * Returns null if none yield a value.
+ *
+ * Async because keychain reads shell out to `security` / `secret-tool`.
+ * The daemon awaits this once at startup; per-batch code is unaffected.
  */
-export function resolveDestinationApiKey(
+export async function resolveDestinationApiKey(
   dest: HttpDestination,
-  env: Record<string, string | undefined> = process.env,
-): string | null {
-  if (dest.apiKey) return dest.apiKey;
+  options: {
+    env?: Record<string, string | undefined>;
+    /** SecureStore implementation. Pass null to skip keychain lookup. */
+    secureStore?: { get(service: string, account: string): Promise<string | null> } | null;
+    /** Keychain account name (typically the developer email). */
+    account?: string;
+  } = {},
+): Promise<string | null> {
+  const env = options.env ?? process.env;
+
+  if (dest.apiKeyKeychain && options.secureStore) {
+    const v = await options.secureStore.get(dest.apiKeyKeychain, options.account ?? "default");
+    if (v) return v;
+  }
   if (dest.apiKeyEnv) {
     const v = env[dest.apiKeyEnv];
     if (v) return v;
   }
+  if (dest.apiKey) return dest.apiKey;
   return null;
 }
 
