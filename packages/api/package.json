@@ -15,7 +15,9 @@
     "typecheck": "tsc --noEmit",
     "lint": "echo '(api: no dedicated lint config yet — typecheck is the gate)'"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1039.0"
+  },
   "devDependencies": {
     "@types/bun": "^1.3.11",
     "@types/node": "^22",

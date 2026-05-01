@@ -1,27 +1,26 @@
 /**
  * Store — persists received batches to the lakehouse.
  *
- * Hive-style partitioned layout:
- *   {dataDir}/raw/year=YYYY/month=MM/day=DD/agent=X/dev=HASH/{batchId}.jsonl
- *   {dataDir}/raw/year=YYYY/month=MM/day=DD/agent=X/dev=HASH/{batchId}.meta.json
+ * Hive-style partitioned key layout (same on local FS and S3):
+ *   raw/year=YYYY/month=MM/day=DD/agent=X/dev=HASH/{batchId}.jsonl
+ *   raw/year=YYYY/month=MM/day=DD/agent=X/dev=HASH/{batchId}.meta.json
+ *   dedup/{devHash}/{batchId}      # zero-byte marker; presence = "seen"
  *
- * Partitioned by: date (ship date), agent, developer (SHA-256 prefix for privacy).
+ * Partitioned by: ship date, agent, developer (SHA-256 prefix for privacy).
  *
- * All files are immutable (write-once, never updated).
- * Dedup state is append-only (one ID per line in dedup.log).
+ * Why per-batchId dedup markers instead of an appendable dedup.log:
+ * S3 has no append. A single canonical mechanism that works on both
+ * backends is one object per batchId — `head(dedup/{dev}/{batchId})`
+ * answers "duplicate?" in one round trip; `list(dedup/{dev}/)` enumerates
+ * everything seen for a developer. Local FS just creates a 0-byte file.
  *
- * Cross-boundary sessions: a session spanning midnight (or month boundary)
- * ships as one batch partitioned by shippedAt. The normalized Parquet zone
- * (built by a downstream batch job) uses per-entry timestamps for accurate
- * time-range queries.
- *
- * In production, maps to S3:
- *   s3://bucket/raw/year=2026/month=04/day=08/agent=claude_code/dev=a1b2c3d4/{batchId}.jsonl
+ * Cross-boundary sessions: a session spanning midnight ships as one batch
+ * partitioned by shippedAt. The downstream Parquet zone re-partitions by
+ * entry timestamp.
  */
 
-import { mkdirSync, writeFileSync, readdirSync, readFileSync, existsSync, appendFileSync } from "node:fs";
-import { join } from "node:path";
 import { createHash } from "node:crypto";
+import { LocalStorage, type Storage } from "./storage";
 
 export interface StoredBatch {
   batchId?: string;
@@ -54,104 +53,80 @@ export interface BatchMeta {
 }
 
 export class Store {
-  private dataDir: string;
-  /** Per-developer dedup caches, loaded lazily. */
+  private storage: Storage;
+  /** Per-developer dedup caches, loaded lazily on first access. */
   private dedupByDev: Map<string, Set<string>> = new Map();
 
-  constructor(dataDir: string) {
-    this.dataDir = dataDir;
+  /**
+   * Construct from either a Storage instance directly or a local
+   * filesystem path (which gets wrapped in LocalStorage). The path
+   * form preserves the original test ergonomics.
+   */
+  constructor(storageOrPath: Storage | string) {
+    this.storage = typeof storageOrPath === "string"
+      ? new LocalStorage(storageOrPath)
+      : storageOrPath;
   }
 
-  /**
-   * Hash developer identity for partition key.
-   */
   private devHash(developer: string): string {
     return createHash("sha256").update(developer).digest("hex").slice(0, 12);
   }
 
   /**
-   * Get (or lazily load) the dedup set for a developer.
-   * Each developer's dedup.log lives in their partition root.
+   * Load (or return cached) the set of batchIds previously seen for a
+   * developer. The first call lists `dedup/{devHash}/`; subsequent
+   * calls hit the cache.
    */
-  private getDedupSet(devKey: string): Set<string> {
-    if (this.dedupByDev.has(devKey)) {
-      return this.dedupByDev.get(devKey)!;
-    }
-
-    // Scan all date partitions for this developer's dedup logs
+  private async getDedupSet(devKey: string): Promise<Set<string>> {
+    if (this.dedupByDev.has(devKey)) return this.dedupByDev.get(devKey)!;
     const ids = new Set<string>();
-    const rawDir = join(this.dataDir, "raw");
-    if (existsSync(rawDir)) {
-      this.walkDedupLogs(rawDir, devKey, ids);
+    const prefix = `dedup/${devKey}/`;
+    for await (const key of this.storage.list(prefix)) {
+      // key is "dedup/{devKey}/{batchId}" — strip the prefix.
+      ids.add(key.slice(prefix.length));
     }
     this.dedupByDev.set(devKey, ids);
     return ids;
   }
 
-  private walkDedupLogs(dir: string, devKey: string, ids: Set<string>): void {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (entry.isDirectory()) {
-        this.walkDedupLogs(join(dir, entry.name), devKey, ids);
-      } else if (entry.name === "dedup.log" && dir.includes(`dev=${devKey}`)) {
-        try {
-          const content = readFileSync(join(dir, entry.name), "utf-8");
-          for (const line of content.split("\n")) {
-            if (line.trim()) ids.add(line.trim());
-          }
-        } catch { /* skip */ }
-      }
-    }
-  }
-
-  /**
-   * Record a batchId in the developer's partition dedup log.
-   */
-  private recordBatchId(batchId: string, partitionDir: string, devKey: string): void {
-    appendFileSync(join(partitionDir, "dedup.log"), batchId + "\n");
-    this.getDedupSet(devKey).add(batchId);
-  }
-
-  isDuplicate(batchId: string | undefined, developer?: string): boolean {
-    if (!batchId) return false;
-    if (!developer) return false;
+  async isDuplicate(batchId: string | undefined, developer?: string): Promise<boolean> {
+    if (!batchId || !developer) return false;
     const devKey = this.devHash(developer);
-    return this.getDedupSet(devKey).has(batchId);
+    const set = await this.getDedupSet(devKey);
+    return set.has(batchId);
   }
 
-  saveBatch(batch: StoredBatch): SaveResult {
+  async saveBatch(batch: StoredBatch): Promise<SaveResult> {
     const devKey = this.devHash(batch.developer);
 
-    // Generate batchId if not provided
     const batchId = batch.batchId ?? createHash("sha256")
       .update(`${batch.developer}:${batch.shippedAt}:${batch.entries.length}:${Date.now()}`)
       .digest("hex")
       .slice(0, 16);
 
-    // Per-developer dedup
-    if (this.getDedupSet(devKey).has(batchId)) {
+    const dedupSet = await this.getDedupSet(devKey);
+    if (dedupSet.has(batchId)) {
       return { entryCount: 0, filePath: "", duplicate: true };
     }
 
-    // Parse date for partitioning
     const date = new Date(batch.shippedAt || batch.receivedAt);
     const year = date.getUTCFullYear();
     const month = String(date.getUTCMonth() + 1).padStart(2, "0");
     const day = String(date.getUTCDate()).padStart(2, "0");
 
-    // Hive-style partitioned path: date + agent + developer
-    const partitionDir = join(
-      this.dataDir, "raw",
+    const partitionKey = [
+      "raw",
       `year=${year}`,
       `month=${month}`,
       `day=${day}`,
       `agent=${batch.agent}`,
       `dev=${devKey}`,
-    );
-    mkdirSync(partitionDir, { recursive: true });
+    ].join("/");
 
-    // Immutable files named by batchId (guaranteed unique)
-    const entriesPath = join(partitionDir, `${batchId}.jsonl`);
-    writeFileSync(entriesPath, batch.entries.join("\n") + "\n");
+    const entriesKey = `${partitionKey}/${batchId}.jsonl`;
+    const metaKey = `${partitionKey}/${batchId}.meta.json`;
+
+    await this.storage.put(entriesKey, batch.entries.join("\n") + "\n");
 
     const meta: BatchMeta = {
       batchId,
@@ -162,41 +137,26 @@ export class Store {
       shippedAt: batch.shippedAt,
       receivedAt: batch.receivedAt,
       entryCount: batch.entries.length,
-      filePath: entriesPath,
+      filePath: entriesKey,
     };
-    writeFileSync(
-      join(partitionDir, `${batchId}.meta.json`),
-      JSON.stringify(meta, null, 2),
-    );
+    await this.storage.put(metaKey, JSON.stringify(meta, null, 2));
 
-    // Per-developer append-only dedup record
-    this.recordBatchId(batchId, partitionDir, devKey);
+    // Marker for the dedup index — empty body, presence is the signal.
+    await this.storage.put(`dedup/${devKey}/${batchId}`, "");
+    dedupSet.add(batchId);
 
-    return {
-      entryCount: batch.entries.length,
-      filePath: entriesPath,
-    };
+    return { entryCount: batch.entries.length, filePath: entriesKey };
   }
 
-  listBatches(): BatchMeta[] {
-    const rawDir = join(this.dataDir, "raw");
-    if (!existsSync(rawDir)) return [];
-    return this.walkMeta(rawDir);
-  }
-
-  private walkMeta(dir: string): BatchMeta[] {
+  async listBatches(): Promise<BatchMeta[]> {
     const metas: BatchMeta[] = [];
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (entry.isDirectory()) {
-        metas.push(...this.walkMeta(join(dir, entry.name)));
-      } else if (entry.name.endsWith(".meta.json")) {
-        try {
-          const meta = JSON.parse(
-            readFileSync(join(dir, entry.name), "utf-8"),
-          ) as BatchMeta;
-          metas.push(meta);
-        } catch { /* skip */ }
-      }
+    for await (const key of this.storage.list("raw/")) {
+      if (!key.endsWith(".meta.json")) continue;
+      const body = await this.storage.get(key);
+      if (!body) continue;
+      try {
+        metas.push(JSON.parse(body) as BatchMeta);
+      } catch { /* skip malformed */ }
     }
     return metas;
   }

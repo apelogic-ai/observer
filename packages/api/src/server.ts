@@ -11,10 +11,17 @@
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
 import { createPublicKey, verify as cryptoVerify } from "node:crypto";
 import { Store } from "./store";
+import type { Storage } from "./storage";
 
 export interface IngestorConfig {
   port: number;
-  dataDir: string;
+  /** Filesystem data dir. Used to construct a default LocalStorage if no
+   *  `storage` is provided. Either `dataDir` or `storage` must be set. */
+  dataDir?: string;
+  /** Storage backend override. Pass an S3Storage to write to S3 instead of
+   *  the local filesystem; pass a custom backend for tests. Wins over
+   *  `dataDir` when both are supplied. */
+  storage?: Storage;
   trustedKeys?: Record<string, string>;   // fingerprint → PEM public key
   apiKeys?: string[];                      // valid API keys
   /** Max request body size in bytes. Defaults to 8 MiB. */
@@ -59,7 +66,10 @@ function verifyEd25519(payload: string, signature: string, publicKeyPem: string)
 }
 
 export function createIngestor(config: IngestorConfig): Promise<Server> {
-  const store = new Store(config.dataDir);
+  if (!config.storage && !config.dataDir) {
+    throw new Error("createIngestor requires either `storage` or `dataDir`");
+  }
+  const store = new Store(config.storage ?? config.dataDir!);
   const validApiKeys = new Set(config.apiKeys ?? []);
   const trustedKeys = config.trustedKeys ?? {};
   const maxBodyBytes = config.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
@@ -134,12 +144,12 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
       const developer = String(batch.developer ?? "unknown");
 
       // Dedup: if we've already received this batchId, return 200 (idempotent)
-      if (batchId && store.isDuplicate(batchId, developer)) {
+      if (batchId && (await store.isDuplicate(batchId, developer))) {
         json(res, 200, { status: "ok", duplicate: true, entryCount: 0 });
         return;
       }
 
-      const result = store.saveBatch({
+      const result = await store.saveBatch({
         batchId,
         developer,
         machine: String(batch.machine ?? "unknown"),

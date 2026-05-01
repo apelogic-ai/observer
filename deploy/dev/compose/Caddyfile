@@ -1,0 +1,23 @@
+# Caddy automatically provisions and renews a Let's Encrypt certificate
+# for {$DOMAIN} via the HTTP-01 challenge. Make sure the A record is
+# pointing at this host and port 80 is reachable from the internet.
+
+{$DOMAIN} {
+  encode zstd gzip
+
+  # Forward to the ingestor. Caddy adds X-Forwarded-* headers automatically.
+  reverse_proxy observer-api:19900
+
+  # Modest request body cap that's still well above the ingestor's
+  # 8 MiB body limit — Caddy 413 should not pre-empt the api's own.
+  request_body {
+    max_size 16MB
+  }
+
+  # Quiet down logs in dev — flip to DEBUG if something's off.
+  log {
+    output stdout
+    format console
+    level INFO
+  }
+}
