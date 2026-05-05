@@ -5,6 +5,7 @@ import type {
   Stats, ActivityRow, HeatmapRow, TokenRow, ToolRow, ProjectRow, ModelRow,
   SessionRow, SkillRow, ToolDetail, StumbleRow, DarkSpendRow,
   SecurityFindingRow, SecurityTimelineRow, SecuritySessionRow,
+  PermissionRow,
   GitStats, GitTimelineRow, GitCommitRow, GitSessionRow,
 } from "@/lib/queries";
 
@@ -289,6 +290,22 @@ export function useDarkSpend(filters: DashboardFilters, limit = 50) {
 
 export function useZeroCode(filters: DashboardFilters, limit = 50) {
   return useSessionRollupEndpoint("/api/zero-code", filters, limit);
+}
+
+export function usePermissions(filters: DashboardFilters) {
+  const [rows, setRows] = useState<PermissionRow[] | null>(null);
+  const { days, project, agent, granularity } = filters;
+
+  useEffect(() => {
+    let cancelled = false;
+    const params = buildParams({ days, project, agent, granularity });
+    fetchJson<PermissionRow[]>(`/api/permissions${params}`)
+      .then((d) => { if (!cancelled) setRows(d); })
+      .catch(() => { if (!cancelled) setRows([]); });
+    return () => { cancelled = true; };
+  }, [days, project, agent, granularity]);
+
+  return rows;
 }
 
 export function useSecurity(filters: DashboardFilters) {
