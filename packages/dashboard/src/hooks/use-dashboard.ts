@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from "react";
 import type {
   Stats, ActivityRow, HeatmapRow, TokenRow, ToolRow, ProjectRow, ModelRow,
   SessionRow, SkillRow, ToolDetail, StumbleRow, DarkSpendRow,
+  SecurityFindingRow, SecurityTimelineRow, SecuritySessionRow,
   GitStats, GitTimelineRow, GitCommitRow, GitSessionRow,
 } from "@/lib/queries";
 
@@ -288,6 +289,34 @@ export function useDarkSpend(filters: DashboardFilters, limit = 50) {
 
 export function useZeroCode(filters: DashboardFilters, limit = 50) {
   return useSessionRollupEndpoint("/api/zero-code", filters, limit);
+}
+
+export function useSecurity(filters: DashboardFilters) {
+  const [findings, setFindings] = useState<SecurityFindingRow[] | null>(null);
+  const [timeline, setTimeline] = useState<SecurityTimelineRow[] | null>(null);
+  const [sessions, setSessions] = useState<SecuritySessionRow[] | null>(null);
+  const { days, project, agent, granularity } = filters;
+
+  useEffect(() => {
+    let cancelled = false;
+    const params = buildParams({ days, project, agent, granularity });
+    Promise.all([
+      fetchJson<SecurityFindingRow[]>(`/api/security/findings${params}`),
+      fetchJson<SecurityTimelineRow[]>(`/api/security/timeline${params}`),
+      fetchJson<SecuritySessionRow[]>(`/api/security/sessions${params}`),
+    ])
+      .then(([f, t, s]) => {
+        if (cancelled) return;
+        setFindings(f); setTimeline(t); setSessions(s);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setFindings([]); setTimeline([]); setSessions([]);
+      });
+    return () => { cancelled = true; };
+  }, [days, project, agent, granularity]);
+
+  return { findings, timeline, sessions };
 }
 
 export function useToolDetail(tool: string | null, filters: DashboardFilters) {

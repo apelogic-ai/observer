@@ -107,6 +107,19 @@ async function seed() {
             sessionId: "claude-beta-1", project: "beta", entryType: "tool_call",
             toolName: "Bash", command: "grep -i quux test/",
             tokenUsage: { input: 100, output: 20, cacheRead: 0, cacheCreation: 0, reasoning: 0 } }),
+    // Redaction markers — feed the /security page. The agent's scanner
+    // emits these in place of real secrets; the dashboard counts them
+    // as findings.
+    entry({ id: "c3-leak1", timestamp: `${D2}T11:01:30Z`, agent: "claude_code",
+            sessionId: "claude-beta-1", project: "beta", entryType: "tool_call",
+            toolName: "Bash",
+            command: "AWS_ACCESS_KEY_ID=[REDACTED:aws_access_key] aws s3 ls",
+            tokenUsage: { input: 50, output: 10, cacheRead: 0, cacheCreation: 0, reasoning: 0 } }),
+    entry({ id: "c3-leak2", timestamp: `${D2}T11:01:45Z`, agent: "claude_code",
+            sessionId: "claude-beta-1", project: "beta", entryType: "tool_call",
+            toolName: "Bash",
+            command: "curl -H 'Authorization: Bearer [REDACTED:github_token]' https://api.github.com",
+            tokenUsage: { input: 50, output: 10, cacheRead: 0, cacheCreation: 0, reasoning: 0 } }),
     entry({ id: "c3b", timestamp: `${D2}T11:02:00Z`, agent: "claude_code",
             sessionId: "claude-beta-1", project: "beta", entryType: "tool_call",
             toolName: "Read", filePath: "/repo/lib/foo.ts",
