@@ -61,6 +61,31 @@ export interface StumbleRow {
   lastAt: string;
 }
 
+export interface SecurityFindingRow {
+  patternType: string;
+  count: number;
+  sessions: number;
+  projects: number;
+  agents: string[];
+  firstAt: string;
+  lastAt: string;
+}
+
+export interface SecurityTimelineRow {
+  date: string;
+  count: number;
+}
+
+export interface SecuritySessionRow {
+  sessionId: string;
+  agent: string;
+  project: string | null;
+  count: number;
+  patterns: string[];
+  firstAt: string;
+  lastAt: string;
+}
+
 export interface DarkSpendRow {
   sessionId: string;
   agent: string;

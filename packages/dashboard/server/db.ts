@@ -99,6 +99,24 @@ const SCHEMA_TRACES = `
   )
 `;
 
+// Marker emitted by the agent's secret scanner — `[REDACTED:<type>]`.
+// The dashboard derives security findings purely from these markers
+// (no separate data entity, no shipping changes). Counts and session
+// attribution come from the row the marker was found in.
+const SCHEMA_SECURITY_FINDINGS = `
+  CREATE TABLE security_findings (
+    timestamp    TEXT,
+    agent        TEXT,
+    sessionId    TEXT,
+    project      TEXT,
+    patternType  TEXT,
+    -- which trace row the marker came from (id from the source JSONL)
+    sourceId     TEXT,
+    -- which field on that row had the marker — useful for drill-down
+    field        TEXT
+  )
+`;
+
 const SCHEMA_GIT_EVENTS = `
   CREATE TABLE git_events (
     id              TEXT,
@@ -162,8 +180,10 @@ async function doBuild(reason: string): Promise<void> {
   // which awaits `_rebuilding`, no concurrent reads can hit the dropped table.
   _db.exec(`DROP TABLE IF EXISTS traces`);
   _db.exec(`DROP TABLE IF EXISTS git_events`);
+  _db.exec(`DROP TABLE IF EXISTS security_findings`);
   _db.exec(SCHEMA_TRACES);
   _db.exec(SCHEMA_GIT_EVENTS);
+  _db.exec(SCHEMA_SECURITY_FINDINGS);
 
   if (!existsSync(_dataDir)) {
     _traceRows = 0;
@@ -263,20 +283,24 @@ function discoverFiles(dir: string): {
 function ingestTraces(db: Database, files: string[]): number {
   if (files.length === 0) return 0;
 
-  const placeholders = TRACE_INSERT_COLS.map(() => "?").join(", ");
-  const stmt = db.prepare(
-    `INSERT INTO traces (${TRACE_INSERT_COLS.join(", ")}) VALUES (${placeholders})`,
+  const tracePlaceholders = TRACE_INSERT_COLS.map(() => "?").join(", ");
+  const traceStmt = db.prepare(
+    `INSERT INTO traces (${TRACE_INSERT_COLS.join(", ")}) VALUES (${tracePlaceholders})`,
   );
-  const insertMany = db.transaction((rows: SQLQueryBindings[][]) => {
-    for (const row of rows) stmt.run(...row);
+  const findingStmt = db.prepare(
+    `INSERT INTO security_findings (timestamp, agent, sessionId, project, patternType, sourceId, field) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const insertMany = db.transaction((trace: SQLQueryBindings[][], findings: SQLQueryBindings[][]) => {
+    for (const row of trace) traceStmt.run(...row);
+    for (const row of findings) findingStmt.run(...row);
   });
 
   let total = 0;
   for (const file of files) {
-    const rows = parseJsonlForTraces(file);
-    if (rows.length === 0) continue;
-    insertMany(rows);
-    total += rows.length;
+    const { traceRows, findingRows } = parseJsonlForTraces(file);
+    if (traceRows.length === 0 && findingRows.length === 0) continue;
+    insertMany(traceRows, findingRows);
+    total += traceRows.length;
   }
   return total;
 }
@@ -457,15 +481,43 @@ function ingestGitEvents(db: Database, files: string[]): number {
   return total;
 }
 
-function parseJsonlForTraces(file: string): SQLQueryBindings[][] {
+// Fields where the agent's secret-scanner can leave a `[REDACTED:...]`
+// marker. Limited to text fields the scanner actually walks. We attribute
+// each finding to its source field for drill-down later.
+const FINDING_FIELDS = ["command", "filePath", "taskSummary", "userPrompt", "assistantText"] as const;
+const REDACTED_MARKER_RE = /\[REDACTED:([a-z_]+)\]/g;
+
+function extractFindings(
+  obj: Record<string, unknown>,
+): Array<{ patternType: string; field: string }> {
+  const out: Array<{ patternType: string; field: string }> = [];
+  for (const f of FINDING_FIELDS) {
+    const v = obj[f];
+    if (typeof v !== "string" || v === "") continue;
+    let m: RegExpExecArray | null;
+    REDACTED_MARKER_RE.lastIndex = 0;
+    while ((m = REDACTED_MARKER_RE.exec(v)) !== null) {
+      out.push({ patternType: m[1]!, field: f });
+    }
+  }
+  return out;
+}
+
+interface ParsedJsonl {
+  traceRows: SQLQueryBindings[][];
+  findingRows: SQLQueryBindings[][];
+}
+
+function parseJsonlForTraces(file: string): ParsedJsonl {
   const content = readFileSync(file, "utf-8");
-  const out: SQLQueryBindings[][] = [];
+  const traceRows: SQLQueryBindings[][] = [];
+  const findingRows: SQLQueryBindings[][] = [];
   for (const line of content.split("\n")) {
     if (!line) continue;
     let obj: Record<string, unknown>;
     try { obj = JSON.parse(line) as Record<string, unknown>; }
     catch { continue; }
-    out.push([
+    traceRows.push([
       asText(obj.id),
       asText(obj.timestamp),
       asText(obj.agent),
@@ -488,8 +540,19 @@ function parseJsonlForTraces(file: string): SQLQueryBindings[][] {
       asText(obj.userPrompt),
       asText(obj.assistantText),
     ]);
+    for (const finding of extractFindings(obj)) {
+      findingRows.push([
+        asText(obj.timestamp),
+        asText(obj.agent),
+        asText(obj.sessionId),
+        asText(obj.project),
+        finding.patternType,
+        asText(obj.id),
+        finding.field,
+      ]);
+    }
   }
-  return out;
+  return { traceRows, findingRows };
 }
 
 function parseJsonlForGit(file: string): SQLQueryBindings[][] {

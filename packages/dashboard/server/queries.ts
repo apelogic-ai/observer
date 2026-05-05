@@ -172,6 +172,121 @@ export async function getTokens(f: Filters = {}): Promise<TokenRow[]> {
   `);
 }
 
+// ── Security findings ─────────────────────────────────────────
+//
+// The agent's secret scanner replaces matches with `[REDACTED:<type>]`
+// markers in trace text. The dashboard's ingest scans every text field
+// for these markers and writes one row per finding to
+// security_findings (timestamp, agent, sessionId, project, patternType,
+// sourceId, field). These queries aggregate over that table.
+//
+// We count markers, not raw secret matches — the agent already redacted
+// the secret value. The marker IS the incident record.
+
+export interface SecurityFindingRow {
+  patternType: string;
+  count: number;
+  sessions: number;
+  projects: number;
+  agents: string[];
+  firstAt: string;
+  lastAt: string;
+}
+
+interface SecurityFindingRawRow extends Omit<SecurityFindingRow, "agents"> { agents: string }
+
+/** Filter helper for security_findings — same shape as `where()` for traces,
+ *  but the table doesn't have toolName/model so those filters are ignored. */
+function securityWhere(f: Filters, extra?: string[]): string {
+  const conds: string[] = extra ? [...extra] : [];
+  conds.push(`timestamp IS NOT NULL`);
+  if (f.days)    conds.push(`timestamp >= date('now', '-${f.days} days')`);
+  if (f.project) conds.push(`project = '${esc(f.project)}'`);
+  if (f.agent)   conds.push(`agent = '${esc(f.agent)}'`);
+  return `WHERE ${conds.join(" AND ")}`;
+}
+
+export async function getSecurityFindings(
+  f: Filters = {},
+  limit = 25,
+): Promise<SecurityFindingRow[]> {
+  const rows = await query<SecurityFindingRawRow>(`
+    SELECT
+      patternType        AS patternType,
+      COUNT(*)           AS count,
+      COUNT(DISTINCT sessionId) AS sessions,
+      COUNT(DISTINCT project)   AS projects,
+      MIN(timestamp)     AS firstAt,
+      MAX(timestamp)     AS lastAt,
+      (SELECT json_group_array(a) FROM (
+         SELECT DISTINCT agent AS a
+         FROM security_findings sf2
+         WHERE sf2.patternType = sf.patternType
+       )) AS agents
+    FROM security_findings sf
+    ${securityWhere(f)}
+    GROUP BY patternType
+    ORDER BY count DESC
+    LIMIT ${limit}
+  `);
+  return rows.map((r) => ({ ...r, agents: parseJsonArray(r.agents) }));
+}
+
+export interface SecurityTimelineRow {
+  date: string;
+  count: number;
+}
+
+export async function getSecurityTimeline(f: Filters = {}): Promise<SecurityTimelineRow[]> {
+  return query<SecurityTimelineRow>(`
+    SELECT
+      ${dateTrunc(f)} AS date,
+      COUNT(*)        AS count
+    FROM security_findings
+    ${securityWhere(f)}
+    GROUP BY date
+    ORDER BY date
+  `);
+}
+
+export interface SecuritySessionRow {
+  sessionId: string;
+  agent: string;
+  project: string | null;
+  count: number;
+  patterns: string[];
+  firstAt: string;
+  lastAt: string;
+}
+
+interface SecuritySessionRawRow extends Omit<SecuritySessionRow, "patterns"> { patterns: string }
+
+export async function getSecuritySessions(
+  f: Filters = {},
+  limit = 50,
+): Promise<SecuritySessionRow[]> {
+  const rows = await query<SecuritySessionRawRow>(`
+    SELECT
+      sessionId,
+      MIN(agent)   AS agent,
+      MAX(project) AS project,
+      COUNT(*)     AS count,
+      MIN(timestamp) AS firstAt,
+      MAX(timestamp) AS lastAt,
+      (SELECT json_group_array(p) FROM (
+         SELECT DISTINCT patternType AS p
+         FROM security_findings sf2
+         WHERE sf2.sessionId = sf.sessionId
+       )) AS patterns
+    FROM security_findings sf
+    ${securityWhere(f, ["sessionId IS NOT NULL"])}
+    GROUP BY sessionId
+    ORDER BY count DESC
+    LIMIT ${limit}
+  `);
+  return rows.map((r) => ({ ...r, patterns: parseJsonArray(r.patterns) }));
+}
+
 // ── Tools ──────────────────────────────────────────────────────
 
 export interface ToolRow {

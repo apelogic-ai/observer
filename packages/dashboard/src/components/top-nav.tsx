@@ -8,6 +8,7 @@ const NAV_ITEMS: { label: string; href: string }[] = [
   { label: "Stumbles",   href: "/stumbles" },
   { label: "Dark spend", href: "/dark-spend" },
   { label: "Zero code",  href: "/zero-code" },
+  { label: "Leaks",      href: "/security" },
 ];
 
 /**
