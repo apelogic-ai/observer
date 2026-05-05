@@ -51,6 +51,28 @@ beforeAll(async () => {
       command: "ls -la" },
   ]);
 
+  // Project `wide`: leak markers planted in the wide text columns
+  // (stdout, fileContent, toolResultContent, queryData) that the
+  // dashboard drops before insert. Findings must still be extracted —
+  // these are exactly where leaks are most likely to land at
+  // disclosure: full.
+  writeJsonl(join(DATA_DIR, TODAY, "claude_code", "wide.jsonl"), [
+    { id: "w1", timestamp: T0, agent: "claude_code", sessionId: "s-wide",
+      project: "wide", entryType: "tool_call", toolName: "Bash",
+      command: "cat .env",
+      stdout: "OPENAI_API_KEY=[REDACTED:openai_key]\nDATABASE_URL=[REDACTED:database_url]" },
+    { id: "w2", timestamp: T0, agent: "claude_code", sessionId: "s-wide",
+      project: "wide", entryType: "tool_call", toolName: "Read",
+      filePath: "/repo/secrets.env",
+      fileContent: "stripe_key=[REDACTED:stripe_key]" },
+    { id: "w3", timestamp: T0, agent: "claude_code", sessionId: "s-wide",
+      project: "wide", entryType: "tool_call", toolName: "mcp:db:shell",
+      toolResultContent: "row 1: token=[REDACTED:github_token]" },
+    { id: "w4", timestamp: T0, agent: "claude_code", sessionId: "s-wide",
+      project: "wide", entryType: "tool_call", toolName: "mcp:db:shell",
+      queryData: "[{\"key\": \"[REDACTED:slack_token]\"}]" },
+  ]);
+
   await initDb(DATA_DIR);
 });
 
@@ -66,14 +88,16 @@ describe("getSecurityFindings", () => {
     expect(aws!.sessions).toBe(2);
     expect(aws!.projects).toBe(1);
 
-    // github_token, database_url, openai_key: 1 each
+    // github_token: 1 in narrow (f1.command) + 1 in wide (w3.toolResultContent) = 2
+    // database_url: 1 in narrow (f1.command) + 1 in wide (w1.stdout) = 2
+    // openai_key:   1 in narrow (f4.command) + 1 in wide (w1.stdout) = 2
     const gh = rows.find((r) => r.patternType === "github_token");
-    expect(gh!.count).toBe(1);
+    expect(gh!.count).toBe(2);
     const db = rows.find((r) => r.patternType === "database_url");
-    expect(db!.count).toBe(1);
+    expect(db!.count).toBe(2);
     const oai = rows.find((r) => r.patternType === "openai_key");
-    expect(oai!.count).toBe(1);
-    expect(oai!.sessions).toBe(1);
+    expect(oai!.count).toBe(2);
+    expect(oai!.sessions).toBe(2);
 
     // Sorted: highest count first.
     expect(rows[0]!.count).toBeGreaterThanOrEqual(rows[rows.length - 1]!.count);
@@ -96,10 +120,27 @@ describe("getSecurityTimeline", () => {
   it("buckets findings per date with per-pattern counts", async () => {
     const rows = await getSecurityTimeline({ days: 30 });
     expect(rows.length).toBeGreaterThan(0);
-    // Today's date should have entries
     const today = rows.find((r) => r.date === TODAY);
     expect(today).toBeDefined();
-    // 5 findings total: 2 in f1 + 1 in f2 + 1 in f3 + 1 in f4
-    expect(today!.count).toBe(5);
+    // 5 narrow-field findings (f1=2, f2=1, f3=1, f4=1) plus 5 wide-field
+    // findings (w1=2 in stdout, w2=1 in fileContent, w3=1 in
+    // toolResultContent, w4=1 in queryData) = 10 total.
+    expect(today!.count).toBe(10);
+  });
+});
+
+describe("findings extraction in wide text fields", () => {
+  it("scans stdout, fileContent, toolResultContent, and queryData before they're dropped", async () => {
+    // These columns get wiped from the SQLite traces table at insert
+    // time (they're huge and unindexed). Findings must be extracted
+    // BEFORE the drop, otherwise the security dashboard silently
+    // undercounts the most leak-prone surface.
+    const rows = await getSecurityFindings({ days: 30, project: "wide" }, 50);
+    const byPattern = Object.fromEntries(rows.map((r) => [r.patternType, r.count]));
+    expect(byPattern.openai_key).toBe(1);     // stdout
+    expect(byPattern.database_url).toBe(1);   // stdout
+    expect(byPattern.stripe_key).toBe(1);     // fileContent
+    expect(byPattern.github_token).toBe(1);   // toolResultContent
+    expect(byPattern.slack_token).toBe(1);    // queryData
   });
 });

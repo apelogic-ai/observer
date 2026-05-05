@@ -482,9 +482,16 @@ function ingestGitEvents(db: Database, files: string[]): number {
 }
 
 // Fields where the agent's secret-scanner can leave a `[REDACTED:...]`
-// marker. Limited to text fields the scanner actually walks. We attribute
-// each finding to its source field for drill-down later.
-const FINDING_FIELDS = ["command", "filePath", "taskSummary", "userPrompt", "assistantText"] as const;
+// marker. We attribute each finding to its source field for drill-down
+// later. Critically this list includes the wide text columns (stdout,
+// fileContent, toolResultContent, queryData) that the dashboard drops
+// before insert — those are exactly where leaks are most likely to
+// land at disclosure: full, and scanning has to happen here, before
+// the drop, or the security page silently undercounts.
+const FINDING_FIELDS = [
+  "command", "filePath", "taskSummary", "userPrompt", "assistantText",
+  "stdout", "fileContent", "toolResultContent", "queryData",
+] as const;
 const REDACTED_MARKER_RE = /\[REDACTED:([a-z_]+)\]/g;
 
 function extractFindings(

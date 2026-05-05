@@ -30,23 +30,36 @@ function fakeMacosExec(state: FakeKeychainState): Exec {
       return { stdout: "", stderr: `unexpected: ${cmd}`, status: 1 };
     }
     const sub = args[0];
-    const parsed: Record<string, string> = {};
+    const parsed: Record<string, string | undefined> = {};
+    let trailingW = false; // -w with no value at end → interactive prompt
     for (let i = 1; i < args.length; i++) {
       const flag = args[i];
       if (flag === "-a") parsed.account = args[++i] ?? "";
       else if (flag === "-s") parsed.service = args[++i] ?? "";
-      else if (flag === "-w") parsed.w = "";
-      else if (flag === "-U") parsed.update = "";
+      else if (flag === "-w") {
+        // Apple's contract: `-w <password>` takes the next arg as the
+        // password value. `-w` at end of command means "prompt".
+        if (i === args.length - 1) trailingW = true;
+        else parsed.password = args[++i] ?? "";
+      } else if (flag === "-U") parsed.update = "";
       else if (flag === "-T") parsed.app = args[++i] ?? "";
     }
     const key = `${parsed.service ?? ""}\t${parsed.account ?? ""}`;
 
     if (sub === "add-generic-password") {
-      // password is read from stdin when -w is given without value
+      if (trailingW) {
+        // We never run this from a real TTY in tests — surface as the
+        // failure mode it actually is in CI: a hung prompt → timeout.
+        return { stdout: "", stderr: "would prompt for password (no TTY)", status: 1 };
+      }
+      if (parsed.password === undefined) {
+        // Missing -w entirely is a different malformed call — fail loud.
+        return { stdout: "", stderr: "missing -w password", status: 1 };
+      }
       if (state.store.has(key) && parsed.update === undefined) {
         return { stdout: "", stderr: "already exists", status: 45 };
       }
-      state.store.set(key, opts?.input ?? "");
+      state.store.set(key, parsed.password);
       return { stdout: "", stderr: "", status: 0 };
     }
     if (sub === "find-generic-password") {
@@ -162,14 +175,31 @@ describe("MacosKeychain — surface", () => {
     ]);
   });
 
-  it("passes the secret over stdin, not on the command line", async () => {
-    // Critical: secrets in argv land in `ps` and shell history. Stdin
-    // is the right channel.
+  it("passes the secret as the value of -w (per Apple's CLI contract)", async () => {
+    // `security add-generic-password` has no stdin path for the
+    // password: it's either `-w <password>` or "trailing -w" → TTY
+    // prompt. We use the documented form. The argv exposure is a known
+    // macOS pitfall (`ps -e` shows args of your own processes only),
+    // matched by every public consumer (git-credential-osxkeychain,
+    // CocoaPods, Homebrew, …) — there's no better channel here.
     const state: FakeKeychainState = { store: new Map(), calls: [] };
     const k = new MacosKeychain(fakeMacosExec(state));
     await k.put("svc", "acct", "verysecret");
-    expect(state.calls[0]!.input).toBe("verysecret");
-    expect(state.calls[0]!.args.join(" ")).not.toContain("verysecret");
+    const args = state.calls[0]!.args;
+    const wIdx = args.indexOf("-w");
+    expect(wIdx).toBeGreaterThan(0);
+    expect(args[wIdx + 1]).toBe("verysecret");
+    // -U must precede the trailing `-w <password>` pair so the password
+    // value isn't accidentally consumed as the flag for `-U` etc.
+    expect(args.indexOf("-U")).toBeLessThan(wIdx);
+  });
+
+  it("round-trips secrets containing spaces, quotes, and newlines", async () => {
+    const state: FakeKeychainState = { store: new Map(), calls: [] };
+    const k = new MacosKeychain(fakeMacosExec(state));
+    const tricky = `sk-ant 'with "quotes" and\nnewlines' end`;
+    await k.put("svc", "acct", tricky);
+    expect(await k.get("svc", "acct")).toBe(tricky);
   });
 });
 

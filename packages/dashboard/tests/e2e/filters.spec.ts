@@ -23,7 +23,7 @@ test("date range buttons update URL and re-fetch", async ({ page }) => {
 
   await page.getByRole("button", { name: "30d" }).click();
   // 30d is the default — query param is dropped on selection.
-  await expect(page).toHaveURL(/^http:\/\/localhost:3457\/?(?:\?(?!days=).*)?$/);
+  await expect(page).toHaveURL(/^http:\/\/localhost:\d+\/?(?:\?(?!days=).*)?$/);
 });
 
 test("granularity buttons update URL", async ({ page }) => {

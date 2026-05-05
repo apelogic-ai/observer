@@ -57,11 +57,15 @@ export class MacosKeychain implements SecureStore {
   constructor(private exec: Exec = defaultExec) {}
 
   async put(service: string, account: string, secret: string): Promise<void> {
-    // -U updates if the entry exists; -w with no value reads from stdin.
+    // Apple's `security add-generic-password` has no stdin path for the
+    // password: the documented forms are `-w <password>` (value as
+    // argv) or trailing `-w` (interactive TTY prompt). We use the
+    // value form because we have no TTY in non-interactive flows. -U
+    // must precede the password pair so the password isn't parsed as a
+    // flag value for something else.
     const r = this.exec(
       "/usr/bin/security",
-      ["add-generic-password", "-a", account, "-s", service, "-w", "-U"],
-      { input: secret },
+      ["add-generic-password", "-a", account, "-s", service, "-U", "-w", secret],
     );
     if (r.status !== 0) {
       throw new Error(

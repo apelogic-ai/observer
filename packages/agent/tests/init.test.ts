@@ -153,6 +153,65 @@ describe("generateConfig", () => {
     expect(dashboard.port).toBe(3457);
   });
 
+  it("escapes user-supplied scalars so YAML metacharacters round-trip", () => {
+    // generateConfig pastes user values into a template literal. Without
+    // escaping, a developer name with `:`, an API key with `#`, an
+    // endpoint with `#fragment`, or a path with spaces silently truncate
+    // or change type at parse time. Round-trip every input through the
+    // YAML parser and assert exact equality.
+    const tricky = {
+      developer: "Tricky #1: O'Brien",
+      apiKey: 'sk-ant-api01-with#hash:colon "quotes" and spaces',
+      endpoint: "https://corp.example.com/api/ingest?x=1#frag",
+      apiKeyKeychainService: "observer.weird: name",
+      apiKeyEnvName: "OBSERVER_KEY_X",
+      localOutputDir: "/Users/jane doe/.observer/traces (mirror)",
+      includeOrgs: ["my-org", "weird: org#1", "@scope/with-bracket]"],
+    };
+    const answers: InitAnswers = {
+      developer: tricky.developer,
+      agents: { claude_code: true, codex: false, cursor: false },
+      includeOrgs: tricky.includeOrgs,
+      endpoint: tricky.endpoint,
+      apiKey: tricky.apiKey,
+      apiKeySource: "literal",
+      apiKeyKeychainService: tricky.apiKeyKeychainService,
+      apiKeyEnvName: tricky.apiKeyEnvName,
+      enableDaemon: true,
+      disclosure: "moderate",
+      localOutputDir: tricky.localOutputDir,
+    };
+    const config = generateConfig(answers);
+    const YAML = require("yaml") as typeof import("yaml");
+    const parsed = YAML.parse(config) as Record<string, unknown>;
+    expect(parsed.developer).toBe(tricky.developer);
+    const dests = parsed.destinations as Array<Record<string, unknown>>;
+    expect(dests[0]!.endpoint).toBe(tricky.localOutputDir);
+    expect(dests[1]!.endpoint).toBe(tricky.endpoint);
+    expect(dests[1]!.apiKey).toBe(tricky.apiKey);
+    const remoteOrgs = (dests[1]!.orgs as { include: string[] }).include;
+    expect(remoteOrgs).toEqual(tricky.includeOrgs);
+  });
+
+  it("escapes the keychain service name and env var name when used", () => {
+    const answers: InitAnswers = {
+      developer: "alice@test.com",
+      agents: { claude_code: true, codex: false, cursor: false },
+      includeOrgs: [],
+      endpoint: "https://example.com/api/ingest",
+      apiKey: null,
+      apiKeySource: "keychain",
+      apiKeyKeychainService: "observer.svc with: colon",
+      enableDaemon: true,
+      disclosure: "moderate",
+    };
+    const config = generateConfig(answers);
+    const YAML = require("yaml") as typeof import("yaml");
+    const parsed = YAML.parse(config) as Record<string, unknown>;
+    const dests = parsed.destinations as Array<Record<string, unknown>>;
+    expect(dests[1]!.apiKeyKeychain).toBe("observer.svc with: colon");
+  });
+
   it("downgrades remote disclosure from full to sensitive — full is local-only", () => {
     const answers: InitAnswers = {
       developer: "dan@test.com",
