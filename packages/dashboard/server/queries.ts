@@ -287,6 +287,201 @@ export async function getSecuritySessions(
   return rows.map((r) => ({ ...r, patterns: parseJsonArray(r.patterns) }));
 }
 
+// ── Permissions ───────────────────────────────────────────────
+//
+// What permissions does the agent actually need on this repo? Returns a
+// categorized, frequency-ranked tree of (tool, command-prefix) pairs
+// based on observed usage. Output is shaped so the UI can:
+//   1. show "core / build / file / mcp" buckets the user can reason about
+//   2. drill from verb (`git`) to subcommand (`git status`)
+//   3. emit a Claude Code settings.json `permissions.allow` snippet
+//
+// Bash entries are produced at TWO depths:
+//   depth=1: just the verb (e.g. ["Bash","git"]) — broader allow
+//   depth=2: verb + subcommand (e.g. ["Bash","git","status"]) — narrower
+// The UI lets the user check whichever granularity is right per command.
+
+export type PermissionCategory = "core" | "build" | "file" | "mcp" | "other";
+
+export interface PermissionRow {
+  category: PermissionCategory;
+  /** Top-level tool name (e.g., "Bash", "Read", "mcp:db-mcp:shell"). */
+  tool: string;
+  /** Path from root: ["Bash"], ["Bash","git"], ["Bash","git","status"], ["Read"]. */
+  path: string[];
+  count: number;
+  sessions: number;
+  /** Equivalent settings.json entry the user can copy if they pick this row. */
+  allowlistEntry: string;
+}
+
+const CORE_VERBS = new Set([
+  "git", "grep", "rg", "find", "ls", "cat", "head", "tail",
+  "sed", "awk", "mv", "cp", "ln", "chmod", "mkdir", "rm",
+  "cd", "pwd", "echo", "diff", "tee", "tr", "cut", "sort", "uniq",
+  "xargs", "wc", "tar", "gzip", "gunzip", "curl", "wget",
+]);
+
+const BUILD_VERBS = new Set([
+  "bun", "npm", "yarn", "pnpm", "uv", "pip", "poetry", "cargo",
+  "go", "gradle", "mvn", "maven", "make", "just", "dotnet",
+  "ruff", "mypy", "pytest", "jest", "vitest", "bunx", "npx",
+  "tsc", "eslint", "prettier", "rustc", "rustup", "cmake",
+]);
+
+const FILE_TOOLS = new Set([
+  "Read", "Edit", "Write", "MultiEdit", "NotebookEdit", "Glob", "Grep",
+]);
+
+function classifyVerb(verb: string): PermissionCategory {
+  if (CORE_VERBS.has(verb)) return "core";
+  if (BUILD_VERBS.has(verb)) return "build";
+  return "other";
+}
+
+function classifyTool(toolName: string): PermissionCategory {
+  if (FILE_TOOLS.has(toolName)) return "file";
+  if (toolName.startsWith("mcp:") || toolName.startsWith("mcp__")) return "mcp";
+  return "other";
+}
+
+interface PermRawRow {
+  toolName: string;
+  command: string | null;
+  sessionId: string | null;
+}
+
+export async function getPermissions(f: Filters = {}): Promise<PermissionRow[]> {
+  const rows = await query<PermRawRow>(`
+    SELECT toolName, command, sessionId
+    FROM traces
+    ${where(f, ["entryType = 'tool_call'", "toolName IS NOT NULL"])}
+  `);
+
+  // Aggregate counts + distinct sessions per (tool, path) pair.
+  type Bucket = { tool: string; path: string[]; count: number; sessions: Set<string> };
+  const buckets = new Map<string, Bucket>();
+  const bump = (tool: string, path: string[], sessionId: string | null) => {
+    const key = `${tool}\t${path.join("\t")}`;
+    let b = buckets.get(key);
+    if (!b) {
+      b = { tool, path, count: 0, sessions: new Set() };
+      buckets.set(key, b);
+    }
+    b.count += 1;
+    if (sessionId) b.sessions.add(sessionId);
+  };
+
+  for (const r of rows) {
+    const tool = normalizeToolName(r.toolName);
+    if (tool === "Bash" || tool === "Shell") {
+      // Bash / codex `shell` → tokenize the command, strip leading
+      // env-var assignments and flags, then take the first real verb.
+      // Skip the row entirely if any extracted token contains shell
+      // metacharacters that would produce invalid allowlist syntax
+      // (mismatched parens, $() / backtick subshells, etc.).
+      if (!r.command) continue;
+      const verb = extractBashVerb(r.command);
+      if (!verb) continue;
+      bump(tool, [tool, verb.verb], r.sessionId);
+      if (verb.sub) bump(tool, [tool, verb.verb, verb.sub], r.sessionId);
+    } else {
+      bump(tool, [tool], r.sessionId);
+    }
+  }
+
+  return [...buckets.values()]
+    .map((b) => {
+      let category: PermissionCategory;
+      if (b.tool === "Bash" || b.tool === "Shell") {
+        const verb = b.path[1] ?? "";
+        category = classifyVerb(verb);
+      } else {
+        category = classifyTool(b.tool);
+      }
+      return {
+        category,
+        tool: b.tool,
+        path: b.path,
+        count: b.count,
+        sessions: b.sessions.size,
+        allowlistEntry: toAllowlistEntry(b.tool, b.path),
+      };
+    })
+    .sort((a, b) =>
+      a.category.localeCompare(b.category) ||
+      b.count - a.count ||
+      a.path.length - b.path.length,
+    );
+}
+
+/** Format a tool/path pair as a Claude Code `permissions.allow` entry. */
+function toAllowlistEntry(tool: string, path: string[]): string {
+  if (tool === "Bash" || tool === "Shell") {
+    const prefix = path.slice(1).join(" ");
+    return `${tool}(${prefix}:*)`;
+  }
+  return tool;
+}
+
+/**
+ * Claude Code's settings.json grammar requires PascalCase tool names
+ * (Bash, Shell, Read, Stdin, …). MCP names — both the `mcp:server:tool`
+ * and `mcp__server__tool` forms — are documented exceptions and stay
+ * verbatim. Everything else gets its first letter uppercased.
+ */
+function normalizeToolName(tool: string): string {
+  if (tool.startsWith("mcp:") || tool.startsWith("mcp__")) return tool;
+  if (!tool) return tool;
+  const first = tool[0]!;
+  if (first >= "A" && first <= "Z") return tool;
+  return first.toUpperCase() + tool.slice(1);
+}
+
+/**
+ * Extract a stable (verb, subcommand?) pair from a bash command string.
+ * Returns null when the command can't be turned into a clean allowlist
+ * entry — e.g. `PID=$(lsof -ti :3000)` (mismatched parens once wrapped),
+ * or pipelines / subshells we can't model.
+ *
+ * Rules:
+ * 1. Tokenize on whitespace.
+ * 2. Strip leading env-var assignments (`KEY=value` shape) so
+ *    `LC_ALL=C bun test` resolves to verb `bun`, not `LC_ALL=C`.
+ * 3. Skip flag tokens (`-f`, `--flag`).
+ * 4. Reject anything that contains shell metacharacters — they can't
+ *    be safely embedded in a `Bash(verb:*)` rule.
+ */
+function extractBashVerb(command: string): { verb: string; sub?: string } | null {
+  const tokens = command.trim().split(/\s+/);
+  let i = 0;
+  // Skip leading env-var assignments. POSIX requires `[A-Z_][A-Z0-9_]*=`
+  // but we accept the slightly broader programmer convention.
+  while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i]!)) i++;
+  // Skip leading flags (rare but possible after env strip).
+  while (i < tokens.length && tokens[i]!.startsWith("-")) i++;
+  const verb = tokens[i];
+  if (!verb || !isCleanVerb(verb)) return null;
+  // The subcommand is the next non-flag token, again clean.
+  let j = i + 1;
+  while (j < tokens.length && tokens[j]!.startsWith("-")) j++;
+  const sub = tokens[j];
+  if (sub && !isCleanVerb(sub)) return { verb };
+  return sub ? { verb, sub } : { verb };
+}
+
+/**
+ * A token is safe to embed in `Bash(token:*)` only when it's free of
+ * shell metacharacters. We reject anything Claude Code's parser would
+ * choke on or that would produce a misleading rule.
+ */
+function isCleanVerb(token: string): boolean {
+  // Conservative: ASCII letters, digits, plus the few harmless punctuation
+  // chars that show up in real verbs (`/` for paths-as-verbs, `.` for
+  // `./script`, `_`, `-`). Anything else means metachar / quoting trouble.
+  return /^[A-Za-z0-9_./+-]+$/.test(token);
+}
+
 // ── Tools ──────────────────────────────────────────────────────
 
 export interface ToolRow {

@@ -12,7 +12,7 @@ import { getBuildInfo } from "./build-info";
 import { createStaticHandler } from "./static";
 import {
   getStats, getActivity, getHeatmap, getTokens, getTools, getMotifs, getStumbles, getDarkSpend, getZeroCode,
-  getSecurityFindings, getSecurityTimeline, getSecuritySessions,
+  getSecurityFindings, getSecurityTimeline, getSecuritySessions, getPermissions,
   getProjects, getModels, getSessions, getProjectList, getModelList, getAgentList, getToolList,
   getToolDetail, getSkills,
   getGitStats, getGitTimeline, getGitCommits, getGitSessions,
@@ -61,6 +61,7 @@ const routes: Record<string, Handler> = {
   "/api/security/findings": async (url) => getSecurityFindings(filters(url), parsePositiveInt(url.searchParams.get("limit")) ?? 25),
   "/api/security/timeline": async (url) => getSecurityTimeline(filters(url)),
   "/api/security/sessions": async (url) => getSecuritySessions(filters(url), parsePositiveInt(url.searchParams.get("limit")) ?? 50),
+  "/api/permissions": async (url) => getPermissions(filters(url)),
   "/api/projects": async (url) => getProjects(filters(url)),
   "/api/models": async (url) => getModels(filters(url)),
   "/api/sessions": async (url) => getSessions(filters(url), parsePositiveInt(url.searchParams.get("limit")) ?? 50),

@@ -61,6 +61,17 @@ export interface StumbleRow {
   lastAt: string;
 }
 
+export type PermissionCategory = "core" | "build" | "file" | "mcp" | "other";
+
+export interface PermissionRow {
+  category: PermissionCategory;
+  tool: string;
+  path: string[];
+  count: number;
+  sessions: number;
+  allowlistEntry: string;
+}
+
 export interface SecurityFindingRow {
   patternType: string;
   count: number;
