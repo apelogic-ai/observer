@@ -5,6 +5,17 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURE_DATA_DIR = resolve(__dirname, "tests/e2e/fixtures/data");
 
+// Dedicated test port — distinct from the dashboard's default 3457 so
+// a developer's local `observer dashboard run` (which also listens on
+// 3457) can't be reused by Playwright. With `reuseExistingServer: true`
+// we'd silently bind to that running server, which serves real
+// `~/.observer/traces/normalized` data instead of the seeded fixture
+// — every fixture-scoped assertion ("project: alpha", "5 findings",
+// etc.) then fails non-deterministically based on whatever the user
+// happens to have collected.
+const TEST_PORT = 3458;
+const TEST_URL = `http://localhost:${TEST_PORT}`;
+
 /**
  * Playwright e2e for the dashboard. The server reads its data dir from
  * OBSERVER_DATA_DIR; we point it at a generated fixture so the tests don't
@@ -25,7 +36,7 @@ export default defineConfig({
   reporter: process.env.CI ? "github" : "list",
 
   use: {
-    baseURL: "http://localhost:3457",
+    baseURL: TEST_URL,
     trace: "on-first-retry",
     screenshot: "only-on-failure",
   },
@@ -41,8 +52,13 @@ export default defineConfig({
     // run `bun run build` once; the dev-loop optimisation isn't worth
     // the doubled startup time on every test run.)
     command: "bun server/index.ts",
-    url: "http://localhost:3457",
-    reuseExistingServer: !process.env.CI,
+    url: TEST_URL,
+    // NEVER reuse — even locally. The previous default
+    // (`!process.env.CI`) silently rebound to a developer's running
+    // dashboard on 3457, which serves real data and breaks fixture
+    // assertions in non-obvious ways. The dedicated TEST_PORT means
+    // there's no risk of contention either.
+    reuseExistingServer: false,
     timeout: 60_000,
     // Use the resolved absolute path so the data dir is unambiguous —
     // earlier we relied on shell `$PWD`, which depends on whatever
@@ -53,6 +69,7 @@ export default defineConfig({
     // traced to this).
     env: {
       ...(process.env as Record<string, string>),
+      OBSERVER_PORT: String(TEST_PORT),
       OBSERVER_DATA_DIR: FIXTURE_DATA_DIR,
       // Bypass the dashboard's foreign-commit filter for tests — the
       // fixture authors don't match the developer's real config.yaml,
