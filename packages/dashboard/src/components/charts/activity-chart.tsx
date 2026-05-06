@@ -6,6 +6,7 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { AGENT_COLORS, TOOLTIP_CONTENT_STYLE, TOOLTIP_ITEM_STYLE, TOOLTIP_LABEL_STYLE } from "@/lib/colors";
 import { formatDate, formatNumber } from "@/lib/format";
+import { pickAxisLabelInterval } from "@/lib/chart-axis";
 import type { ActivityRow } from "@/lib/queries";
 
 interface Props {
@@ -48,6 +49,9 @@ export function ActivityChart({ data }: Props) {
               tick={{ fill: "#8b949e", fontSize: 11 }}
               axisLine={false}
               tickLine={false}
+              // Thin labels for long ranges so they don't crowd. Bars
+              // stay daily; only the labels get sparsified.
+              interval={pickAxisLabelInterval(chartData.length)}
             />
             <YAxis
               tick={{ fill: "#8b949e", fontSize: 11 }}
