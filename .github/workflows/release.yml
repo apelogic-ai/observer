@@ -113,7 +113,11 @@ jobs:
   e2e:
     name: Tests (dashboard e2e)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # 20min: `playwright install --with-deps` does a full apt-get of
+    # ~9 system packages (fonts, fontconfig, libgtk, …) on a cold
+    # runner. With the cache step below first install is ~5min and
+    # subsequent runs are <30s; without it we routinely saw 10min+.
+    timeout-minutes: 20
     # Single-OS Playwright run. Catches UI regressions (silent toolbar
     # handlers, broken heatmap, session ↔ commit drift) that pure unit
     # tests miss. Gates the release matrix.
@@ -124,9 +128,27 @@ jobs:
           bun-version: "1.2.21"
       - name: Install workspace dependencies
         run: bun install
+      # Cache the Playwright browser binary + per-version host deps.
+      # Keyed on the lockfile hash so any @playwright/test bump
+      # invalidates automatically. Cache hit makes the next step a
+      # no-op (Playwright sees the cached binary, skips the apt step).
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('bun.lock', 'packages/dashboard/package.json') }}
       - name: Install Playwright browser
         working-directory: packages/dashboard
-        run: bunx playwright install --with-deps chromium
+        run: |
+          if [ "${{ steps.playwright-cache.outputs.cache-hit }}" = "true" ]; then
+            # System deps still need installing on a fresh runner image
+            # (apt cache isn't preserved), but the chromium binary is
+            # cached so this is much shorter than --with-deps.
+            bunx playwright install-deps chromium
+          else
+            bunx playwright install --with-deps chromium
+          fi
       - name: Build dashboard
         working-directory: packages/dashboard
         run: bun run build

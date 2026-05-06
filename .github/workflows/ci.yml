@@ -140,7 +140,9 @@ jobs:
   dashboard-e2e:
     name: Dashboard e2e (Playwright)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # See release.yml for the same reasoning — `--with-deps` apt-get
+    # alone routinely runs 8–10min on cold runners.
+    timeout-minutes: 20
     # Catches UI regressions (silent toolbar handlers, broken heatmap,
     # session ↔ commit linkage drift) that pure unit tests miss.
     steps:
@@ -150,9 +152,20 @@ jobs:
           bun-version: "1.2.21"
       - name: Install workspace dependencies
         run: bun install
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('bun.lock', 'packages/dashboard/package.json') }}
       - name: Install Playwright browser
         working-directory: packages/dashboard
-        run: bunx playwright install --with-deps chromium
+        run: |
+          if [ "${{ steps.playwright-cache.outputs.cache-hit }}" = "true" ]; then
+            bunx playwright install-deps chromium
+          else
+            bunx playwright install --with-deps chromium
+          fi
       - name: Build dashboard
         working-directory: packages/dashboard
         run: bun run build
