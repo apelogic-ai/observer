@@ -2,7 +2,7 @@
 
 import type React from "react";
 import { useMemo, useState } from "react";
-import { usePermissions, type DashboardFilters } from "@/hooks/use-dashboard";
+import { usePermissions, useExistingPermissions, type DashboardFilters } from "@/hooks/use-dashboard";
 import { useFilters } from "@/hooks/use-filters";
 import { PageHeader } from "@/components/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -43,9 +43,17 @@ interface FragmentRowProps {
   expanded: boolean;
   threshold: number;
   isIncluded: (r: PermissionRow) => boolean;
+  isExisting: (r: PermissionRow) => boolean;
   toggle: (r: PermissionRow) => void;
   onToggleExpand: () => void;
 }
+
+// Per-row checkbox accent: brand-orange when the entry is already in
+// the user's settings, blue when it's a fresh suggestion. Inline style
+// avoids fighting Tailwind's accent-* utilities not being aware of our
+// CSS-variable brand color.
+const EXISTING_ACCENT = "var(--color-brand)";
+const SUGGESTION_ACCENT = "rgb(59 130 246)"; // tailwind blue-500
 
 /**
  * Renders one verb row plus its nested subcommand rows. When the verb
@@ -53,10 +61,15 @@ interface FragmentRowProps {
  * subsumed, so there's nothing to act on. Unchecking re-opens it so
  * the user can pick subcommands. The chevron always lets the user
  * peek at children regardless.
+ *
+ * Color: rows whose entry is already in the user's settings render
+ * with a brand-orange accent + a small "in settings" badge; rows that
+ * are observer-suggested-only render with a blue accent.
  */
-function FragmentRow({ group, parentChecked, expanded, threshold, isIncluded, toggle, onToggleExpand }: FragmentRowProps): React.ReactNode {
+function FragmentRow({ group, parentChecked, expanded, threshold, isIncluded, isExisting, toggle, onToggleExpand }: FragmentRowProps): React.ReactNode {
   const { parent, children } = group;
   const hasChildren = children.length > 0;
+  const parentExisting = isExisting(parent);
   return (
     <>
       <tr className={`border-b border-border/50 ${parent.count < threshold ? "opacity-50" : ""}`}>
@@ -66,6 +79,7 @@ function FragmentRow({ group, parentChecked, expanded, threshold, isIncluded, to
             checked={isIncluded(parent)}
             onChange={() => toggle(parent)}
             className="h-4 w-4"
+            style={{ accentColor: parentExisting ? EXISTING_ACCENT : SUGGESTION_ACCENT }}
           />
         </td>
         <td className="py-2">
@@ -95,6 +109,7 @@ function FragmentRow({ group, parentChecked, expanded, threshold, isIncluded, to
       {expanded && children.map((c) => {
         const covered = parentChecked;
         const childChecked = isIncluded(c);
+        const childExisting = isExisting(c);
         return (
           <tr
             key={rowKey(c)}
@@ -107,6 +122,7 @@ function FragmentRow({ group, parentChecked, expanded, threshold, isIncluded, to
                 disabled={covered}
                 onChange={() => toggle(c)}
                 className="h-4 w-4"
+                style={{ accentColor: childExisting ? EXISTING_ACCENT : SUGGESTION_ACCENT }}
               />
             </td>
             <td className="py-2">
@@ -133,6 +149,11 @@ export default function PermissionsPage() {
   const { filters, setDays, setAgent, setProject, setGranularity, buildQs } = useFilters();
   const dashFilters: DashboardFilters = { ...filters };
   const rows = usePermissions(dashFilters);
+  // Auto-load the user's existing Claude Code settings for the
+  // currently-selected project. The hook fetches only when project
+  // changes; we feed the result into the merge textarea below so the
+  // page is useful without copy-paste.
+  const fetchedExisting = useExistingPermissions(filters.project);
   // Explicit user toggles. Anything not in the map falls back to the
   // default-selection rule keyed off `bashGranularity`. Keeping
   // overrides separate avoids the React 19 set-state-in-effect rule
@@ -162,6 +183,11 @@ export default function PermissionsPage() {
   // state in response to a prop change without a useEffect).
   const scopeKey = `${filters.days ?? "all"}|${filters.project ?? ""}|${filters.agent ?? ""}`;
   const [prevScopeKey, setPrevScopeKey] = useState(scopeKey);
+  // Tracks the last fetched-existing payload we auto-populated from.
+  // When the fetched data is fresh (and the user hasn't started typing)
+  // we paint it into the textarea. Reset on scope change so the next
+  // arrival re-paints under the new scope.
+  const [prevAutoLoadKey, setPrevAutoLoadKey] = useState("");
   if (prevScopeKey !== scopeKey) {
     setPrevScopeKey(scopeKey);
     setOverrides(new Map());
@@ -169,6 +195,24 @@ export default function PermissionsPage() {
     setCopied(false);
     setExpandOverrides(new Map());
     setAcceptedSuggestions(new Set());
+    setPrevAutoLoadKey("");
+  }
+
+  // When new fetched-existing data arrives for the current project,
+  // paint it into the textarea — but only if the user hasn't already
+  // typed/edited in there. The check is: textarea is empty.
+  const autoLoadKey = fetchedExisting
+    ? `${filters.project ?? ""}|${fetchedExisting.allow.join(",")}|${fetchedExisting.repoLocal ?? ""}`
+    : "";
+  if (
+    fetchedExisting &&
+    autoLoadKey &&
+    autoLoadKey !== prevAutoLoadKey &&
+    existingJson === "" &&
+    fetchedExisting.allow.length > 0
+  ) {
+    setPrevAutoLoadKey(autoLoadKey);
+    setExistingJson(JSON.stringify({ permissions: { allow: fetchedExisting.allow } }, null, 2));
   }
 
   // Default selection — derived purely from rows + granularity:
@@ -191,6 +235,18 @@ export default function PermissionsPage() {
     const k = rowKey(r);
     if (overrides.has(k)) return overrides.get(k)!;
     return defaultIncludes.has(k);
+  }
+
+  // Set of allowlistEntries the user already has in their settings
+  // files (auto-loaded). Used to color rows: brand-orange for "you
+  // already have this", blue for "we suggest adding". Built once per
+  // fetch instead of per-row to avoid quadratic lookups.
+  const existingEntrySet = useMemo(() => {
+    return new Set(fetchedExisting?.allow ?? []);
+  }, [fetchedExisting]);
+
+  function isExisting(r: PermissionRow): boolean {
+    return existingEntrySet.has(r.allowlistEntry);
   }
 
   const grouped = useMemo(() => {
@@ -365,7 +421,7 @@ export default function PermissionsPage() {
           </p>
         </CardHeader>
         <CardContent className="space-y-2">
-          <div className="flex items-center gap-3 text-sm">
+          <div className="flex items-center gap-3 text-sm flex-wrap">
             <span className="text-muted-foreground">Bash granularity:</span>
             <div className="flex gap-1 rounded-lg border border-border p-1">
               {(["verb", "subcommand"] as const).map((g) => (
@@ -380,6 +436,23 @@ export default function PermissionsPage() {
                 </Button>
               ))}
             </div>
+            {/* Color key — only meaningful when an existing-settings
+                fetch has surfaced something to compare against. */}
+            {fetchedExisting && fetchedExisting.allow.length > 0 && (
+              <div className="flex items-center gap-3 ml-auto text-xs text-muted-foreground">
+                <span>Legend:</span>
+                <span className="flex items-center gap-1.5">
+                  {/* Decorative swatches, not checkboxes — flat squares
+                      so the user doesn't try to click them. */}
+                  <span aria-hidden="true" className="inline-block w-2.5 h-2.5 rounded-full" style={{ background: EXISTING_ACCENT }} />
+                  in your settings
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span aria-hidden="true" className="inline-block w-2.5 h-2.5 rounded-full" style={{ background: SUGGESTION_ACCENT }} />
+                  observer suggests
+                </span>
+              </div>
+            )}
           </div>
         </CardContent>
       </Card>
@@ -442,6 +515,7 @@ export default function PermissionsPage() {
                         expanded={expanded}
                         threshold={threshold}
                         isIncluded={isIncluded}
+                        isExisting={isExisting}
                         toggle={toggle}
                         onToggleExpand={() => toggleExpand(groupKey, expanded)}
                       />
@@ -456,17 +530,40 @@ export default function PermissionsPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Merge with existing settings.json (optional)</CardTitle>
+          <CardTitle>Merge with existing settings.json {fetchedExisting && fetchedExisting.sources.length > 0 && <span className="text-sm font-normal text-muted-foreground">(auto-loaded)</span>}</CardTitle>
           <p className="text-sm text-muted-foreground">
-            Paste your current <code className="text-xs">~/.claude/settings.json</code>
-            {" "}or <code className="text-xs">.claude/settings.local.json</code> here.
-            Observer unions it with the selection above and removes entries
-            that are redundant — e.g. if you check <code className="text-xs">Bash(bun:*)</code>,
-            an existing <code className="text-xs">Bash(bun install *)</code> is dropped.
-            Entries Observer can&apos;t reason about (exact bash strings, <code className="text-xs">WebFetch(domain:…)</code>) pass through untouched.
+            {fetchedExisting && fetchedExisting.sources.length > 0
+              ? <>Read from disk for the selected project. Edit below to adjust; clear to start blank.</>
+              : <>Paste your current <code className="text-xs">~/.claude/settings.json</code>
+                {" "}or <code className="text-xs">.claude/settings.local.json</code> here.
+                Observer unions it with the selection above and removes entries
+                that are redundant — e.g. if you check <code className="text-xs">Bash(bun:*)</code>,
+                an existing <code className="text-xs">Bash(bun install *)</code> is dropped.</>
+            }
           </p>
         </CardHeader>
         <CardContent className="space-y-3">
+          {fetchedExisting && fetchedExisting.sources.length > 0 && (
+            <ul className="text-xs space-y-1">
+              {fetchedExisting.sources.map((src) => (
+                <li key={src.path} className="flex items-center gap-2">
+                  <span className={
+                    src.label === "project-local" ? "px-1.5 py-0.5 rounded bg-brand/15 text-brand text-[10px] uppercase tracking-wide"
+                    : src.label === "project-shared" ? "px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400 text-[10px] uppercase tracking-wide"
+                    : "px-1.5 py-0.5 rounded bg-muted text-muted-foreground text-[10px] uppercase tracking-wide"
+                  }>
+                    {src.label}
+                  </span>
+                  <code className="text-xs text-muted-foreground truncate" title={src.path}>{src.path}</code>
+                  <span className="ml-auto tabular-nums text-muted-foreground">
+                    {src.error
+                      ? <span className="text-red-500">{src.error}</span>
+                      : <>+{src.count} {src.count === 1 ? "entry" : "entries"}</>}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
           <textarea
             value={existingJson}
             onChange={(e) => setExistingJson(e.target.value)}
@@ -505,39 +602,23 @@ export default function PermissionsPage() {
               </ul>
             </div>
           )}
-          {existingAllow.list.length > 0 && !existingAllow.error && (
-            <div className="grid gap-2 text-xs sm:grid-cols-2">
-              <div>
-                <div className="font-medium text-muted-foreground mb-1">
-                  Added ({merge.added.length})
-                </div>
-                {merge.added.length === 0 ? (
-                  <p className="text-muted-foreground">Nothing new — your existing list already covers the candidate.</p>
-                ) : (
-                  <ul className="space-y-1">
-                    {merge.added.map((e) => (
-                      <li key={e}><code className="text-brand">+ {e}</code></li>
-                    ))}
-                  </ul>
-                )}
+          {/* Additions don't get their own list here — every blue row in
+              the category tables above already represents an addition.
+              Removals (subsumed by a checked wildcard) aren't visible
+              in the per-row coloring, so we surface them on their own. */}
+          {existingAllow.list.length > 0 && !existingAllow.error && merge.subsumed.length > 0 && (
+            <div className="text-xs">
+              <div className="font-medium text-muted-foreground mb-1">
+                Removed by wildcards ({merge.subsumed.length})
               </div>
-              <div>
-                <div className="font-medium text-muted-foreground mb-1">
-                  Subsumed ({merge.subsumed.length})
-                </div>
-                {merge.subsumed.length === 0 ? (
-                  <p className="text-muted-foreground">Nothing redundant — every existing entry stands on its own.</p>
-                ) : (
-                  <ul className="space-y-1">
-                    {merge.subsumed.map((s) => (
-                      <li key={s.entry}>
-                        <code className="line-through text-muted-foreground">- {s.entry}</code>
-                        <span className="ml-1 text-muted-foreground">covered by <code>{s.subsumedBy}</code></span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
+              <ul className="space-y-1">
+                {merge.subsumed.map((s) => (
+                  <li key={s.entry}>
+                    <code className="line-through text-muted-foreground">- {s.entry}</code>
+                    <span className="ml-1 text-muted-foreground">covered by <code>{s.subsumedBy}</code></span>
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
         </CardContent>

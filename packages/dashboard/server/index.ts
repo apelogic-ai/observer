@@ -19,6 +19,7 @@ import {
   getCommitDetail, getSessionCommits, getSessionSummary, getSessionDetail,
   type Filters,
 } from "./queries";
+import { getExistingSettings } from "./permissions-existing";
 
 /** Extract common filters from query params. Unparseable values are dropped
  *  rather than passed through — prevents `NaN` from flowing into SQL
@@ -62,6 +63,14 @@ const routes: Record<string, Handler> = {
   "/api/security/timeline": async (url) => getSecurityTimeline(filters(url)),
   "/api/security/sessions": async (url) => getSecuritySessions(filters(url), parsePositiveInt(url.searchParams.get("limit")) ?? 50),
   "/api/permissions": async (url) => getPermissions(filters(url)),
+  "/api/permissions/existing": async (url) => {
+    // No project = nothing to scope to. Returning the user-global file
+    // alone would surprise the UI ("why is there content with no
+    // project selected?"), so we no-op here.
+    const project = url.searchParams.get("project");
+    if (!project) return { allow: [], sources: [], repoLocal: null };
+    return getExistingSettings(project);
+  },
   "/api/projects": async (url) => getProjects(filters(url)),
   "/api/models": async (url) => getModels(filters(url)),
   "/api/sessions": async (url) => getSessions(filters(url), parsePositiveInt(url.searchParams.get("limit")) ?? 50),

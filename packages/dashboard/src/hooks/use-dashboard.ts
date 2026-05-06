@@ -5,7 +5,7 @@ import type {
   Stats, ActivityRow, HeatmapRow, TokenRow, ToolRow, ProjectRow, ModelRow,
   SessionRow, SkillRow, ToolDetail, StumbleRow, DarkSpendRow,
   SecurityFindingRow, SecurityTimelineRow, SecuritySessionRow,
-  PermissionRow,
+  PermissionRow, ExistingSettings,
   GitStats, GitTimelineRow, GitCommitRow, GitSessionRow,
 } from "@/lib/queries";
 
@@ -306,6 +306,38 @@ export function usePermissions(filters: DashboardFilters) {
   }, [days, project, agent, granularity]);
 
   return rows;
+}
+
+/**
+ * Fetch the user's existing Claude Code permission settings for the
+ * currently-selected project (user-global ∪ project-shared ∪
+ * project-local). Returns null while loading; an `ExistingSettings`
+ * shape once resolved (with empty arrays when nothing was found, never
+ * null on the inner fields). Re-fetches when the project changes.
+ */
+export function useExistingPermissions(project: string | null) {
+  const [data, setData] = useState<ExistingSettings | null>(null);
+  // Reset stale data the moment the project changes (don't wait for
+  // the new fetch to land). React 19's set-state-in-effect rule
+  // disallows synchronous setState inside useEffect; this prev-prop
+  // pattern is the documented escape hatch.
+  const [prevProject, setPrevProject] = useState(project);
+  if (prevProject !== project) {
+    setPrevProject(project);
+    setData(null);
+  }
+
+  useEffect(() => {
+    if (!project) return;
+    let cancelled = false;
+    const url = `/api/permissions/existing?project=${encodeURIComponent(project)}`;
+    fetchJson<ExistingSettings>(url)
+      .then((d) => { if (!cancelled) setData(d); })
+      .catch(() => { if (!cancelled) setData({ allow: [], sources: [], repoLocal: null }); });
+    return () => { cancelled = true; };
+  }, [project]);
+
+  return data;
 }
 
 export function useSecurity(filters: DashboardFilters) {
