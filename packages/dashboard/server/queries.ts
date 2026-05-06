@@ -15,6 +15,9 @@ export interface Filters {
   tool?: string;
   agent?: string;
   granularity?: "day" | "week" | "month";
+  /** Single calendar day in YYYY-MM-DD form. When set, overrides `days`
+   *  — used by the leaks page's click-to-drill on the chart. */
+  date?: string;
 }
 
 /** Date bucket expression keyed off the timestamp text column. */
@@ -200,7 +203,10 @@ interface SecurityFindingRawRow extends Omit<SecurityFindingRow, "agents"> { age
 function securityWhere(f: Filters, extra?: string[]): string {
   const conds: string[] = extra ? [...extra] : [];
   conds.push(`timestamp IS NOT NULL`);
-  if (f.days)    conds.push(`timestamp >= date('now', '-${f.days} days')`);
+  // `date` (single calendar day) takes precedence over `days` (a window).
+  // Used by the leaks page's chart click-to-drill — nonsense to combine.
+  if (f.date) conds.push(`date(timestamp) = '${esc(f.date)}'`);
+  else if (f.days) conds.push(`timestamp >= date('now', '-${f.days} days')`);
   if (f.project) conds.push(`project = '${esc(f.project)}'`);
   if (f.agent)   conds.push(`agent = '${esc(f.agent)}'`);
   return `WHERE ${conds.join(" AND ")}`;
@@ -234,18 +240,25 @@ export async function getSecurityFindings(
 
 export interface SecurityTimelineRow {
   date: string;
+  patternType: string;
   count: number;
 }
 
+/**
+ * Per-(date, patternType) finding counts. The leaks chart pivots these
+ * into a stacked bar chart — one bar per day, one segment per pattern.
+ * Total for a day = sum of its rows.
+ */
 export async function getSecurityTimeline(f: Filters = {}): Promise<SecurityTimelineRow[]> {
   return query<SecurityTimelineRow>(`
     SELECT
       ${dateTrunc(f)} AS date,
+      patternType     AS patternType,
       COUNT(*)        AS count
     FROM security_findings
     ${securityWhere(f)}
-    GROUP BY date
-    ORDER BY date
+    GROUP BY date, patternType
+    ORDER BY date, patternType
   `);
 }
 

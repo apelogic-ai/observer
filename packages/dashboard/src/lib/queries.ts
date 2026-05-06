@@ -100,6 +100,7 @@ export interface SecurityFindingRow {
 
 export interface SecurityTimelineRow {
   date: string;
+  patternType: string;
   count: number;
 }
 

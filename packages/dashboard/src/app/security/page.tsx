@@ -1,20 +1,51 @@
 "use client";
 
+import { useMemo } from "react";
 import Link from "next/link";
 import { useSecurity, type DashboardFilters } from "@/hooks/use-dashboard";
 import { useFilters } from "@/hooks/use-filters";
 import { PageHeader } from "@/components/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { formatDate, formatNumber } from "@/lib/format";
+import { pickAxisLabelInterval } from "@/lib/chart-axis";
 import {
-  AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer,
+  BarChart, Bar, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend,
 } from "recharts";
 import { TOOLTIP_CONTENT_STYLE, TOOLTIP_LABEL_STYLE, TOOLTIP_ITEM_STYLE } from "@/lib/colors";
 
+// Discrete categorical palette for the stacked bars — one color per
+// pattern type. Cycles after 8 patterns; in practice 4–6 is the norm.
+const PATTERN_PALETTE = [
+  "#EF8626", "#3B82F6", "#10B981", "#F59E0B",
+  "#A855F7", "#EC4899", "#14B8A6", "#F43F5E",
+];
+
 export default function SecurityPage() {
-  const { filters, setDays, setAgent, setProject, setGranularity, buildQs } = useFilters();
+  const { filters, setDays, setAgent, setProject, setGranularity, setDate, buildQs } = useFilters();
   const dashFilters: DashboardFilters = { ...filters };
   const { findings, timeline, sessions } = useSecurity(dashFilters);
+
+  // Pivot the per-(date, pattern) timeline rows into one chart row per
+  // date with a numeric column per pattern, for stacked rendering.
+  const { chartData, patternKeys } = useMemo(() => {
+    const byDate = new Map<string, Record<string, number | string>>();
+    const patterns = new Set<string>();
+    for (const r of timeline ?? []) {
+      patterns.add(r.patternType);
+      const entry = byDate.get(r.date) ?? { date: r.date };
+      entry[r.patternType] = ((entry[r.patternType] as number | undefined) ?? 0) + r.count;
+      byDate.set(r.date, entry);
+    }
+    return {
+      chartData: [...byDate.values()],
+      patternKeys: [...patterns].sort(),
+    };
+  }, [timeline]);
+
+  const colorFor = (pattern: string): string => {
+    const idx = patternKeys.indexOf(pattern);
+    return PATTERN_PALETTE[idx % PATTERN_PALETTE.length]!;
+  };
 
   return (
     <main className="flex-1 p-6 space-y-6 max-w-[1600px] mx-auto w-full">
@@ -45,9 +76,30 @@ export default function SecurityPage() {
         </CardHeader>
       </Card>
 
+      {filters.date && (
+        <Card>
+          <CardContent className="flex items-center justify-between py-3">
+            <p className="text-sm">
+              Showing findings for <span className="font-medium">{formatDate(filters.date)}</span>.
+              The chart below stays scoped to your full window for context.
+            </p>
+            <button
+              type="button"
+              onClick={() => setDate(null)}
+              className="text-xs px-3 py-1 rounded border border-border hover:bg-muted transition-colors"
+            >
+              Clear day
+            </button>
+          </CardContent>
+        </Card>
+      )}
+
       <Card>
         <CardHeader>
           <CardTitle>Findings over time</CardTitle>
+          <p className="text-xs text-muted-foreground mt-1">
+            Click a bar to drill into one day&apos;s findings.
+          </p>
         </CardHeader>
         <CardContent>
           {timeline === null && (
@@ -59,14 +111,15 @@ export default function SecurityPage() {
             </p>
           )}
           {timeline !== null && timeline.length > 0 && (
-            <ResponsiveContainer width="100%" height={200}>
-              <AreaChart data={timeline}>
+            <ResponsiveContainer width="100%" height={220}>
+              <BarChart data={chartData}>
                 <XAxis
                   dataKey="date"
                   tick={{ fill: "#8b949e", fontSize: 11 }}
                   tickFormatter={(v) => formatDate(String(v))}
                   axisLine={false}
                   tickLine={false}
+                  interval={pickAxisLabelInterval(chartData.length)}
                 />
                 <YAxis
                   tick={{ fill: "#8b949e", fontSize: 11 }}
@@ -79,17 +132,38 @@ export default function SecurityPage() {
                   labelStyle={TOOLTIP_LABEL_STYLE}
                   itemStyle={TOOLTIP_ITEM_STYLE}
                   labelFormatter={(v) => formatDate(String(v))}
-                  formatter={(value) => [formatNumber(Number(value)), "findings"]}
+                  formatter={(value, name) => [formatNumber(Number(value)), String(name)]}
                 />
-                <Area
-                  type="monotone"
-                  dataKey="count"
-                  stroke="#EF8626"
-                  fill="#EF8626"
-                  fillOpacity={0.2}
-                  strokeWidth={1.5}
-                />
-              </AreaChart>
+                {patternKeys.length > 1 && (
+                  <Legend wrapperStyle={{ fontSize: 11 }} />
+                )}
+                {patternKeys.map((pattern) => (
+                  <Bar
+                    key={pattern}
+                    dataKey={pattern}
+                    stackId="a"
+                    fill={colorFor(pattern)}
+                    onClick={(payload) => {
+                      // Recharts types `payload` loosely; the bar's
+                      // underlying chart-row data lives on `.payload`
+                      // when available, otherwise on the object itself.
+                      const d = (payload as { payload?: { date?: string } } | undefined)?.payload
+                        ?? (payload as unknown as { date?: string } | undefined);
+                      if (d?.date) setDate(d.date === filters.date ? null : d.date);
+                    }}
+                    cursor="pointer"
+                  >
+                    {/* Highlight the selected day's segments by drawing
+                        them at full opacity; dim everything else. */}
+                    {chartData.map((d) => (
+                      <Cell
+                        key={String(d.date)}
+                        fillOpacity={!filters.date || d.date === filters.date ? 1 : 0.3}
+                      />
+                    ))}
+                  </Bar>
+                ))}
+              </BarChart>
             </ResponsiveContainer>
           )}
         </CardContent>

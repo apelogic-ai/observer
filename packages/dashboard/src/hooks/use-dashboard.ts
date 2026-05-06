@@ -27,6 +27,9 @@ export interface DashboardFilters {
   granularity?: string;
   model?: string | null;
   tool?: string | null;
+  /** Single calendar day (YYYY-MM-DD). When set, server scopes to that
+   *  day and ignores `days`. Used by the leaks chart click-to-drill. */
+  date?: string | null;
 }
 
 function buildParams(f: DashboardFilters, extra?: Record<string, string>): string {
@@ -37,6 +40,7 @@ function buildParams(f: DashboardFilters, extra?: Record<string, string>): strin
   if (f.granularity && f.granularity !== "day") p.set("granularity", f.granularity);
   if (f.model) p.set("model", f.model);
   if (f.tool) p.set("tool", f.tool);
+  if (f.date) p.set("date", f.date);
   if (extra) for (const [k, v] of Object.entries(extra)) p.set(k, v);
   const s = p.toString();
   return s ? `?${s}` : "";
@@ -344,15 +348,21 @@ export function useSecurity(filters: DashboardFilters) {
   const [findings, setFindings] = useState<SecurityFindingRow[] | null>(null);
   const [timeline, setTimeline] = useState<SecurityTimelineRow[] | null>(null);
   const [sessions, setSessions] = useState<SecuritySessionRow[] | null>(null);
-  const { days, project, agent, granularity } = filters;
+  const { days, project, agent, granularity, date } = filters;
 
   useEffect(() => {
     let cancelled = false;
-    const params = buildParams({ days, project, agent, granularity });
+    // Findings + sessions get the date filter (the chart click drills
+    // those tables). Timeline ignores `date` so the chart always shows
+    // the broader window for context — otherwise selecting a day
+    // collapses the chart to a single bar and the user loses the spike
+    // they were investigating.
+    const dayScopedParams = buildParams({ days, project, agent, granularity, date });
+    const windowParams    = buildParams({ days, project, agent, granularity });
     Promise.all([
-      fetchJson<SecurityFindingRow[]>(`/api/security/findings${params}`),
-      fetchJson<SecurityTimelineRow[]>(`/api/security/timeline${params}`),
-      fetchJson<SecuritySessionRow[]>(`/api/security/sessions${params}`),
+      fetchJson<SecurityFindingRow[]>(`/api/security/findings${dayScopedParams}`),
+      fetchJson<SecurityTimelineRow[]>(`/api/security/timeline${windowParams}`),
+      fetchJson<SecuritySessionRow[]>(`/api/security/sessions${dayScopedParams}`),
     ])
       .then(([f, t, s]) => {
         if (cancelled) return;
@@ -363,7 +373,7 @@ export function useSecurity(filters: DashboardFilters) {
         setFindings([]); setTimeline([]); setSessions([]);
       });
     return () => { cancelled = true; };
-  }, [days, project, agent, granularity]);
+  }, [days, project, agent, granularity, date]);
 
   return { findings, timeline, sessions };
 }

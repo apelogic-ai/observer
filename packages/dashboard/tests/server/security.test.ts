@@ -6,6 +6,7 @@ import { initDb } from "../../server/db";
 import {
   getSecurityFindings,
   getSecurityTimeline,
+  getSecuritySessions,
 } from "../../server/queries";
 
 function writeJsonl(path: string, rows: Array<Record<string, unknown>>): void {
@@ -117,15 +118,58 @@ describe("getSecurityFindings", () => {
 });
 
 describe("getSecurityTimeline", () => {
-  it("buckets findings per date with per-pattern counts", async () => {
+  it("returns per-(date, patternType) rows so the chart can stack", async () => {
+    // Shape change: timeline used to return one row per date with a
+    // total count. The leaks chart needs to stack by pattern type, so
+    // we now return one row per (date, patternType) instead. Total
+    // for a day is the sum of its rows.
     const rows = await getSecurityTimeline({ days: 30 });
     expect(rows.length).toBeGreaterThan(0);
-    const today = rows.find((r) => r.date === TODAY);
-    expect(today).toBeDefined();
-    // 5 narrow-field findings (f1=2, f2=1, f3=1, f4=1) plus 5 wide-field
-    // findings (w1=2 in stdout, w2=1 in fileContent, w3=1 in
-    // toolResultContent, w4=1 in queryData) = 10 total.
-    expect(today!.count).toBe(10);
+    // Sanity-check shape without using `toMatchObject` — that matcher
+    // appears to leak `expect.any(...)` placeholders back into the row
+    // objects in this Bun version, breaking subsequent reads.
+    for (const r of rows) {
+      expect(typeof r.date).toBe("string");
+      expect(typeof r.patternType).toBe("string");
+      expect(typeof r.count).toBe("number");
+    }
+    const today = rows.filter((r) => r.date === TODAY);
+    // 10 findings on TODAY across the seeded fixture (5 narrow + 5 wide).
+    const todayTotal = today.reduce((s, r) => s + r.count, 0);
+    expect(todayTotal).toBe(10);
+    // At least one row each for the patterns we plant on TODAY.
+    const todayPatterns = new Set(today.map((r) => r.patternType));
+    expect(todayPatterns.has("aws_access_key")).toBe(true);
+    expect(todayPatterns.has("github_token")).toBe(true);
+  });
+});
+
+describe("date filter — scopes queries to one calendar day", () => {
+  it("getSecurityFindings respects f.date and ignores f.days when both set", async () => {
+    // The leaks page uses ?date=YYYY-MM-DD for click-to-drill on the
+    // chart. Same totals on the seeded fixture (everything is on
+    // TODAY), but the filter shape exists.
+    const all = await getSecurityFindings({ days: 30 }, 50);
+    const day = await getSecurityFindings({ days: 30, date: TODAY }, 50);
+    // Sum of pattern counts must match — fixture only has findings on TODAY.
+    const sumAll = all.reduce((s, r) => s + r.count, 0);
+    const sumDay = day.reduce((s, r) => s + r.count, 0);
+    expect(sumDay).toBe(sumAll);
+    // A date with no findings returns nothing.
+    const empty = await getSecurityFindings({ date: "2020-01-01" }, 50);
+    expect(empty).toEqual([]);
+  });
+
+  it("getSecuritySessions respects f.date", async () => {
+    const empty = await getSecuritySessions({ date: "2020-01-01" }, 50);
+    expect(empty).toEqual([]);
+    const today = await getSecuritySessions({ date: TODAY }, 50);
+    expect(today.length).toBeGreaterThan(0);
+  });
+
+  it("getSecurityTimeline respects f.date — narrows to that one day's rows", async () => {
+    const rows = await getSecurityTimeline({ date: TODAY });
+    for (const r of rows) expect(r.date).toBe(TODAY);
   });
 });
 

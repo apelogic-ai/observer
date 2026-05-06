@@ -38,6 +38,11 @@ function filters(url: URL): Filters {
   if (agent) f.agent = agent;
   const granularity = url.searchParams.get("granularity");
   if (granularity === "week" || granularity === "month") f.granularity = granularity;
+  // Single calendar day for chart click-to-drill. Validate shape
+  // (YYYY-MM-DD) before letting it reach SQL — `esc` only handles
+  // single-quote escaping, not arbitrary garbage.
+  const date = url.searchParams.get("date");
+  if (date && /^\d{4}-\d{2}-\d{2}$/.test(date)) f.date = date;
   return f;
 }
 
