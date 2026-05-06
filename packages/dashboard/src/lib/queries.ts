@@ -72,6 +72,22 @@ export interface PermissionRow {
   allowlistEntry: string;
 }
 
+export type ExistingSourceLabel = "user-global" | "project-shared" | "project-local";
+
+export interface ExistingSource {
+  label: ExistingSourceLabel;
+  path: string;
+  count: number;
+  /** Set when the file existed but couldn't be read or parsed. */
+  error?: string;
+}
+
+export interface ExistingSettings {
+  allow: string[];
+  sources: ExistingSource[];
+  repoLocal: string | null;
+}
+
 export interface SecurityFindingRow {
   patternType: string;
   count: number;
