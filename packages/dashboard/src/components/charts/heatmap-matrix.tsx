@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { AGENT_COLORS } from "@/lib/colors";
 import { formatDate, formatNumber } from "@/lib/format";
@@ -64,6 +64,20 @@ export function HeatmapMatrix({ data, maxRows = 12, onProjectClick }: Props) {
     project: string; date: string; cell: Cell; x: number; y: number;
   } | null>(null);
 
+  // The grid scrolls horizontally — keep the project label column
+  // pinned to the left while date columns slide. Auto-scroll to the
+  // right on mount so today is visible without dragging.
+  // Hooks must precede any early return (rules-of-hooks).
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  // Stable signature: the rightmost date. Different ranges → different
+  // signatures → re-scroll. Hover updates don't change it.
+  const datesKey = dates[dates.length - 1] ?? "";
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollLeft = el.scrollWidth;
+  }, [datesKey]);
+
   if (data.length === 0 || projects.length === 0 || dates.length === 0) {
     return (
       <Card>
@@ -101,15 +115,22 @@ export function HeatmapMatrix({ data, maxRows = 12, onProjectClick }: Props) {
         </CardTitle>
       </CardHeader>
       <CardContent>
-        <div className="relative overflow-x-auto">
+        <div className="relative">
+          <div ref={scrollRef} className="overflow-x-auto">
           <div
             className="grid gap-px"
+            // Date columns get a fixed minimum width (28px) so they
+            // don't compress to nothing at long ranges. The container
+            // scrolls horizontally instead. The label column stays
+            // bounded to ~140–180px and gets `position: sticky` per
+            // cell so it pins to the left during the scroll.
             style={{
-              gridTemplateColumns: `minmax(140px, 180px) repeat(${dates.length}, minmax(20px, 1fr))`,
+              gridTemplateColumns: `minmax(140px, 180px) repeat(${dates.length}, 28px)`,
             }}
           >
-            {/* Header: empty corner + one cell per date */}
-            <div />
+            {/* Header corner — sticky so it stays above the labels.
+                Without a background it'd let date headers show through. */}
+            <div className="sticky left-0 z-10 bg-card" />
             {dates.map((d) => (
               <div
                 key={d}
@@ -129,7 +150,7 @@ export function HeatmapMatrix({ data, maxRows = 12, onProjectClick }: Props) {
               <button
                 key={`${project}__label`}
                 type="button"
-                className="text-xs text-right pr-2 truncate text-muted-foreground hover:text-foreground"
+                className="sticky left-0 z-10 bg-card text-xs text-right pr-2 truncate text-muted-foreground hover:text-foreground"
                 title={project}
                 onClick={onProjectClick ? () => onProjectClick(project) : undefined}
               >
@@ -158,6 +179,18 @@ export function HeatmapMatrix({ data, maxRows = 12, onProjectClick }: Props) {
               }),
             ])}
           </div>
+
+          </div>
+          {/* Right-edge gradient — affordance hint that the grid is
+              scrollable horizontally. Pointer-events-none so it doesn't
+              eat hover/scroll on the rightmost cells. Visible only when
+              there are enough dates to actually overflow. */}
+          {dates.length > 14 && (
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-card to-transparent"
+            />
+          )}
 
           {hover && (
             <div

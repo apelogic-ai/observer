@@ -15,7 +15,7 @@
     "start": "bun server/index.ts",
     "compile": "bun run build && bun build --compile server/compiled-entry.ts --outfile dist/observer-dashboard",
     "typecheck": "bun scripts/ensure-stubs.ts && bunx tsc --noEmit && bunx tsc --noEmit -p tsconfig.server.json",
-    "test": "bun test tests/server",
+    "test": "bun test tests/server tests/lib",
     "test:e2e": "bun tests/e2e/seed.ts && playwright test",
     "lint": "eslint"
   },
