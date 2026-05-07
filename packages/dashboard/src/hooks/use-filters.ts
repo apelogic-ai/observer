@@ -11,6 +11,9 @@ export interface FilterState {
   agent: string | null;
   tool: string | null;
   granularity: Granularity;
+  /** Single-day drill-down (YYYY-MM-DD). Currently set/cleared by the
+   *  leaks page chart-click; other pages ignore it. */
+  date: string | null;
 }
 
 function parseGranularity(v: string | null): Granularity {
@@ -30,6 +33,7 @@ export function useFilters() {
       agent: searchParams.get("agent") || null,
       tool: searchParams.get("tool") || null,
       granularity: parseGranularity(searchParams.get("granularity")),
+      date: searchParams.get("date") || null,
     };
   }, [searchParams]);
 
@@ -57,6 +61,10 @@ export function useFilters() {
         if (updates.granularity === "day") p.delete("granularity"); // day is default
         else p.set("granularity", updates.granularity!);
       }
+      if ("date" in updates) {
+        if (updates.date) p.set("date", updates.date);
+        else p.delete("date");
+      }
       const qs = p.toString();
       // Next 16's router.replace/push doesn't update the visible URL when
       // only search params change in `output: 'export'` mode (it updates
@@ -75,6 +83,7 @@ export function useFilters() {
   const setAgent = useCallback((agent: string | null) => updateParams({ agent }), [updateParams]);
   const setTool = useCallback((tool: string | null) => updateParams({ tool }), [updateParams]);
   const setGranularity = useCallback((granularity: Granularity) => updateParams({ granularity }), [updateParams]);
+  const setDate = useCallback((date: string | null) => updateParams({ date }), [updateParams]);
 
   /** Build query string preserving current filter state, with optional overrides. */
   const buildQs = useCallback(
@@ -93,5 +102,5 @@ export function useFilters() {
     [filters],
   );
 
-  return { filters, setDays, setProject, setAgent, setTool, setGranularity, buildQs };
+  return { filters, setDays, setProject, setAgent, setTool, setGranularity, setDate, buildQs };
 }
