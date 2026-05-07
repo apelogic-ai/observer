@@ -1019,6 +1019,193 @@ export interface SkillRow {
   count: number;
 }
 
+export interface SkillUsageRow {
+  /** Canonical name — no leading slash, no `skill:` prefix. */
+  name: string;
+  count: number;
+  sessions: number;
+  projects: number;
+  firstSeen: string;
+  lastSeen: string;
+  /** Sorted distinct agents that fired this skill. Today only Claude
+   *  Code has a Skill primitive, so this is effectively `["claude_code"]`
+   *  in real data, but we surface it so the column makes sense if a
+   *  future agent grows skill-style invocations. */
+  agents: string[];
+}
+
+interface SkillUsageRaw {
+  name: string;
+  count: number;
+  sessions: number;
+  projects: number;
+  firstSeen: string;
+  lastSeen: string;
+  agentsCsv: string | null;
+}
+
+/**
+ * Per-skill usage powering the /skills page. Two sources are unioned
+ * before grouping so a skill that's both typed (`/ship`) and invoked
+ * by the model (`Skill(command="ship")`) collapses to a single row
+ * with both sources flagged.
+ *
+ *   - slash: `traces.userPrompt LIKE '/%'` (entryType=message, role=user)
+ *   - tool:  `traces.toolName  LIKE 'skill:%'` (entryType=tool_call)
+ *
+ * The agent normalizer (parsers/claude.ts) is what produces the
+ * `skill:<name>` toolName from `Skill(command="...")` calls — Codex
+ * doesn't fire skill: tool calls today, so the tool-source is
+ * effectively Claude-Code-only until that changes.
+ */
+export async function getSkillUsage(f: Filters = {}): Promise<SkillUsageRow[]> {
+  // Both sub-queries get the same project/agent/days filtering via where().
+  // tool/model filters are intentionally not included — they don't make
+  // sense for the skills page (every row is either a /-prompt message
+  // or a `skill:*` tool call; filtering further would just zero things out).
+  const baseFilters: Filters = {
+    days: f.days,
+    project: f.project,
+    agent: f.agent,
+  };
+
+  const slashWhere = where(baseFilters, [
+    `entryType = 'message'`,
+    `role = 'user'`,
+    `userPrompt IS NOT NULL`,
+    `substr(trim(userPrompt), 1, 1) = '/'`,
+    `length(trim(userPrompt)) > 1`,
+  ]);
+
+  const toolWhere = where(baseFilters, [
+    `entryType = 'tool_call'`,
+    `toolName LIKE 'skill:%'`,
+    `length(toolName) > 6`,
+  ]);
+
+  const rows = await query<SkillUsageRaw>(`
+    WITH events AS (
+      SELECT
+        CASE
+          WHEN instr(trim(userPrompt), ' ') > 1
+            THEN substr(trim(userPrompt), 2, instr(trim(userPrompt), ' ') - 2)
+          ELSE substr(trim(userPrompt), 2)
+        END AS name,
+        agent, sessionId, project, timestamp
+      FROM traces
+      ${slashWhere}
+      UNION ALL
+      SELECT
+        substr(toolName, 7) AS name,    -- length('skill:') = 6
+        agent, sessionId, project, timestamp
+      FROM traces
+      ${toolWhere}
+    )
+    SELECT
+      name,
+      COUNT(*) AS count,
+      COUNT(DISTINCT sessionId) AS sessions,
+      COUNT(DISTINCT project)   AS projects,
+      MIN(timestamp) AS firstSeen,
+      MAX(timestamp) AS lastSeen,
+      -- group_concat doesn't promise ordering across rows; we sort in TS
+      -- to keep the agent list deterministic.
+      (SELECT group_concat(DISTINCT a) FROM (
+         SELECT DISTINCT agent AS a FROM events e2 WHERE e2.name = events.name
+       )) AS agentsCsv
+    FROM events
+    WHERE name IS NOT NULL AND name <> ''
+    GROUP BY name
+    ORDER BY count DESC, name ASC
+    LIMIT 200
+  `);
+
+  // Real traces contain user prompts that start with `/` but aren't
+  // slash commands — most commonly Unix paths (`/private/tmp/...`) or
+  // multi-line pastes. A canonical skill name is a single word of
+  // letters / digits / `-` / `_` / `:` (the colon being the plugin
+  // separator, e.g. `git-flow:ship`). Reject anything else here
+  // rather than baking the regex into SQL (which has no REGEXP by
+  // default and gets unreadable fast with GLOB).
+  const isCanonicalName = /^[A-Za-z0-9][A-Za-z0-9_:-]*$/;
+  return rows
+    .filter((r) => isCanonicalName.test(r.name))
+    .map((r) => ({
+      name: r.name,
+      count: r.count,
+      sessions: r.sessions,
+      projects: r.projects,
+      firstSeen: r.firstSeen,
+      lastSeen: r.lastSeen,
+      agents: r.agentsCsv ? r.agentsCsv.split(",").filter(Boolean).sort() : [],
+    }));
+}
+
+export interface SkillSessionRow {
+  sessionId: string;
+  agent: string;
+  project: string;
+  count: number;
+  firstSeen: string;
+  lastSeen: string;
+}
+
+/**
+ * Drill-down for the /skills page: lists each (session, agent) that
+ * fired the named skill, with per-session counts. Honors the same
+ * project / agent / days filters as `getSkillUsage` so what you see
+ * here matches the row you clicked.
+ */
+export async function getSkillSessions(name: string, f: Filters = {}): Promise<SkillSessionRow[]> {
+  const baseFilters: Filters = {
+    days: f.days,
+    project: f.project,
+    agent: f.agent,
+  };
+  const slashWhere = where(baseFilters, [
+    `entryType = 'message'`,
+    `role = 'user'`,
+    `userPrompt IS NOT NULL`,
+    `substr(trim(userPrompt), 1, 1) = '/'`,
+    `length(trim(userPrompt)) > 1`,
+  ]);
+  const toolWhere = where(baseFilters, [
+    `entryType = 'tool_call'`,
+    `toolName LIKE 'skill:%'`,
+    `length(toolName) > 6`,
+  ]);
+  const escName = esc(name);
+  return query<SkillSessionRow>(`
+    WITH events AS (
+      SELECT
+        CASE
+          WHEN instr(trim(userPrompt), ' ') > 1
+            THEN substr(trim(userPrompt), 2, instr(trim(userPrompt), ' ') - 2)
+          ELSE substr(trim(userPrompt), 2)
+        END AS name,
+        agent, sessionId, project, timestamp
+      FROM traces
+      ${slashWhere}
+      UNION ALL
+      SELECT
+        substr(toolName, 7) AS name,
+        agent, sessionId, project, timestamp
+      FROM traces
+      ${toolWhere}
+    )
+    SELECT
+      sessionId, agent, project,
+      COUNT(*) AS count,
+      MIN(timestamp) AS firstSeen,
+      MAX(timestamp) AS lastSeen
+    FROM events
+    WHERE name = '${escName}' AND sessionId IS NOT NULL
+    GROUP BY sessionId, agent, project
+    ORDER BY lastSeen DESC
+    LIMIT 200
+  `);
+}
+
 /**
  * Skills are user prompts of the form `/word ...`. SQLite's REGEXP isn't
  * available without a custom function, so we use a LIKE pattern: the first
