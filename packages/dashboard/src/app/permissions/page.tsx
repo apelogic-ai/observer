@@ -2,14 +2,16 @@
 
 import type React from "react";
 import { useMemo, useState } from "react";
-import { usePermissions, useExistingPermissions, type DashboardFilters } from "@/hooks/use-dashboard";
+import { usePermissions, useExistingPermissions, useDetectedTargets, type DashboardFilters, type PermissionsTarget } from "@/hooks/use-dashboard";
 import { useFilters } from "@/hooks/use-filters";
 import { PageHeader } from "@/components/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { formatNumber } from "@/lib/format";
 import type { PermissionCategory, PermissionRow } from "@/lib/queries";
-import { mergeAllowlists, parseAllowEntry, type MergeResult } from "@/lib/permissions-merge";
+import { mergeAllowlists, parseAllowEntry, subsumes, type MergeResult } from "@/lib/permissions-merge";
+import { formatCodexRules } from "@/lib/codex-format";
+import { parseCodexRules, expandToAllowlist } from "@/lib/codex-parse";
 
 /**
  * Permissions analysis. Surfaces what tools the agent actually used
@@ -153,7 +155,26 @@ export default function PermissionsPage() {
   // currently-selected project. The hook fetches only when project
   // changes; we feed the result into the merge textarea below so the
   // page is useful without copy-paste.
-  const fetchedExisting = useExistingPermissions(filters.project);
+  // Target = which agent's settings we're auto-loading + emitting.
+  // `null` = "Auto" mode (the default): follow the agent filter when
+  // it's specific, fall back to whichever agent the user has installed.
+  // Manually picking a target locks it in until the user picks Auto
+  // again.
+  const [targetOverride, setTargetOverride] = useState<PermissionsTarget | null>(null);
+  const detected = useDetectedTargets();
+  const target = useMemo<PermissionsTarget>(() => {
+    if (targetOverride) return targetOverride;
+    if (filters.agent === "codex") return "codex";
+    if (filters.agent === "claude_code") return "claude";
+    // No agent filter (or some other agent like cursor) → use detect.
+    if (detected) {
+      if (detected.codex && !detected.claude) return "codex";
+      // Default to claude when both exist or neither does — most
+      // common today; switching is a single click away.
+    }
+    return "claude";
+  }, [targetOverride, filters.agent, detected]);
+  const fetchedExisting = useExistingPermissions(filters.project, target);
   // Explicit user toggles. Anything not in the map falls back to the
   // default-selection rule keyed off `bashGranularity`. Keeping
   // overrides separate avoids the React 19 set-state-in-effect rule
@@ -212,7 +233,14 @@ export default function PermissionsPage() {
     fetchedExisting.allow.length > 0
   ) {
     setPrevAutoLoadKey(autoLoadKey);
-    setExistingJson(JSON.stringify({ permissions: { allow: fetchedExisting.allow } }, null, 2));
+    // Match the textarea's format to the target. For Codex we paint
+    // `prefix_rule(...)` text so the user can edit in the format
+    // they recognise; the parser below reads it back in the same form.
+    setExistingJson(
+      target === "codex"
+        ? formatCodexRules(fetchedExisting.allow)
+        : JSON.stringify({ permissions: { allow: fetchedExisting.allow } }, null, 2),
+    );
   }
 
   // Default selection — derived purely from rows + granularity:
@@ -237,16 +265,28 @@ export default function PermissionsPage() {
     return defaultIncludes.has(k);
   }
 
-  // Set of allowlistEntries the user already has in their settings
-  // files (auto-loaded). Used to color rows: brand-orange for "you
-  // already have this", blue for "we suggest adding". Built once per
-  // fetch instead of per-row to avoid quadratic lookups.
-  const existingEntrySet = useMemo(() => {
-    return new Set(fetchedExisting?.allow ?? []);
+  // Pre-parse the loaded existing entries once. The per-row check
+  // below uses subsumption (either direction) rather than exact-equal,
+  // so a user with narrow rules like `Shell(sed -i 's/x/y/' …)`
+  // surfaces `Shell(sed:*)` as "in your settings" (you have related
+  // sed rules), and a user with `Bash(git:*)` surfaces `Bash(git
+  // status:*)` rows as "in your settings" (covered by your broader
+  // wildcard). Exact-match alone misses the most common configurations.
+  const existingParsed = useMemo(() => {
+    const list = fetchedExisting?.allow ?? [];
+    return list.map((raw) => parseAllowEntry(raw)).filter((e): e is NonNullable<typeof e> => e !== null);
   }, [fetchedExisting]);
+  const existingExactSet = useMemo(() => new Set(fetchedExisting?.allow ?? []), [fetchedExisting]);
 
   function isExisting(r: PermissionRow): boolean {
-    return existingEntrySet.has(r.allowlistEntry);
+    if (existingExactSet.has(r.allowlistEntry)) return true;
+    const a = parseAllowEntry(r.allowlistEntry);
+    if (!a) return false;
+    for (const b of existingParsed) {
+      if (a.tool !== b.tool) continue;
+      if (subsumes(a, b) || subsumes(b, a)) return true;
+    }
+    return false;
   }
 
   const grouped = useMemo(() => {
@@ -278,11 +318,18 @@ export default function PermissionsPage() {
       .sort();
   }, [rows, overrides, defaultIncludes]);
 
-  // Try to extract `permissions.allow` from whatever the user pasted.
-  // Accept either a full settings.json shape or a raw array.
+  // Parse the textarea content according to the current target.
+  //   target=claude — JSON, either { permissions: { allow: [...] } } or a raw array.
+  //   target=codex  — `prefix_rule(...)` blocks, normalized to `Shell(verb:*)`
+  //                   to match the agent's row tags.
   const existingAllow = useMemo<{ list: string[]; error: string | null }>(() => {
     const trimmed = existingJson.trim();
     if (!trimmed) return { list: [], error: null };
+    if (target === "codex") {
+      const { rules, errors } = parseCodexRules(trimmed);
+      const list = expandToAllowlist(rules, "Shell");
+      return { list, error: errors[0] ?? null };
+    }
     try {
       const parsed = JSON.parse(trimmed);
       if (Array.isArray(parsed)) {
@@ -296,7 +343,7 @@ export default function PermissionsPage() {
     } catch (e) {
       return { list: [], error: `Invalid JSON: ${(e as Error).message}` };
     }
-  }, [existingJson]);
+  }, [existingJson, target]);
 
   // Suggested broadenings: verbs that appear in the user's existing
   // list multiple times as exact (non-wildcard) Bash commands. Surfacing
@@ -346,11 +393,13 @@ export default function PermissionsPage() {
 
   // What's shown in the output card / copied. Falls back to candidate
   // when no existing JSON is pasted, so this page is useful from a
-  // cold start as well as for incremental merges.
+  // cold start as well as for incremental merges. Format depends on
+  // the target: Claude Code gets JSON, Codex gets `prefix_rule(...)`.
   const settingsJson = useMemo(() => {
     const allow = existingAllow.list.length > 0 ? merge.merged : candidateWithSuggestions;
+    if (target === "codex") return formatCodexRules(allow);
     return JSON.stringify({ permissions: { allow } }, null, 2);
-  }, [existingAllow.list.length, merge.merged, candidateWithSuggestions]);
+  }, [existingAllow.list.length, merge.merged, candidateWithSuggestions, target]);
 
   function toggle(r: PermissionRow): void {
     const k = rowKey(r);
@@ -422,6 +471,25 @@ export default function PermissionsPage() {
         </CardHeader>
         <CardContent className="space-y-2">
           <div className="flex items-center gap-3 text-sm flex-wrap">
+            <span className="text-muted-foreground">Target:</span>
+            <select
+              value={targetOverride ?? "auto"}
+              onChange={(e) => {
+                const v = e.target.value;
+                setTargetOverride(v === "auto" ? null : v as PermissionsTarget);
+              }}
+              className="bg-muted border border-border rounded px-2 py-1 text-xs"
+              aria-label="Target agent"
+            >
+              <option value="auto">
+                Auto
+                {targetOverride === null && ` (${target === "codex" ? "Codex" : "Claude Code"})`}
+              </option>
+              <option value="claude">Claude Code</option>
+              <option value="codex">Codex</option>
+              <option value="cursor" disabled>Cursor (coming soon)</option>
+            </select>
+            <span className="mx-1 h-4 w-px bg-border" aria-hidden="true" />
             <span className="text-muted-foreground">Bash granularity:</span>
             <div className="flex gap-1 rounded-lg border border-border p-1">
               {(["verb", "subcommand"] as const).map((g) => (
@@ -627,39 +695,24 @@ export default function PermissionsPage() {
       <Card>
         <CardHeader className="flex flex-row items-center justify-between gap-3">
           <CardTitle>
-            settings.json {existingAllow.list.length > 0 && <span className="text-sm font-normal text-muted-foreground">(merged)</span>}
+            {target === "codex" ? "default.rules" : "settings.json"}
+            {existingAllow.list.length > 0 && <span className="ml-2 text-sm font-normal text-muted-foreground">(merged)</span>}
           </CardTitle>
-          <div className="flex items-center gap-3">
-            <label className="flex items-center gap-2 text-xs text-muted-foreground">
-              Target:
-              <select
-                disabled
-                value="claude-code"
-                onChange={() => { /* placeholder until we add real targets */ }}
-                className="bg-muted border border-border rounded px-2 py-1 text-xs"
-                aria-label="Target agent"
-              >
-                <option value="claude-code">Claude Code</option>
-                <option value="codex" disabled>Codex (coming soon)</option>
-                <option value="cursor" disabled>Cursor (coming soon)</option>
-              </select>
-            </label>
-            <Button
-              onClick={copy}
-              variant="outline"
-              size="sm"
-              className={copied ? "text-brand border-brand" : ""}
-            >
-              {copied ? "✓ Copied" : "Copy"}
-            </Button>
-          </div>
+          <Button
+            onClick={copy}
+            variant="outline"
+            size="sm"
+            className={copied ? "text-brand border-brand" : ""}
+          >
+            {copied ? "✓ Copied" : "Copy"}
+          </Button>
         </CardHeader>
         <CardContent>
           <pre className="text-xs bg-muted p-4 rounded overflow-x-auto">{settingsJson}</pre>
           <p className="mt-2 text-xs text-muted-foreground">
-            Paste into <code>~/.claude/settings.json</code>. When Bash verb-level
-            and subcommand-level entries are both checked, the subcommand
-            entries are removed as redundant.
+            {target === "codex"
+              ? <>Paste into <code>~/.codex/rules/default.rules</code>. Sibling subcommands of one verb are collapsed into a single nested-pattern rule.</>
+              : <>Paste into <code>~/.claude/settings.json</code>. When Bash verb-level and subcommand-level entries are both checked, the subcommand entries are removed as redundant.</>}
           </p>
         </CardContent>
       </Card>

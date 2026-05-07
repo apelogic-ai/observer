@@ -315,27 +315,48 @@ export function usePermissions(filters: DashboardFilters) {
  * shape once resolved (with empty arrays when nothing was found, never
  * null on the inner fields). Re-fetches when the project changes.
  */
-export function useExistingPermissions(project: string | null) {
+export type PermissionsTarget = "claude" | "codex";
+
+export interface DetectedTargets { claude: boolean; codex: boolean }
+
+/**
+ * One-shot probe for which agents the user actually has installed.
+ * The page uses this to default the Target selector to whatever they
+ * have, so a Codex-only user doesn't see "Claude Code" as the default
+ * and a Claude-only user doesn't see "Codex" pre-selected.
+ */
+export function useDetectedTargets() {
+  const [data, setData] = useState<DetectedTargets | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetchJson<DetectedTargets>("/api/permissions/detect-targets")
+      .then((d) => { if (!cancelled) setData(d); })
+      .catch(() => { if (!cancelled) setData({ claude: false, codex: false }); });
+    return () => { cancelled = true; };
+  }, []);
+  return data;
+}
+
+export function useExistingPermissions(project: string | null, target: PermissionsTarget = "claude") {
   const [data, setData] = useState<ExistingSettings | null>(null);
-  // Reset stale data the moment the project changes (don't wait for
-  // the new fetch to land). React 19's set-state-in-effect rule
-  // disallows synchronous setState inside useEffect; this prev-prop
-  // pattern is the documented escape hatch.
-  const [prevProject, setPrevProject] = useState(project);
-  if (prevProject !== project) {
-    setPrevProject(project);
+  // Reset stale data the moment the project or target changes — don't
+  // show one target's results while the next is in flight.
+  const key = `${project ?? ""}|${target}`;
+  const [prevKey, setPrevKey] = useState(key);
+  if (prevKey !== key) {
+    setPrevKey(key);
     setData(null);
   }
 
   useEffect(() => {
     if (!project) return;
     let cancelled = false;
-    const url = `/api/permissions/existing?project=${encodeURIComponent(project)}`;
+    const url = `/api/permissions/existing?project=${encodeURIComponent(project)}&target=${target}`;
     fetchJson<ExistingSettings>(url)
       .then((d) => { if (!cancelled) setData(d); })
       .catch(() => { if (!cancelled) setData({ allow: [], sources: [], repoLocal: null }); });
     return () => { cancelled = true; };
-  }, [project]);
+  }, [project, target]);
 
   return data;
 }

@@ -19,7 +19,7 @@ import {
   getCommitDetail, getSessionCommits, getSessionSummary, getSessionDetail,
   type Filters,
 } from "./queries";
-import { getExistingSettings } from "./permissions-existing";
+import { getExistingSettings, detectTargets } from "./permissions-existing";
 
 /** Extract common filters from query params. Unparseable values are dropped
  *  rather than passed through — prevents `NaN` from flowing into SQL
@@ -69,8 +69,11 @@ const routes: Record<string, Handler> = {
     // project selected?"), so we no-op here.
     const project = url.searchParams.get("project");
     if (!project) return { allow: [], sources: [], repoLocal: null };
-    return getExistingSettings(project);
+    const targetParam = url.searchParams.get("target");
+    const target = targetParam === "codex" ? "codex" : "claude";
+    return getExistingSettings(project, { target });
   },
+  "/api/permissions/detect-targets": async () => detectTargets(),
   "/api/projects": async (url) => getProjects(filters(url)),
   "/api/models": async (url) => getModels(filters(url)),
   "/api/sessions": async (url) => getSessions(filters(url), parsePositiveInt(url.searchParams.get("limit")) ?? 50),

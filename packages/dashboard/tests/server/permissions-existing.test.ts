@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { initDb } from "../../server/db";
-import { getExistingSettings } from "../../server/permissions-existing";
+import { getExistingSettings, detectTargets } from "../../server/permissions-existing";
 
 /**
  * `getExistingSettings(project)` reads the three places Claude Code
@@ -148,6 +148,55 @@ describe("getExistingSettings", () => {
     expect(local).toBeDefined();
     expect(local!.error).toMatch(/json|parse/i);
     expect(local!.count).toBe(0);
+  });
+
+  it("target=codex reads ~/.codex/rules/default.rules and normalizes to Bash(verb:*)", async () => {
+    // Plant a Codex rules file in the fake home, exercising:
+    //   - flat single-token rule              → Bash(bun:*)
+    //   - verb + subcommand                    → Bash(npm install:*)
+    //   - nested-alternatives                  → Bash(git diff:*) + Bash(git status:*)
+    // user-global is the only source label Codex documents today.
+    const codexHome = mkdtempSync(join(tmpdir(), "observer-codex-home-"));
+    mkdirSync(join(codexHome, ".codex", "rules"), { recursive: true });
+    writeFileSync(join(codexHome, ".codex", "rules", "default.rules"), `
+      # Allow common git ops
+      prefix_rule(pattern=["git", ["status", "diff"]], decision="allow")
+      prefix_rule(pattern=["bun"], decision="allow")
+      prefix_rule(pattern=["npm", "install"], decision="allow")
+      # decision=prompt rules don't grant permission — they shouldn't surface
+      prefix_rule(pattern=["git", "push"], decision="prompt")
+    `);
+    const r = await getExistingSettings("acme", { homeDir: codexHome, target: "codex" });
+    // Normalized to Shell(...) — same prefix the agent emits for
+    // Codex shell tool calls, so per-row "in your settings" coloring
+    // can match exact-equal.
+    expect(r.allow.sort()).toEqual([
+      "Shell(bun:*)",
+      "Shell(git diff:*)",
+      "Shell(git status:*)",
+      "Shell(npm install:*)",
+    ]);
+    expect(r.sources).toHaveLength(1);
+    expect(r.sources[0]!.label).toBe("user-global");
+    expect(r.sources[0]!.path).toMatch(/\.codex\/rules\/default\.rules$/);
+  });
+
+  it("detectTargets reports presence of each agent's user-global file", () => {
+    // Only claude — codex file absent.
+    const claudeOnly = mkdtempSync(join(tmpdir(), "observer-detect-c-"));
+    mkdirSync(join(claudeOnly, ".claude"), { recursive: true });
+    writeFileSync(join(claudeOnly, ".claude", "settings.json"), "{}");
+    expect(detectTargets({ homeDir: claudeOnly })).toEqual({ claude: true, codex: false });
+
+    // Only codex.
+    const codexOnly = mkdtempSync(join(tmpdir(), "observer-detect-x-"));
+    mkdirSync(join(codexOnly, ".codex", "rules"), { recursive: true });
+    writeFileSync(join(codexOnly, ".codex", "rules", "default.rules"), "");
+    expect(detectTargets({ homeDir: codexOnly })).toEqual({ claude: false, codex: true });
+
+    // Neither.
+    const empty = mkdtempSync(join(tmpdir(), "observer-detect-empty-"));
+    expect(detectTargets({ homeDir: empty })).toEqual({ claude: false, codex: false });
   });
 
   it("only reads files (no shell, no env, no network)", async () => {

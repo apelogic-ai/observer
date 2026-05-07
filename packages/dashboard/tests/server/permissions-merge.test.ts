@@ -47,6 +47,18 @@ describe("parseAllowEntry", () => {
     expect(parseAllowEntry("")).toBeNull();
     expect(parseAllowEntry("Bash(unterminated")).toBeNull();
   });
+
+  it("treats Shell(...) the same as Bash(...) — Codex shell tool tokenizes + recognizes wildcards", () => {
+    // The agent normalizer emits Shell(...) (PascalCase) for Codex's
+    // shell tool. The merge layer must tokenize + treat the trailing
+    // `:*` as a wildcard, otherwise Codex rows can never subsume the
+    // narrow long-form entries the user has in ~/.codex/rules.
+    const e = parseAllowEntry("Shell(sed:*)");
+    expect(e!.tool).toBe("Shell");
+    expect(e!.tokens).toEqual(["sed"]);
+    expect(e!.wildcard).toBe(true);
+    expect(e!.reasonable).toBe(true);
+  });
 });
 
 describe("subsumes", () => {
@@ -78,6 +90,16 @@ describe("subsumes", () => {
   it("identity holds for opaque entries (exact dedup)", () => {
     expect(subsumes(p("WebFetch(domain:github.com)"), p("WebFetch(domain:github.com)"))).toBe(true);
     expect(subsumes(p("WebFetch(domain:github.com)"), p("WebFetch(domain:other.com)"))).toBe(false);
+  });
+
+  it("Shell(verb:*) subsumes longer Shell(verb sub:*) entries (Codex parity with Bash)", () => {
+    // Drives the orange-coloring on the verb-level row in the
+    // permissions page when the user's existing Codex rules contain
+    // narrow long-form entries (e.g. `Shell(sed -i ...:*)`). Without
+    // this, the parent row stays blue while children show orange.
+    expect(subsumes(p("Shell(sed:*)"), p("Shell(sed -i:*)"))).toBe(true);
+    expect(subsumes(p("Shell(git:*)"), p("Shell(git status:*)"))).toBe(true);
+    expect(subsumes(p("Shell(git status:*)"), p("Shell(git:*)"))).toBe(false);
   });
 });
 
