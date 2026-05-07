@@ -14,7 +14,7 @@ import {
   getStats, getActivity, getHeatmap, getTokens, getTools, getMotifs, getStumbles, getDarkSpend, getZeroCode,
   getSecurityFindings, getSecurityTimeline, getSecuritySessions, getPermissions,
   getProjects, getModels, getSessions, getProjectList, getModelList, getAgentList, getToolList,
-  getToolDetail, getSkills,
+  getToolDetail, getSkills, getSkillUsage, getSkillSessions,
   getGitStats, getGitTimeline, getGitCommits, getGitSessions,
   getCommitDetail, getSessionCommits, getSessionSummary, getSessionDetail,
   type Filters,
@@ -88,6 +88,12 @@ const routes: Record<string, Handler> = {
     return getToolDetail(tool, filters(url));
   },
   "/api/skills": async (url) => getSkills(filters(url)),
+  "/api/skills/usage": async (url) => getSkillUsage(filters(url)),
+  "/api/skills/sessions": async (url) => {
+    const name = url.searchParams.get("name");
+    if (!name) return { error: "name param required" };
+    return getSkillSessions(name, filters(url));
+  },
   "/api/project-list": async () => getProjectList(),
   "/api/model-list": async () => getModelList(),
   "/api/agent-list": async () => getAgentList(),

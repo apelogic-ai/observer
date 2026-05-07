@@ -132,12 +132,14 @@ describe("parseClaudeEntry", () => {
   });
 
   it("normalizes Skill meta-tool to skill:{name}", () => {
+    // Real Claude Code raw shape — the input field is `skill`, not
+    // `command`. Confirmed by inspecting ~/.claude/projects logs.
     const raw = {
       type: "assistant",
       timestamp: "2026-04-08T10:00:01.000Z",
       message: {
         content: [
-          { type: "tool_use", name: "Skill", id: "toolu_skill1", input: { command: "pdf" } },
+          { type: "tool_use", name: "Skill", id: "toolu_skill1", input: { skill: "pdf" } },
         ],
       },
     };
@@ -146,18 +148,21 @@ describe("parseClaudeEntry", () => {
     expect(entry!.toolCallId).toBe("toolu_skill1");
   });
 
-  it("normalizes Skill meta-tool with namespaced plugin skill", () => {
+  it("normalizes Skill meta-tool with namespaced plugin skill (e.g. git-flow:ship)", () => {
+    // Plugin skills are stored in `input.skill` as `<plugin>:<skill>`.
+    // The agent re-exports them prefixed with skill:, so the dashboard
+    // shows skill:git-flow:ship for /ship invocations.
     const raw = {
       type: "assistant",
       timestamp: "2026-04-08T10:00:01.000Z",
       message: {
         content: [
-          { type: "tool_use", name: "Skill", id: "toolu_skill2", input: { command: "ms-office-suite:pdf" } },
+          { type: "tool_use", name: "Skill", id: "toolu_skill2", input: { skill: "git-flow:ship" } },
         ],
       },
     };
     const entry = parseClaudeEntry(raw, sessionId);
-    expect(entry!.toolName).toBe("skill:ms-office-suite:pdf");
+    expect(entry!.toolName).toBe("skill:git-flow:ship");
   });
 
   it("captures tool_use_id on tool_result entries", () => {

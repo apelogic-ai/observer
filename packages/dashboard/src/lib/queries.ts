@@ -172,6 +172,25 @@ export interface SkillRow {
   count: number;
 }
 
+export interface SkillUsageRow {
+  name: string;
+  count: number;
+  sessions: number;
+  projects: number;
+  firstSeen: string;
+  lastSeen: string;
+  agents: string[];
+}
+
+export interface SkillSessionRow {
+  sessionId: string;
+  agent: string;
+  project: string;
+  count: number;
+  firstSeen: string;
+  lastSeen: string;
+}
+
 // ── Git Events ──────────────────────────────────────────────────
 
 export interface GitStats {

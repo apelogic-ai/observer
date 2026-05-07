@@ -10,6 +10,7 @@ const NAV_ITEMS: { label: string; href: string }[] = [
   { label: "Zero code",  href: "/zero-code" },
   { label: "Leaks",      href: "/security" },
   { label: "Permissions", href: "/permissions" },
+  { label: "Skills",     href: "/skills" },
 ];
 
 /**

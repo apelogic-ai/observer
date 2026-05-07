@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import type {
   Stats, ActivityRow, HeatmapRow, TokenRow, ToolRow, ProjectRow, ModelRow,
-  SessionRow, SkillRow, ToolDetail, StumbleRow, DarkSpendRow,
+  SessionRow, SkillRow, SkillUsageRow, SkillSessionRow, ToolDetail, StumbleRow, DarkSpendRow,
   SecurityFindingRow, SecurityTimelineRow, SecuritySessionRow,
   PermissionRow, ExistingSettings,
   GitStats, GitTimelineRow, GitCommitRow, GitSessionRow,
@@ -294,6 +294,49 @@ export function useDarkSpend(filters: DashboardFilters, limit = 50) {
 
 export function useZeroCode(filters: DashboardFilters, limit = 50) {
   return useSessionRollupEndpoint("/api/zero-code", filters, limit);
+}
+
+export function useSkillUsage(filters: DashboardFilters) {
+  const [rows, setRows] = useState<SkillUsageRow[] | null>(null);
+  const { days, project, agent } = filters;
+
+  useEffect(() => {
+    let cancelled = false;
+    const params = buildParams({ days, project, agent });
+    fetchJson<SkillUsageRow[]>(`/api/skills/usage${params}`)
+      .then((d) => { if (!cancelled) setRows(d); })
+      .catch(() => { if (!cancelled) setRows([]); });
+    return () => { cancelled = true; };
+  }, [days, project, agent]);
+
+  return rows;
+}
+
+export function useSkillSessions(name: string | null, filters: DashboardFilters) {
+  const [rows, setRows] = useState<SkillSessionRow[] | null>(null);
+  const { days, project, agent } = filters;
+
+  // Reset to "loading" whenever the inputs change. Done in render-phase
+  // via the prev-key pattern so we don't trip Next 16's
+  // react-hooks/set-state-in-effect rule.
+  const key = `${name ?? ""}|${days ?? ""}|${project ?? ""}|${agent ?? ""}`;
+  const [prevKey, setPrevKey] = useState(key);
+  if (prevKey !== key) {
+    setPrevKey(key);
+    setRows(null);
+  }
+
+  useEffect(() => {
+    if (!name) return;
+    let cancelled = false;
+    const params = buildParams({ days, project, agent }, { name });
+    fetchJson<SkillSessionRow[]>(`/api/skills/sessions${params}`)
+      .then((d) => { if (!cancelled) setRows(d); })
+      .catch(() => { if (!cancelled) setRows([]); });
+    return () => { cancelled = true; };
+  }, [name, days, project, agent]);
+
+  return rows;
 }
 
 export function usePermissions(filters: DashboardFilters) {

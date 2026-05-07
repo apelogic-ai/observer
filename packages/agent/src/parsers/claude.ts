@@ -105,10 +105,16 @@ export function parseClaudeEntry(
     const rawName = (firstBlock.name as string) || "unknown";
     const input = firstBlock.input as Record<string, unknown> | undefined;
 
-    // Skill meta-tool: name="Skill", input.command="pdf" → toolName="skill:pdf"
-    const isSkill = rawName === "Skill" && input?.command;
-    const toolName = isSkill
-      ? `skill:${input!.command}`
+    // Skill meta-tool: raw shape is { name: "Skill", input: { skill: "pdf" } }
+    // or { skill: "git-flow:ship" } for plugin-namespaced skills.
+    // Normalize to toolName="skill:<name>" so the dashboard can group
+    // per-skill usage. (`input.command` is accepted as a fallback; some
+    // older fixtures used that field, no live data does today.)
+    const skillName = rawName === "Skill"
+      ? (input?.skill ?? input?.command)
+      : null;
+    const toolName = skillName != null
+      ? `skill:${String(skillName)}`
       : normalizeToolName(rawName);
 
     return {
@@ -117,7 +123,7 @@ export function parseClaudeEntry(
       role: "assistant",
       toolName,
       toolCallId: (firstBlock.id as string) ?? null,
-      command: !isSkill && input?.command ? truncate(String(input.command), 200) : null,
+      command: skillName == null && input?.command ? truncate(String(input.command), 200) : null,
       filePath: input?.file_path ? String(input.file_path) : null,
     };
   }
