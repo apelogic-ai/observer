@@ -70,7 +70,7 @@ export function parseAllowEntry(raw: string): AllowEntry | null {
   // Observer emits :* form; users frequently have the space form.
   // For everything else (e.g. WebFetch(domain:...)), the colon is
   // semantic, not a wildcard — leave alone.
-  if (tool === "Bash" || tool === "shell") {
+  if (tool === "Bash" || tool === "Shell") {
     let body = inner;
     let wildcard = false;
     if (body.endsWith(":*")) { body = body.slice(0, -2).trim(); wildcard = true; }
