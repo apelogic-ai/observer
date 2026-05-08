@@ -28,6 +28,48 @@ window.
    (timestamp window, branch overlap, Co-Authored-By trailer matching).
 3. Re-scan + verify the ratio drops.
 
+**Sub-bug found and fixed.** The dashboard's ingest-time session
+backfill used to promote ANY orphan commit matching a session's
+project + timestamp window to `agentAuthored = 1`, including human
+commits the user happened to make during an agent session — that
+silently inflated `agent_commits` by ~35% on the live data (279 of
+787 previously-tagged commits were actually human). The backfill
+now narrows its target to commits already tagged agent-authored at
+scan time; ratio integrity is restored.
+
+**Step 2 status (cross-project + activity-window backfill).** Done
+in the same workstream:
+
+- session.project ≠ commit.project no longer blocks attribution. A
+  second pass keys on `agentName` + nearest tool-call activity
+  (±60min window, closest-activity-wins, ties abstain). Catches the
+  diagnosed "Claude Code launched from db-mcp shells into boost-dbt
+  and commits" pattern.
+- The remaining ~6 orphans on the live dashboard need >2h-out
+  matching to find any candidate. We tested wider windows and they
+  start producing coincidental links; left as legitimate gaps.
+
+Coverage went 97.5% → 98.8% with the corrected denominator.
+
+**Open: agent-side scanner has the same promotion bug.**
+`packages/agent/src/git/scanner.ts:259` (`attributeFromSessions`)
+flips `agentAuthored=true` on any commit that falls inside a
+session window. Same shape as the dashboard backfill bug, but it
+runs at scan time so the false positives end up in normalized
+on-disk data — my dashboard-side fix only stops new promotions, not
+historical ones.
+
+Particularly bad for codex: codex doesn't write `Co-Authored-By`
+trailers, so 100% of its 211 "agent commits" in the live data are
+attributed via this session-window heuristic. Until the agent is
+patched and a re-scan runs, "codex agent commits" includes humans
+who happened to commit during a codex session.
+
+Fixing this is an agent-side change (separate package) plus a
+forced re-scan. Out of scope for the dashboard PR; tracked here so
+it surfaces when item #2 (parser changes) gets picked up — that
+work also needs a re-scan, so the two could ship together.
+
 **Boundary.** Don't conflate this with the validation panel or any
 new productivity card. One PR per behaviour change.
 

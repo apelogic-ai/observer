@@ -1,0 +1,257 @@
+import { describe, it, expect, beforeAll } from "bun:test";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { initDb } from "../../server/db";
+import { getGitStats } from "../../server/queries";
+
+/**
+ * The first-pass session-attribution backfill in db.ts requires
+ * `session.project === commit.project`. That misses the real case
+ * surfaced by the live dashboard: Claude Code launched from cwd
+ * `db-mcp` (so session project=db-mcp) calls a tool that shells into
+ * the boost-dbt repo and commits there. The commit has
+ * `agentName="claude_code"` and sits inside the session's timestamp
+ * window, but the project labels disagree — so the project-equality
+ * pass leaves it orphan.
+ *
+ * Fallback we add: for orphans surviving the project pass, try
+ * matching by `agentName` only — if exactly one session of that
+ * agent covers the commit's timestamp window, link them. Multiple
+ * matches stay orphan (we don't guess between concurrent sessions).
+ *
+ * Each test sits in its own file with its own initDb so the global
+ * SQLite singleton in db.ts can't bleed across cases.
+ */
+
+function writeJsonl(path: string, rows: Array<Record<string, unknown>>): void {
+  mkdirSync(join(path, ".."), { recursive: true });
+  writeFileSync(path, rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
+}
+
+const TODAY = new Date().toISOString().slice(0, 10);
+const T_COMMIT = `${TODAY}T01:00:00Z`;
+const T_SESSION_START = `${TODAY}T00:30:00Z`;
+const T_SESSION_END = `${TODAY}T01:30:00Z`;
+
+describe("backfill: cross-project agent-name fallback", () => {
+  it("links via agentName + time window when no project-matching session covers the commit", async () => {
+    process.env.OBSERVER_SKIP_FOREIGN_FILTER = "1";
+    const dataDir = mkdtempSync(join(tmpdir(), "observer-attr-fallback-"));
+    // claude_code session in alpha covering T_COMMIT.
+    writeJsonl(join(dataDir, TODAY, "claude_code", "s_cross.jsonl"), [
+      { id: "x1", timestamp: T_SESSION_START, agent: "claude_code",
+        sessionId: "s_cross", project: "alpha", entryType: "tool_call",
+        toolName: "Bash", tokenUsage: { input: 10, output: 5 } },
+      { id: "x2", timestamp: T_SESSION_END, agent: "claude_code",
+        sessionId: "s_cross", project: "alpha", entryType: "tool_call",
+        toolName: "Bash", tokenUsage: { input: 10, output: 5 } },
+    ]);
+    // Orphan agent commit in a DIFFERENT project (ghost) at T_COMMIT.
+    writeJsonl(join(dataDir, TODAY, "git", "events.jsonl"), [
+      { id: "g_orphan", timestamp: T_COMMIT, eventType: "commit",
+        project: "ghost", repo: "owner/ghost", branch: "main",
+        commitSha: "deadbeef", filesChanged: 1, insertions: 5, deletions: 0,
+        agentAuthored: true, agentName: "claude_code",
+        author: "agent@x.com", message: "orphan agent commit" },
+    ]);
+    await initDb(dataDir);
+
+    const s = await getGitStats({ days: 1 });
+    expect(s.linked_agent_commits).toBe(1);
+    expect(s.unlinked_agent_commits).toBe(0);
+  });
+});
+
+describe("backfill: ambiguous fallback stays orphan", () => {
+  it("does NOT link when multiple sessions of the same agent cover the window", async () => {
+    process.env.OBSERVER_SKIP_FOREIGN_FILTER = "1";
+    const dataDir = mkdtempSync(join(tmpdir(), "observer-attr-ambig-"));
+    // Two concurrent claude_code sessions, different projects.
+    writeJsonl(join(dataDir, TODAY, "claude_code", "s_a.jsonl"), [
+      { id: "a1", timestamp: T_SESSION_START, agent: "claude_code",
+        sessionId: "s_a", project: "alpha", entryType: "tool_call",
+        toolName: "Bash", tokenUsage: { input: 10, output: 5 } },
+      { id: "a2", timestamp: T_SESSION_END, agent: "claude_code",
+        sessionId: "s_a", project: "alpha", entryType: "tool_call",
+        toolName: "Bash", tokenUsage: { input: 10, output: 5 } },
+    ]);
+    writeJsonl(join(dataDir, TODAY, "claude_code", "s_b.jsonl"), [
+      { id: "b1", timestamp: T_SESSION_START, agent: "claude_code",
+        sessionId: "s_b", project: "beta", entryType: "tool_call",
+        toolName: "Bash", tokenUsage: { input: 10, output: 5 } },
+      { id: "b2", timestamp: T_SESSION_END, agent: "claude_code",
+        sessionId: "s_b", project: "beta", entryType: "tool_call",
+        toolName: "Bash", tokenUsage: { input: 10, output: 5 } },
+    ]);
+    writeJsonl(join(dataDir, TODAY, "git", "events.jsonl"), [
+      { id: "g_orphan", timestamp: T_COMMIT, eventType: "commit",
+        project: "ghost", repo: "owner/ghost", branch: "main",
+        commitSha: "deadbeef", filesChanged: 1, insertions: 5, deletions: 0,
+        agentAuthored: true, agentName: "claude_code",
+        author: "agent@x.com", message: "orphan agent commit" },
+    ]);
+    await initDb(dataDir);
+
+    const s = await getGitStats({ days: 1 });
+    expect(s.unlinked_agent_commits).toBe(1);
+    expect(s.linked_agent_commits).toBe(0);
+  });
+});
+
+describe("backfill: tight activity window, not session bounds", () => {
+  it("treats a long-running session with no nearby activity as NOT a match", async () => {
+    // Real shape from the live dashboard: a long-running Claude Code
+    // conversation has its first tool_call far before the commit and
+    // its last tool_call far after, so session-bounds matching would
+    // include it as a candidate. But it has no actual activity near
+    // the commit timestamp — the agent did other work, then sat
+    // idle. The fallback must use proximity to actual tool_calls,
+    // not the outer [start, end] envelope, otherwise long sessions
+    // shadow the real culprit and we get ambiguous (or wrong) links.
+    process.env.OBSERVER_SKIP_FOREIGN_FILTER = "1";
+    const dataDir = mkdtempSync(join(tmpdir(), "observer-attr-tightwin-"));
+    // Long-running session with activity FAR from the commit (2h+).
+    // Bounds = [TODAY 00:30, TODAY 23:30] — would cover T_COMMIT.
+    writeJsonl(join(dataDir, TODAY, "claude_code", "s_long.jsonl"), [
+      { id: "long1", timestamp: `${TODAY}T00:30:00Z`, agent: "claude_code",
+        sessionId: "s_long", project: "alpha", entryType: "tool_call",
+        toolName: "Bash", tokenUsage: { input: 10, output: 5 } },
+      { id: "long2", timestamp: `${TODAY}T23:30:00Z`, agent: "claude_code",
+        sessionId: "s_long", project: "alpha", entryType: "tool_call",
+        toolName: "Bash", tokenUsage: { input: 10, output: 5 } },
+    ]);
+    // Short session with activity right around the commit time.
+    writeJsonl(join(dataDir, TODAY, "claude_code", "s_short.jsonl"), [
+      { id: "short1", timestamp: `${TODAY}T00:50:00Z`, agent: "claude_code",
+        sessionId: "s_short", project: "beta", entryType: "tool_call",
+        toolName: "Bash", tokenUsage: { input: 10, output: 5 } },
+      { id: "short2", timestamp: `${TODAY}T01:10:00Z`, agent: "claude_code",
+        sessionId: "s_short", project: "beta", entryType: "tool_call",
+        toolName: "Bash", tokenUsage: { input: 10, output: 5 } },
+    ]);
+    writeJsonl(join(dataDir, TODAY, "git", "events.jsonl"), [
+      // Commit at T_COMMIT (01:00). s_short has activity at 00:50
+      // and 01:10 — both within ±30min. s_long's nearest activity
+      // is 23h away. Only s_short should qualify.
+      { id: "g_orphan", timestamp: T_COMMIT, eventType: "commit",
+        project: "ghost", repo: "owner/ghost", branch: "main",
+        commitSha: "deadbeef", filesChanged: 1, insertions: 5, deletions: 0,
+        agentAuthored: true, agentName: "claude_code",
+        author: "agent@x.com", message: "orphan agent commit" },
+    ]);
+    await initDb(dataDir);
+
+    const s = await getGitStats({ days: 1 });
+    expect(s.linked_agent_commits).toBe(1);
+    expect(s.unlinked_agent_commits).toBe(0);
+  });
+});
+
+describe("backfill: window covers realistic commit-to-activity gap", () => {
+  it("links a commit ~35min before the next session activity", async () => {
+    // Real shape from the live dashboard: a commit lands at 19:06,
+    // the next agent activity is at 19:39 (33min later) — the user
+    // committed shortly before re-engaging the agent. ±30min would
+    // miss this; ±60min picks it up cleanly. The window matters
+    // because Claude Code sessions are often "open and idle" — the
+    // commit fires while the human is finishing up before the agent
+    // becomes active again.
+    process.env.OBSERVER_SKIP_FOREIGN_FILTER = "1";
+    const dataDir = mkdtempSync(join(tmpdir(), "observer-attr-pre-activity-"));
+    writeJsonl(join(dataDir, TODAY, "claude_code", "s_after.jsonl"), [
+      { id: "after1", timestamp: `${TODAY}T01:35:00Z`, agent: "claude_code",
+        sessionId: "s_after", project: "alpha", entryType: "tool_call",
+        toolName: "Bash", tokenUsage: { input: 10, output: 5 } },
+      { id: "after2", timestamp: `${TODAY}T01:50:00Z`, agent: "claude_code",
+        sessionId: "s_after", project: "alpha", entryType: "tool_call",
+        toolName: "Bash", tokenUsage: { input: 10, output: 5 } },
+    ]);
+    writeJsonl(join(dataDir, TODAY, "git", "events.jsonl"), [
+      // Commit at 01:00; session's first tool_call is at 01:35,
+      // i.e. 35min later. Within ±60min, outside ±30min.
+      { id: "g_orphan", timestamp: T_COMMIT, eventType: "commit",
+        project: "ghost", repo: "owner/ghost", branch: "main",
+        commitSha: "deadbeef", filesChanged: 1, insertions: 5, deletions: 0,
+        agentAuthored: true, agentName: "claude_code",
+        author: "agent@x.com", message: "orphan agent commit" },
+    ]);
+    await initDb(dataDir);
+
+    const s = await getGitStats({ days: 1 });
+    expect(s.linked_agent_commits).toBe(1);
+    expect(s.unlinked_agent_commits).toBe(0);
+  });
+});
+
+describe("backfill: human commits stay human", () => {
+  it("does NOT promote a human-authored orphan commit even when it falls in an agent session window", async () => {
+    // Found while writing the per-project attribution test in
+    // commit-attribution.test.ts: the existing first-pass backfill
+    // sets agentAuthored=1 on ANY orphan commit that matches a
+    // session by project + timestamp window. So a human commit made
+    // during a paired session (user does a quick manual fix while
+    // Claude Code is busy elsewhere) gets silently promoted to
+    // agent-authored, inflating agent_commits by exactly the kind
+    // of work the metric is supposed to exclude.
+    //
+    // The fix: backfill should only fill sessionId on commits that
+    // were ALREADY agent-authored (Co-Authored-By trailer or
+    // explicit agentAuthored=true at scan time). Human commits stay
+    // human regardless of session overlap.
+    process.env.OBSERVER_SKIP_FOREIGN_FILTER = "1";
+    const dataDir = mkdtempSync(join(tmpdir(), "observer-attr-human-"));
+    // Active claude_code session in alpha, T_COMMIT inside its window.
+    writeJsonl(join(dataDir, TODAY, "claude_code", "s_active.jsonl"), [
+      { id: "a1", timestamp: T_SESSION_START, agent: "claude_code",
+        sessionId: "s_active", project: "alpha", entryType: "tool_call",
+        toolName: "Bash", tokenUsage: { input: 10, output: 5 } },
+      { id: "a2", timestamp: T_SESSION_END, agent: "claude_code",
+        sessionId: "s_active", project: "alpha", entryType: "tool_call",
+        toolName: "Bash", tokenUsage: { input: 10, output: 5 } },
+    ]);
+    // Human commit in the SAME project at T_COMMIT — falls in the
+    // session's window. This is the failure mode the test guards.
+    writeJsonl(join(dataDir, TODAY, "git", "events.jsonl"), [
+      { id: "g_human", timestamp: T_COMMIT, eventType: "commit",
+        project: "alpha", repo: "owner/alpha", branch: "main",
+        commitSha: "deadbeef", filesChanged: 1, insertions: 1, deletions: 0,
+        agentAuthored: false,
+        author: "human@x.com", message: "human commit during agent session" },
+    ]);
+    await initDb(dataDir);
+
+    const s = await getGitStats({ days: 1 });
+    expect(s.agent_commits).toBe(0);
+    expect(s.human_commits).toBe(1);
+    expect(s.linked_agent_commits).toBe(0);
+    expect(s.unlinked_agent_commits).toBe(0);
+  });
+});
+
+describe("backfill: no cross-agent linking", () => {
+  it("does NOT link a claude_code commit to a codex session even when only codex is active", async () => {
+    process.env.OBSERVER_SKIP_FOREIGN_FILTER = "1";
+    const dataDir = mkdtempSync(join(tmpdir(), "observer-attr-noagent-"));
+    writeJsonl(join(dataDir, TODAY, "codex", "s_codex.jsonl"), [
+      { id: "c1", timestamp: T_SESSION_START, agent: "codex",
+        sessionId: "s_codex", project: "alpha", entryType: "tool_call",
+        toolName: "shell", tokenUsage: { input: 10, output: 5 } },
+      { id: "c2", timestamp: T_SESSION_END, agent: "codex",
+        sessionId: "s_codex", project: "alpha", entryType: "tool_call",
+        toolName: "shell", tokenUsage: { input: 10, output: 5 } },
+    ]);
+    writeJsonl(join(dataDir, TODAY, "git", "events.jsonl"), [
+      { id: "g_orphan", timestamp: T_COMMIT, eventType: "commit",
+        project: "ghost", repo: "owner/ghost", branch: "main",
+        commitSha: "deadbeef", filesChanged: 1, insertions: 5, deletions: 0,
+        agentAuthored: true, agentName: "claude_code",
+        author: "agent@x.com", message: "orphan agent commit" },
+    ]);
+    await initDb(dataDir);
+
+    const s = await getGitStats({ days: 1 });
+    expect(s.unlinked_agent_commits).toBe(1);
+    expect(s.linked_agent_commits).toBe(0);
+  });
+});

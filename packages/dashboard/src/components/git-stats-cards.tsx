@@ -8,10 +8,20 @@ export function GitStatsCards({ stats }: { stats: GitStats }) {
   const agentPct = stats.total_commits > 0
     ? Math.round((stats.agent_commits / stats.total_commits) * 100)
     : 0;
+  // Attribution coverage: of the agent commits, how many actually link
+  // back to a captured session. Anything not 100% means the session
+  // backfill missed the commit (project mismatch, timestamp gap, …).
+  // Surfacing this matters because every session-level metric uses
+  // linked agent commits as its denominator.
+  const linkedPct = stats.agent_commits > 0
+    ? Math.round((stats.linked_agent_commits / stats.agent_commits) * 100)
+    : 0;
 
   const cards = [
     { label: "Total Commits", value: formatNumber(stats.total_commits) },
     { label: "Agent Commits", value: `${formatNumber(stats.agent_commits)} (${agentPct}%)` },
+    { label: "Agent Linked",   value: `${formatNumber(stats.linked_agent_commits)} (${linkedPct}%)` },
+    { label: "Agent Unlinked", value: formatNumber(stats.unlinked_agent_commits) },
     { label: "Human Commits", value: formatNumber(stats.human_commits) },
     { label: "Lines Added", value: formatNumber(stats.total_insertions) },
     { label: "Lines Deleted", value: formatNumber(stats.total_deletions) },
@@ -21,7 +31,7 @@ export function GitStatsCards({ stats }: { stats: GitStats }) {
   ];
 
   return (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-8">
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-5">
       {cards.map((c) => (
         <Card key={c.label}>
           <CardHeader className="pb-2">
