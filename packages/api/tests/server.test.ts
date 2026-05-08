@@ -213,3 +213,59 @@ describe("Ingestor server", () => {
     expect(body.status).toBe("ok");
   });
 });
+
+describe("Ingestor server — body overflow", () => {
+  // Separate instance on its own port with a tiny body cap so a small
+  // payload triggers the overflow path.
+  const OVERFLOW_PORT = 19879;
+  const MAX_BYTES = 1024;
+  let server: Server;
+
+  beforeAll(async () => {
+    const dataDir = makeTmpDir();
+    server = await createIngestor({
+      port: OVERFLOW_PORT,
+      dataDir,
+      apiKeys: ["key_test_valid"],
+      maxBodyBytes: MAX_BYTES,
+    });
+  });
+
+  afterAll(() => {
+    server?.close();
+  });
+
+  it("returns 413 (not a connection drop) when the body exceeds maxBodyBytes", async () => {
+    // Reproduces the prod 502: the agent shipped a 35 MB batch into an 8 MB
+    // ingestor, and instead of seeing a clean 413 it got `Ingestor returned
+    // 502:` from Caddy — because readBody called req.destroy() before the
+    // 413 response could flush, killing the shared socket. Caddy then saw
+    // an upstream that closed without responding and synthesized a 502.
+    //
+    // Build a body comfortably over the cap. Each entry is ~50 bytes;
+    // 100 of them puts us well past 1 KiB.
+    const entries = Array.from({ length: 100 }, (_, i) =>
+      JSON.stringify({ i, payload: "x".repeat(40) }),
+    );
+    const body = JSON.stringify({
+      developer: "x",
+      machine: "m",
+      agent: "a",
+      project: "p",
+      sourceFile: "f",
+      shippedAt: "t",
+      entries,
+    });
+    expect(body.length).toBeGreaterThan(MAX_BYTES);
+
+    const res = await fetch(`http://localhost:${OVERFLOW_PORT}/api/ingest`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer key_test_valid",
+      },
+      body,
+    });
+    expect(res.status).toBe(413);
+  });
+});
