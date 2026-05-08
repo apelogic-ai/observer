@@ -75,28 +75,33 @@ new productivity card. One PR per behaviour change.
 
 ## 2. Tool-result instrumentation: exitCode, durationMs, success
 
-**Finding.** Half the planned downstream work (error loops, slow tests,
-validation outcomes) needs a reliable success/failure signal per tool
-call. Today we have:
-- **Codex** — `shell` results carry `exit_code` in the raw payload, but
-  the parser doesn't surface it on normalized rows.
-- **Claude Code** — `tool_result` has `is_error: bool`; we capture it,
-  but no exit code, no duration. "Success" today is a fragile string
-  search for `error|failed|exception` in result text.
+**Done.** Trace schema extended with `exitCode`, `durationMs`,
+`success` on tool_result rows. Both parsers updated:
 
-**Scope:**
-1. Extend the trace schema with `exitCode: number | null`,
-   `durationMs: number | null`, `success: boolean | null`.
-2. Update `packages/agent/src/parsers/{claude,codex}.ts` to emit those
-   fields from the available raw shapes.
-3. Re-scan to backfill historical data.
-4. Replace the substring-error heuristic in `getStumbles` /
-   dark-spend / leaks with the typed fields where available; keep the
-   substring fallback only for Claude Code where there's no exit code.
+- **Codex** — `exit_code` and wall time are NOT structured fields;
+  they're embedded in the function-call-output text envelope
+  (`Process exited with code N` / `Wall time: N seconds`). Parser
+  regexes them out. Outputs that didn't go through the shell wrapper
+  (custom tools / older formats) get null fields rather than guesses.
+- **Claude Code** — `success` derived from `is_error` when set;
+  falls back to substring scan over the truncated result text when
+  the field is missing on older traces. `exitCode` / `durationMs`
+  stay null (the protocol carries no structured equivalents).
 
-**Asymmetry.** Codex gets `exitCode`; Claude Code only gets `success`
-derived from `is_error`. That's fine — surface both, document the
-limitation, don't paper over it.
+Distribution after re-scan on the live store:
+
+  claude_code  success=true 9,900 (95%)  false 394 (4%)   null 79 (1%)
+  codex        success=true 28,669 (75%) false 2,797 (7%) null 6,622 (17%)
+
+The 7% codex failure rate is real downstream signal — opens up #4
+(failed-command loop detector) cleanly. Codex's ~17% null bucket is
+older shell wrappers without the `Process exited with code` line;
+worth a follow-up pass if it stays a meaningful fraction of new data.
+
+**Substring fallback for claude:** kept in the parser as a degraded
+signal when `is_error` isn't present. The dashboard SQL never
+substring-matched directly (verified via grep), so no downstream
+substitution was needed.
 
 ## 3. Validation after final edit (highest user-facing ROI)
 

@@ -75,6 +75,7 @@ const EMPTY_TRACE: Omit<TraceEntry, "id" | "timestamp" | "agent" | "sessionId" |
   gitRepo: null, gitBranch: null, gitCommit: null,
   userPrompt: null, assistantText: null, thinking: null, reasoning: null, systemPrompt: null,
   toolResultContent: null, fileContent: null, stdout: null, queryData: null,
+  exitCode: null, durationMs: null, success: null,
 };
 
 /**
@@ -147,14 +148,27 @@ export function parseCodexEntry(
 
   // Function call output
   if (ptype === "function_call_output") {
-    const output = payload.output ?? payload.result ?? "";
+    const output = String(payload.output ?? payload.result ?? "");
+    // Codex serializes shell exit code + wall time into the output
+    // text — pull them out so downstream metrics get a typed signal
+    // instead of grep-ing the body. Outputs that didn't go through
+    // the shell wrapper (custom tools, older formats) won't match,
+    // so we leave the fields null in that case.
+    const exitMatch = /^Process exited with code (-?\d+)$/m.exec(output);
+    const wallMatch = /^Wall time: ([\d.]+) seconds$/m.exec(output);
+    const exitCode = exitMatch ? parseInt(exitMatch[1]!, 10) : null;
+    const durationMs = wallMatch ? Math.round(parseFloat(wallMatch[1]!) * 1000) : null;
+    const success = exitCode === null ? null : exitCode === 0;
     return {
       ...base,
       entryType: "tool_result",
       role: "tool",
       toolCallId: (payload.call_id as string) ?? null,
-      toolResultContent: String(output),
-      stdout: String(output),
+      toolResultContent: output,
+      stdout: output,
+      exitCode,
+      durationMs,
+      success,
     };
   }
 

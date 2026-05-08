@@ -95,7 +95,14 @@ const SCHEMA_TRACES = `
     gitBranch     TEXT,
     gitCommit     TEXT,
     userPrompt    TEXT,
-    assistantText TEXT
+    assistantText TEXT,
+    -- Tool-result metadata. Populated only on entryType='tool_result'
+    -- rows; null elsewhere. exitCode/durationMs are codex-only today
+    -- (claude's protocol doesn't carry them); success is filled
+    -- whenever the parser has any signal (is_error or substring).
+    exitCode      INTEGER,
+    durationMs    INTEGER,
+    success       INTEGER       -- 0/1, null when unknown
   )
 `;
 
@@ -157,6 +164,7 @@ const TRACE_INSERT_COLS = [
   "toolName", "toolCallId", "filePath", "command", "taskSummary",
   "gitRepo", "gitBranch", "gitCommit",
   "userPrompt", "assistantText",
+  "exitCode", "durationMs", "success",
 ] as const;
 
 const GIT_INSERT_COLS = [
@@ -629,6 +637,11 @@ function parseJsonlForTraces(file: string): ParsedJsonl {
       asText(obj.gitCommit),
       asText(obj.userPrompt),
       asText(obj.assistantText),
+      // Numeric / boolean tool-result metadata. SQLite stores
+      // booleans as 0/1; JSON null stays null which SQLite accepts.
+      typeof obj.exitCode === "number" ? obj.exitCode : null,
+      typeof obj.durationMs === "number" ? obj.durationMs : null,
+      typeof obj.success === "boolean" ? (obj.success ? 1 : 0) : null,
     ]);
     for (const finding of extractFindings(obj)) {
       findingRows.push([
