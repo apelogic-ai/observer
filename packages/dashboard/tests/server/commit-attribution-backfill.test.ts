@@ -184,6 +184,51 @@ describe("backfill: window covers realistic commit-to-activity gap", () => {
   });
 });
 
+describe("backfill: human commits stay human", () => {
+  it("does NOT promote a human-authored orphan commit even when it falls in an agent session window", async () => {
+    // Found while writing the per-project attribution test in
+    // commit-attribution.test.ts: the existing first-pass backfill
+    // sets agentAuthored=1 on ANY orphan commit that matches a
+    // session by project + timestamp window. So a human commit made
+    // during a paired session (user does a quick manual fix while
+    // Claude Code is busy elsewhere) gets silently promoted to
+    // agent-authored, inflating agent_commits by exactly the kind
+    // of work the metric is supposed to exclude.
+    //
+    // The fix: backfill should only fill sessionId on commits that
+    // were ALREADY agent-authored (Co-Authored-By trailer or
+    // explicit agentAuthored=true at scan time). Human commits stay
+    // human regardless of session overlap.
+    process.env.OBSERVER_SKIP_FOREIGN_FILTER = "1";
+    const dataDir = mkdtempSync(join(tmpdir(), "observer-attr-human-"));
+    // Active claude_code session in alpha, T_COMMIT inside its window.
+    writeJsonl(join(dataDir, TODAY, "claude_code", "s_active.jsonl"), [
+      { id: "a1", timestamp: T_SESSION_START, agent: "claude_code",
+        sessionId: "s_active", project: "alpha", entryType: "tool_call",
+        toolName: "Bash", tokenUsage: { input: 10, output: 5 } },
+      { id: "a2", timestamp: T_SESSION_END, agent: "claude_code",
+        sessionId: "s_active", project: "alpha", entryType: "tool_call",
+        toolName: "Bash", tokenUsage: { input: 10, output: 5 } },
+    ]);
+    // Human commit in the SAME project at T_COMMIT — falls in the
+    // session's window. This is the failure mode the test guards.
+    writeJsonl(join(dataDir, TODAY, "git", "events.jsonl"), [
+      { id: "g_human", timestamp: T_COMMIT, eventType: "commit",
+        project: "alpha", repo: "owner/alpha", branch: "main",
+        commitSha: "deadbeef", filesChanged: 1, insertions: 1, deletions: 0,
+        agentAuthored: false,
+        author: "human@x.com", message: "human commit during agent session" },
+    ]);
+    await initDb(dataDir);
+
+    const s = await getGitStats({ days: 1 });
+    expect(s.agent_commits).toBe(0);
+    expect(s.human_commits).toBe(1);
+    expect(s.linked_agent_commits).toBe(0);
+    expect(s.unlinked_agent_commits).toBe(0);
+  });
+});
+
 describe("backfill: no cross-agent linking", () => {
   it("does NOT link a claude_code commit to a codex session even when only codex is active", async () => {
     process.env.OBSERVER_SKIP_FOREIGN_FILTER = "1";

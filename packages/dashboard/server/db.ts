@@ -432,16 +432,25 @@ function backfillCommitSessions(db: Database): number {
     byProject.set(s.project, list);
   }
 
+  // Only backfill commits that are ALREADY tagged agent-authored
+  // (via Co-Authored-By trailer or scan-time detection). The earlier
+  // version of this query took any orphan, which silently promoted
+  // human commits made during an agent session's window — e.g. a
+  // user doing a quick manual fix while Claude Code is busy
+  // elsewhere — to agentAuthored=1, inflating the very metric this
+  // pass is meant to enrich.
   const orphans = db
     .prepare(
       `SELECT commitSha, project, timestamp
          FROM git_events
-        WHERE sessionId IS NULL AND project IS NOT NULL`,
+        WHERE sessionId IS NULL AND project IS NOT NULL AND agentAuthored = 1`,
     )
     .all() as { commitSha: string; project: string; timestamp: string }[];
 
+  // The UPDATE no longer needs to flip agentAuthored — every orphan
+  // we touch is already agent-authored by construction.
   const update = db.prepare(
-    `UPDATE git_events SET sessionId = ?, agentAuthored = 1, agentName = COALESCE(agentName, ?) WHERE commitSha = ?`,
+    `UPDATE git_events SET sessionId = ?, agentName = COALESCE(agentName, ?) WHERE commitSha = ?`,
   );
   let filled = 0;
   const stillOrphan: { commitSha: string; timestamp: string }[] = [];
