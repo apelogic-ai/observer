@@ -319,6 +319,67 @@ describe("Shipper", () => {
     expect(shipped[0].entries[0]).toContain('"i":3');
   });
 
+  it("flushes on the byte budget so large entries don't blow past maxBatchBytes", async () => {
+    // Reproduces the prod stall: a Codex session accumulated ~16 KB/entry,
+    // 2087 entries → ~35 MB body, which the ingestor's 8 MB body cap rejects
+    // every retry. Without a byte cap the shipper had no way to split it.
+    const traceDir = makeTmpDir();
+    const traceFile = join(traceDir, "fat.jsonl");
+    const big = "x".repeat(1000); // ~1 KB per entry
+    let content = "";
+    for (let i = 0; i < 10; i++) content += JSON.stringify({ i, big }) + "\n";
+    writeFileSync(traceFile, content);
+
+    // Entry cap is high; byte cap is tight → byte cap should drive splits.
+    const shipper = new Shipper({
+      ...config,
+      maxBatchEntries: 1000,
+      maxBatchBytes: 3000,
+    });
+    const n = await shipper.processFile(traceFile, "claude_code", "test-project");
+
+    expect(n).toBeGreaterThanOrEqual(3);
+
+    // Every multi-entry batch must respect the byte budget.
+    for (const batch of shipped) {
+      if (batch.entries.length <= 1) continue;
+      const total = batch.entries.reduce(
+        (sum, e) => sum + Buffer.byteLength(e, "utf-8"),
+        0,
+      );
+      expect(total).toBeLessThanOrEqual(3000);
+    }
+
+    // Nothing dropped — total entries match.
+    const total = shipped.reduce((sum, b) => sum + b.entries.length, 0);
+    expect(total).toBe(10);
+  });
+
+  it("ships a single oversized entry alone rather than dropping it", async () => {
+    const traceDir = makeTmpDir();
+    const traceFile = join(traceDir, "oversize.jsonl");
+    const huge = "x".repeat(10_000);
+    const content =
+      JSON.stringify({ s: 1 }) + "\n" +
+      JSON.stringify({ huge }) + "\n" +
+      JSON.stringify({ s: 2 }) + "\n";
+    writeFileSync(traceFile, content);
+
+    const shipper = new Shipper({
+      ...config,
+      maxBatchEntries: 1000,
+      maxBatchBytes: 1000,
+    });
+    await shipper.processFile(traceFile, "claude_code", "test-project");
+
+    const hugeBatch = shipped.find((b) => b.entries.some((e) => e.includes("xxxxxxxxxx")));
+    expect(hugeBatch).toBeDefined();
+    expect(hugeBatch!.entries).toHaveLength(1);
+
+    const total = shipped.reduce((sum, b) => sum + b.entries.length, 0);
+    expect(total).toBe(3);
+  });
+
   it("handles a file with no size limit (formerly 200MB skip path)", async () => {
     const traceDir = makeTmpDir();
     const traceFile = join(traceDir, "many.jsonl");

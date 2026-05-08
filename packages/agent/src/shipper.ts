@@ -48,12 +48,20 @@ export interface ShipperConfig {
   /** Max entries per shipped batch. Lower → smaller per-batch memory and
    *  HTTP payloads, more batches per file. Default 5000. */
   maxBatchEntries?: number;
+  /** Max combined UTF-8 byte size of `entries` per batch. Splits earlier
+   *  than `maxBatchEntries` when individual entries are large (e.g. Codex
+   *  rollouts with multi-KB tool output). Default 6 MiB — comfortably
+   *  under the ingestor's 8 MiB body cap once JSON-string escaping is
+   *  factored in. A single entry larger than the budget is shipped alone
+   *  rather than dropped. */
+  maxBatchBytes?: number;
   ship: (batch: ShippedBatch) => Promise<void>;
 }
 
 type OffsetMap = Record<string, number>; // fileHash → byte offset
 
 const DEFAULT_MAX_BATCH_ENTRIES = 5000;
+const DEFAULT_MAX_BATCH_BYTES = 6 * 1024 * 1024;
 const NEWLINE = 0x0a;
 
 function fileHash(path: string): string {
@@ -91,6 +99,7 @@ export class Shipper {
   private offsets: OffsetMap;
   private offsetFile: string;
   private maxBatchEntries: number;
+  private maxBatchBytes: number;
   readonly developer: string;
   readonly machine: string;
 
@@ -101,6 +110,7 @@ export class Shipper {
     this.offsetFile = join(config.stateDir, "shipper-offsets.json");
     this.offsets = this.loadOffsets();
     this.maxBatchEntries = config.maxBatchEntries ?? DEFAULT_MAX_BATCH_ENTRIES;
+    this.maxBatchBytes = config.maxBatchBytes ?? DEFAULT_MAX_BATCH_BYTES;
   }
 
   private loadOffsets(): OffsetMap {
@@ -196,6 +206,11 @@ export class Shipper {
     let lastSafeBytes = 0;
 
     let entries: string[] = [];
+    let entriesBytes = 0;
+    // Byte offset of the newline that closed the last entry pushed into
+    // `entries`. We flush up to this offset, not lastSafeBytes — flushing
+    // past entries we haven't included would skip lines on the next poll.
+    let lastEntryEndBytes = 0;
     let batchStartOffset = startOffset;
     let batchesShipped = 0;
     let aborted = false;
@@ -203,7 +218,7 @@ export class Shipper {
     const tryFlush = async (force: boolean): Promise<boolean> => {
       if (!force && entries.length < this.maxBatchEntries) return true;
       if (entries.length === 0) return true;
-      const batchEndOffset = startOffset + lastSafeBytes;
+      const batchEndOffset = startOffset + lastEntryEndBytes;
       const ok = await this.shipBatch(
         filePath, agent, project, entries, batchStartOffset, batchEndOffset,
       );
@@ -212,6 +227,7 @@ export class Shipper {
       this.saveOffsets();
       batchStartOffset = batchEndOffset;
       entries = [];
+      entriesBytes = 0;
       batchesShipped++;
       return true;
     };
@@ -231,11 +247,32 @@ export class Shipper {
         lastSafeBytes = cumulativeBytes - (pendingBuf.length - lineStart);
 
         if (!line) continue;
+        let processed: string | null = null;
         try {
           JSON.parse(line);
-          const processed = this.config.redactSecrets ? redactSecrets(line) : line;
-          entries.push(processed);
+          processed = this.config.redactSecrets ? redactSecrets(line) : line;
         } catch { /* invalid JSON line — skip but still advance past it */ }
+
+        if (processed !== null) {
+          const entrySize = Buffer.byteLength(processed, "utf-8");
+          // Flush before adding if this entry would push us over the byte
+          // budget — but only when there's something to flush. A single
+          // entry that already exceeds the budget still ships (alone),
+          // because dropping it would lose data and the ingestor's body
+          // cap is a hint, not an absolute limit.
+          if (
+            entries.length > 0 &&
+            entriesBytes + entrySize > this.maxBatchBytes
+          ) {
+            if (!(await tryFlush(true))) {
+              aborted = true;
+              break;
+            }
+          }
+          entries.push(processed);
+          entriesBytes += entrySize;
+          lastEntryEndBytes = lastSafeBytes;
+        }
 
         if (entries.length >= this.maxBatchEntries) {
           if (!(await tryFlush(true))) {
