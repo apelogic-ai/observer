@@ -148,6 +148,42 @@ describe("backfill: tight activity window, not session bounds", () => {
   });
 });
 
+describe("backfill: window covers realistic commit-to-activity gap", () => {
+  it("links a commit ~35min before the next session activity", async () => {
+    // Real shape from the live dashboard: a commit lands at 19:06,
+    // the next agent activity is at 19:39 (33min later) — the user
+    // committed shortly before re-engaging the agent. ±30min would
+    // miss this; ±60min picks it up cleanly. The window matters
+    // because Claude Code sessions are often "open and idle" — the
+    // commit fires while the human is finishing up before the agent
+    // becomes active again.
+    process.env.OBSERVER_SKIP_FOREIGN_FILTER = "1";
+    const dataDir = mkdtempSync(join(tmpdir(), "observer-attr-pre-activity-"));
+    writeJsonl(join(dataDir, TODAY, "claude_code", "s_after.jsonl"), [
+      { id: "after1", timestamp: `${TODAY}T01:35:00Z`, agent: "claude_code",
+        sessionId: "s_after", project: "alpha", entryType: "tool_call",
+        toolName: "Bash", tokenUsage: { input: 10, output: 5 } },
+      { id: "after2", timestamp: `${TODAY}T01:50:00Z`, agent: "claude_code",
+        sessionId: "s_after", project: "alpha", entryType: "tool_call",
+        toolName: "Bash", tokenUsage: { input: 10, output: 5 } },
+    ]);
+    writeJsonl(join(dataDir, TODAY, "git", "events.jsonl"), [
+      // Commit at 01:00; session's first tool_call is at 01:35,
+      // i.e. 35min later. Within ±60min, outside ±30min.
+      { id: "g_orphan", timestamp: T_COMMIT, eventType: "commit",
+        project: "ghost", repo: "owner/ghost", branch: "main",
+        commitSha: "deadbeef", filesChanged: 1, insertions: 5, deletions: 0,
+        agentAuthored: true, agentName: "claude_code",
+        author: "agent@x.com", message: "orphan agent commit" },
+    ]);
+    await initDb(dataDir);
+
+    const s = await getGitStats({ days: 1 });
+    expect(s.linked_agent_commits).toBe(1);
+    expect(s.unlinked_agent_commits).toBe(0);
+  });
+});
+
 describe("backfill: no cross-agent linking", () => {
   it("does NOT link a claude_code commit to a codex session even when only codex is active", async () => {
     process.env.OBSERVER_SKIP_FOREIGN_FILTER = "1";

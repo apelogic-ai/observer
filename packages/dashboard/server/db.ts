@@ -479,7 +479,13 @@ function backfillCommitSessions(db: Database): number {
   // of the commit, then pick the one whose NEAREST tool_call is
   // closest. If two sessions have an equally-close tool_call (rare
   // tie), leave the commit orphan rather than guess.
-  const ACTIVITY_WINDOW_MS = 30 * 60 * 1000;
+  // 60min covers the realistic gap between a committed change and the
+  // agent activity that produced it (the user might commit a few
+  // minutes after closing tools, or run a quick `git commit -a` after
+  // a longer pause). Going wider (we tested ±6h on real data) starts
+  // matching sessions from earlier or later in the day that are
+  // probably unrelated — better to leave those commits orphan.
+  const ACTIVITY_WINDOW_MS = 60 * 60 * 1000;
   if (stillOrphan.length > 0) {
     const orphansWithAgent = db
       .prepare(
