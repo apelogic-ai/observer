@@ -878,6 +878,144 @@ export async function getZeroCode(f: Filters = {}, limit = 50): Promise<DarkSpen
     .slice(0, limit);
 }
 
+// ── Validation coverage ───────────────────────────────────────
+
+/**
+ * Tool names that count as an "edit" — touching code in a way that
+ * could plausibly need verification afterwards. Read/grep/list don't
+ * count: they don't change anything to validate.
+ */
+const EDIT_TOOL_NAMES = new Set([
+  "Edit", "Write", "MultiEdit",   // Claude Code
+  "edit", "apply_patch",          // Codex (parser normalizes apply_patch → edit)
+  "edit_file", "create_file",     // Cursor / future
+]);
+
+/**
+ * Command-prefix patterns that count as a validation invocation when
+ * fired through a Bash/shell tool call. Hard-coded for v1 — making
+ * this config-driven (so a project can add `make check`, `tox`, etc.)
+ * is a follow-up. Patterns match LIKE-prefix style; `command` is
+ * truncated to 200 chars by the parser, so anchoring at the start is
+ * the only reliable shape.
+ */
+const VALIDATION_COMMAND_PATTERNS: string[] = [
+  // bun
+  "bun test%", "bun run test%", "bun run lint%", "bun run typecheck%",
+  "bun run type-check%", "bun run build%", "bun run e2e%", "bunx playwright%",
+  "bunx vitest%", "bunx tsc%", "bunx eslint%",
+  // npm / yarn / pnpm
+  "npm test%", "npm run test%", "npm run lint%", "npm run typecheck%",
+  "npm run type-check%", "npm run build%", "npm run e2e%",
+  "yarn test%", "yarn run test%", "yarn lint%", "yarn typecheck%", "yarn build%",
+  "pnpm test%", "pnpm run test%", "pnpm lint%", "pnpm typecheck%", "pnpm build%",
+  // Direct test runners
+  "pytest%", "vitest%", "jest%", "playwright%",
+  "tsc%", "eslint%", "ruff%", "mypy%", "flake8%", "black --check%",
+  "cargo test%", "cargo build%", "cargo clippy%", "cargo check%",
+  "go test%", "go build%", "go vet%",
+  // make / just shorthands
+  "make test%", "make lint%", "make check%", "make build%",
+  "just test%", "just lint%", "just check%",
+];
+
+export interface ValidationCoverageRow {
+  sessionId: string;
+  agent: string;
+  project: string | null;
+  started: string;
+  ended: string;
+  tokens: number;
+  /** Latest edit-shaped tool call timestamp. Always set on returned rows. */
+  lastEditAt: string;
+  /** Latest validation-shaped tool call timestamp. Null if the session
+   *  never ran tests / lint / typecheck / build. */
+  lastValidationAt: string | null;
+  /** True iff lastValidationAt > lastEditAt — i.e. the agent verified
+   *  its work AFTER the last code change. */
+  validatedAfterEdit: boolean;
+}
+
+/**
+ * "Did the agent verify its own work before finishing?" per session.
+ *
+ * Returns one row per session that edited code at least once. Sorted
+ * by un-validated sessions first (validatedAfterEdit=false), then by
+ * tokens descending — so the most expensive flail surfaces at the
+ * top, which is what the page is built to highlight.
+ *
+ * Edit detection: tool_call with toolName in EDIT_TOOL_NAMES.
+ * Validation detection: Bash/shell tool_call whose `command` matches
+ * a VALIDATION_COMMAND_PATTERNS prefix.
+ */
+export async function getValidationCoverage(
+  f: Filters = {},
+): Promise<ValidationCoverageRow[]> {
+  const editToolList = [...EDIT_TOOL_NAMES].map((t) => `'${esc(t)}'`).join(", ");
+  const cmdLikeClause = VALIDATION_COMMAND_PATTERNS
+    .map((p) => `command LIKE '${esc(p)}'`)
+    .join(" OR ");
+
+  const rows = await query<{
+    sessionId: string; agent: string; project: string | null;
+    started: string; ended: string;
+    tokens: number;
+    lastEditAt: string;
+    lastValidationAt: string | null;
+  }>(`
+    WITH edits AS (
+      SELECT sessionId, MAX(timestamp) AS lastEditAt
+      FROM traces
+      ${where(f, [`entryType = 'tool_call'`, `toolName IN (${editToolList})`])}
+      GROUP BY sessionId
+    ),
+    validations AS (
+      SELECT sessionId, MAX(timestamp) AS lastValidationAt
+      FROM traces
+      ${where(f, [
+        `entryType = 'tool_call'`,
+        `(toolName = 'Bash' OR toolName = 'shell')`,
+        `command IS NOT NULL`,
+        `(${cmdLikeClause})`,
+      ])}
+      GROUP BY sessionId
+    ),
+    sessions AS (
+      SELECT
+        sessionId,
+        MIN(agent)     AS agent,
+        MAX(project)   AS project,
+        MIN(timestamp) AS started,
+        MAX(timestamp) AS ended,
+        COALESCE(SUM(${TU_TOTAL}), 0) AS tokens
+      FROM traces
+      ${where(f, [`sessionId IS NOT NULL`])}
+      GROUP BY sessionId
+    )
+    SELECT
+      s.sessionId, s.agent, s.project, s.started, s.ended, s.tokens,
+      e.lastEditAt, v.lastValidationAt
+    FROM edits e
+    JOIN sessions s USING (sessionId)
+    LEFT JOIN validations v USING (sessionId)
+  `);
+
+  return rows
+    .map((r) => ({
+      ...r,
+      tokens: Number(r.tokens),
+      validatedAfterEdit:
+        r.lastValidationAt !== null && r.lastValidationAt > r.lastEditAt,
+    }))
+    .sort((a, b) => {
+      // Un-validated first; among those, expensive first.
+      if (a.validatedAfterEdit !== b.validatedAfterEdit) {
+        return a.validatedAfterEdit ? 1 : -1;
+      }
+      return b.tokens - a.tokens;
+    });
+}
+
 // ── Projects ───────────────────────────────────────────────────
 
 export interface ProjectRow {

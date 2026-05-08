@@ -11,6 +11,7 @@ const NAV_ITEMS: { label: string; href: string }[] = [
   { label: "Leaks",      href: "/security" },
   { label: "Permissions", href: "/permissions" },
   { label: "Skills",     href: "/skills" },
+  { label: "Validation", href: "/validation" },
 ];
 
 /**

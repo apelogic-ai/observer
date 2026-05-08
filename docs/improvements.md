@@ -132,6 +132,17 @@ permissions + skills pages.
 matter for "did they run it"; a separate later pass can use exit codes
 to ask "did it pass."
 
+**Status: shipped.** New `/validation` page with summary cards (total
+edited / validated / un-validated / tokens spent) plus a per-session
+table sorted un-validated-first then by tokens descending. Edit
+detection covers Edit/Write/MultiEdit/apply_patch; validation
+matches Bash/shell `command` LIKE-prefix patterns from a hardcoded
+list (bun/npm/yarn/pnpm test+lint+typecheck+build, pytest, vitest,
+playwright, eslint, tsc, ruff, mypy, cargo, go, make, just). Live
+state on the local store: **23% coverage** — 26 sessions edited
+code, only 6 validated afterwards, ~2.4B tokens of un-validated
+spend. Config-driven pattern list deferred to follow-up.
+
 ## 4. Validation-loop detector ("stuck agent" signal)
 
 Several sessions ran 200–456 validation commands. That's a different
