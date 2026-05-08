@@ -362,6 +362,7 @@ function ingestCursorSidecars(db: Database, paths: string[]): number {
       null, null, null, null, null,    // toolName … taskSummary
       null, null, null,                // gitRepo, gitBranch, gitCommit
       null, null,                      // userPrompt, assistantText
+      null, null, null,                // exitCode, durationMs, success
     );
     n++;
   }
