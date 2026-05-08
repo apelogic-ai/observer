@@ -214,6 +214,59 @@ describe("Ingestor server", () => {
   });
 });
 
+describe("Ingestor server — large bodies", () => {
+  // The prod stall traced to a single 8.27 MiB Codex `compacted` event —
+  // a real, expected payload shape, not a malicious upload. Once we raise
+  // the cap, the ingestor needs to handle bodies of that size cleanly.
+  const LARGE_PORT = 19881;
+  const LARGE_CAP = 32 * 1024 * 1024;
+  let server: Server;
+
+  beforeAll(async () => {
+    const dataDir = makeTmpDir();
+    server = await createIngestor({
+      port: LARGE_PORT,
+      dataDir,
+      apiKeys: ["key_test_valid"],
+      maxBodyBytes: LARGE_CAP,
+    });
+  });
+
+  afterAll(() => {
+    server?.close();
+  });
+
+  it("accepts a 12 MiB batch when maxBodyBytes is sized for it", async () => {
+    // One ~10 MiB entry — over the historical 8 MiB cap, well under the
+    // 32 MiB target. JSON-stringified once into entries[], then again into
+    // the batch envelope, so the wire body is ~10 MiB + framing overhead.
+    const big = "x".repeat(10 * 1024 * 1024);
+    const body = JSON.stringify({
+      developer: "large-body@acme.com",
+      machine: "m",
+      agent: "codex",
+      project: "p",
+      sourceFile: "f",
+      shippedAt: "2026-05-08T00:00:00Z",
+      entries: [JSON.stringify({ type: "compacted", payload: big })],
+    });
+    expect(body.length).toBeGreaterThan(10 * 1024 * 1024);
+    expect(body.length).toBeLessThan(LARGE_CAP);
+
+    const res = await fetch(`http://localhost:${LARGE_PORT}/api/ingest`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer key_test_valid",
+      },
+      body,
+    });
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { entryCount: number };
+    expect(json.entryCount).toBe(1);
+  });
+});
+
 describe("Ingestor server — body overflow", () => {
   // Separate instance on its own port with a tiny body cap so a small
   // payload triggers the overflow path.

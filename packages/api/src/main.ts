@@ -59,13 +59,30 @@ if (storageKind === "s3") {
   process.exit(1);
 }
 
+// OBSERVER_MAX_BODY_BYTES — operator override for the request body cap.
+// The default in createIngestor (32 MiB) accommodates Codex `compacted`
+// events; bump higher when sessions grow larger payloads than that.
+let maxBodyBytes: number | undefined;
+const rawMaxBody = process.env.OBSERVER_MAX_BODY_BYTES;
+if (rawMaxBody) {
+  const parsed = parseInt(rawMaxBody, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    console.error(`Refusing to start: OBSERVER_MAX_BODY_BYTES="${rawMaxBody}" is not a positive integer.`);
+    process.exit(1);
+  }
+  maxBodyBytes = parsed;
+}
+
 console.log(`Observer API starting...`);
 console.log(`  Port:    ${port}`);
 console.log(`  Storage: ${storageDescription}`);
 console.log(`  API keys: ${apiKeys.length} configured${usingDevKey ? " (DEV FALLBACK — do not use in production)" : ""}`);
+if (maxBodyBytes !== undefined) {
+  console.log(`  Max body: ${maxBodyBytes} bytes (override)`);
+}
 console.log();
 
-createIngestor({ port, dataDir, storage, apiKeys }).then(() => {
+createIngestor({ port, dataDir, storage, apiKeys, maxBodyBytes }).then(() => {
   console.log(`Listening on http://localhost:${port}`);
   console.log(`  POST /api/ingest  — receive batches`);
   console.log(`  GET  /health      — health check`);

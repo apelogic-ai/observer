@@ -27,6 +27,7 @@ services:
       - caddy_config:/config
     environment:
       - DOMAIN=${DOMAIN}
+      - CADDY_MAX_BODY=${CADDY_MAX_BODY:-48MB}
     depends_on:
       - observer-api
 
@@ -48,6 +49,8 @@ services:
       # AWS_REGION is what the SDK actually reads; mirror OBSERVER_S3_REGION
       # so the SDK doesn't have to fall back to IMDS.
       - AWS_REGION=${OBSERVER_S3_REGION}
+      # Optional override; the api defaults to 32 MiB (32*1024*1024).
+      - OBSERVER_MAX_BODY_BYTES=${OBSERVER_MAX_BODY_BYTES:-}
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:19900/health"]
       interval: 30s

@@ -24,11 +24,14 @@ export interface IngestorConfig {
   storage?: Storage;
   trustedKeys?: Record<string, string>;   // fingerprint → PEM public key
   apiKeys?: string[];                      // valid API keys
-  /** Max request body size in bytes. Defaults to 8 MiB. */
+  /** Max request body size in bytes. Defaults to 32 MiB — sized to accept
+   *  Codex `compacted` events that inline the full conversation history,
+   *  which routinely cross 8 MiB on long sessions. Override via the
+   *  OBSERVER_MAX_BODY_BYTES env var if you need to go higher. */
   maxBodyBytes?: number;
 }
 
-const DEFAULT_MAX_BODY_BYTES = 8 * 1024 * 1024;
+const DEFAULT_MAX_BODY_BYTES = 32 * 1024 * 1024;
 
 /** Read the request body as a string, capped at `maxBytes`. Rejects with a
  *  "body too large" error once the cap is exceeded so a malicious POST can't
