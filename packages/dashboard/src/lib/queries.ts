@@ -127,6 +127,18 @@ export interface DarkSpendRow {
   tokensPerLoc: number;
 }
 
+export interface ValidationCoverageRow {
+  sessionId: string;
+  agent: string;
+  project: string | null;
+  started: string;
+  ended: string;
+  tokens: number;
+  lastEditAt: string;
+  lastValidationAt: string | null;
+  validatedAfterEdit: boolean;
+}
+
 export interface ProjectRow {
   project: string;
   entries: number;

@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import type {
   Stats, ActivityRow, HeatmapRow, TokenRow, ToolRow, ProjectRow, ModelRow,
-  SessionRow, SkillRow, SkillUsageRow, SkillSessionRow, ToolDetail, StumbleRow, DarkSpendRow,
+  SessionRow, SkillRow, SkillUsageRow, SkillSessionRow, ToolDetail, StumbleRow, DarkSpendRow, ValidationCoverageRow,
   SecurityFindingRow, SecurityTimelineRow, SecuritySessionRow,
   PermissionRow, ExistingSettings,
   GitStats, GitTimelineRow, GitCommitRow, GitSessionRow, CommitAttributionRow,
@@ -323,6 +323,22 @@ export function useDarkSpend(filters: DashboardFilters, limit = 50) {
 
 export function useZeroCode(filters: DashboardFilters, limit = 50) {
   return useSessionRollupEndpoint("/api/zero-code", filters, limit);
+}
+
+export function useValidationCoverage(filters: DashboardFilters) {
+  const [rows, setRows] = useState<ValidationCoverageRow[] | null>(null);
+  const { days, project, agent } = filters;
+
+  useEffect(() => {
+    let cancelled = false;
+    const params = buildParams({ days, project, agent });
+    fetchJson<ValidationCoverageRow[]>(`/api/validation${params}`)
+      .then((d) => { if (!cancelled) setRows(d); })
+      .catch(() => { if (!cancelled) setRows([]); });
+    return () => { cancelled = true; };
+  }, [days, project, agent]);
+
+  return rows;
 }
 
 export function useSkillUsage(filters: DashboardFilters) {
