@@ -14,6 +14,7 @@ import { ProjectChart } from "@/components/charts/project-chart";
 import { ModelChart } from "@/components/charts/model-chart";
 import { SessionsTable } from "@/components/sessions-table";
 import { GitStatsCards } from "@/components/git-stats-cards";
+import { CommitAttributionPanel } from "@/components/commit-attribution-panel";
 import { GitActivityChart } from "@/components/charts/git-activity-chart";
 import { GitCommitsTable } from "@/components/git-commits-table";
 import { GitSessionsTable } from "@/components/git-sessions-table";
@@ -96,6 +97,7 @@ export default function DashboardPage() {
             <h2 className="text-lg font-semibold mb-4">Git Activity</h2>
           </div>
           <GitStatsCards stats={gitData.stats} />
+          <CommitAttributionPanel rows={gitData.attribution} filters={filters} />
           <GitActivityChart data={gitData.timeline} />
           <div className="flex items-center justify-end gap-1 -mb-2">
             <div className="flex gap-1 rounded-lg border border-border p-1">

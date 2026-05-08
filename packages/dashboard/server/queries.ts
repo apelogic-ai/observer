@@ -1304,6 +1304,13 @@ export interface GitStats {
   total_commits: number;
   agent_commits: number;
   human_commits: number;
+  /** Agent commits with a sessionId — linked back to a captured agent
+   *  session. Drives the denominator for every session-level metric. */
+  linked_agent_commits: number;
+  /** Agent commits we can't tie to a session. The backfill heuristic
+   *  matches by project + timestamp window; commits in projects with
+   *  no concurrent session, or outside the window, end up here. */
+  unlinked_agent_commits: number;
   total_insertions: number;
   total_deletions: number;
   agent_insertions: number;
@@ -1317,6 +1324,8 @@ export async function getGitStats(f: Filters = {}): Promise<GitStats> {
       COUNT(*) AS total_commits,
       COUNT(*) FILTER (WHERE agentAuthored = 1) AS agent_commits,
       COUNT(*) FILTER (WHERE agentAuthored = 0) AS human_commits,
+      COUNT(*) FILTER (WHERE agentAuthored = 1 AND sessionId IS NOT NULL) AS linked_agent_commits,
+      COUNT(*) FILTER (WHERE agentAuthored = 1 AND sessionId IS NULL)     AS unlinked_agent_commits,
       COALESCE(SUM(insertions), 0) AS total_insertions,
       COALESCE(SUM(deletions), 0) AS total_deletions,
       COALESCE(SUM(insertions) FILTER (WHERE agentAuthored = 1), 0) AS agent_insertions,
@@ -1326,6 +1335,40 @@ export async function getGitStats(f: Filters = {}): Promise<GitStats> {
     ${gitWhere(f, ["eventType = 'commit'"])}
   `);
   return rows[0];
+}
+
+export interface CommitAttributionRow {
+  project: string;
+  agent_commits: number;
+  linked_agent_commits: number;
+  unlinked_agent_commits: number;
+}
+
+/**
+ * Per-project commit-attribution breakdown. Powers the panel that
+ * surfaces which projects' agent commits aren't linking to sessions —
+ * the rows the dashboard's session-level metrics are silently
+ * undercounting. Only projects with at least one agent commit appear;
+ * human-only projects are omitted to keep the list short.
+ *
+ * Ordered worst-first: highest unlinked count, then highest total —
+ * so the noisiest attribution gaps are at the top.
+ */
+export async function getCommitAttributionByProject(
+  f: Filters = {},
+): Promise<CommitAttributionRow[]> {
+  return query<CommitAttributionRow>(`
+    SELECT
+      project,
+      COUNT(*) FILTER (WHERE agentAuthored = 1) AS agent_commits,
+      COUNT(*) FILTER (WHERE agentAuthored = 1 AND sessionId IS NOT NULL) AS linked_agent_commits,
+      COUNT(*) FILTER (WHERE agentAuthored = 1 AND sessionId IS NULL)     AS unlinked_agent_commits
+    FROM git_events
+    ${gitWhere(f, ["eventType = 'commit'", "project IS NOT NULL"])}
+    GROUP BY project
+    HAVING COUNT(*) FILTER (WHERE agentAuthored = 1) > 0
+    ORDER BY unlinked_agent_commits DESC, agent_commits DESC, project ASC
+  `);
 }
 
 export interface GitTimelineRow {
@@ -1368,6 +1411,47 @@ export interface GitCommitRow {
 }
 
 interface GitCommitRowRaw extends Omit<GitCommitRow, "agent_authored"> { agent_authored: number }
+
+/**
+ * Drill-down for the per-project commit attribution panel: list the
+ * actual orphan agent commits in one project so the user can click
+ * through to /commit?sha=… and inspect them. Same shape as
+ * `getGitCommits` so the UI can reuse the formatting; the only
+ * difference is the WHERE clause.
+ */
+export async function getUnlinkedAgentCommits(
+  project: string,
+  f: Filters = {},
+  limit = 100,
+): Promise<GitCommitRow[]> {
+  const safe = esc(project);
+  const rows = await query<GitCommitRowRaw>(`
+    SELECT
+      commitSha AS commit_sha,
+      timestamp,
+      project,
+      repo,
+      branch,
+      COALESCE(author, '') AS author,
+      COALESCE(message, '') AS message,
+      COALESCE(filesChanged, 0) AS files_changed,
+      COALESCE(insertions, 0) AS insertions,
+      COALESCE(deletions, 0) AS deletions,
+      COALESCE(agentAuthored, 0) AS agent_authored,
+      agentName AS agent_name,
+      sessionId AS session_id
+    FROM git_events
+    ${gitWhere(f, [
+      "eventType = 'commit'",
+      "agentAuthored = 1",
+      "sessionId IS NULL",
+      `project = '${safe}'`,
+    ])}
+    ORDER BY timestamp DESC
+    LIMIT ${limit}
+  `);
+  return rows.map((r) => ({ ...r, agent_authored: Boolean(r.agent_authored) }));
+}
 
 export async function getGitCommits(f: Filters = {}, limit = 50): Promise<GitCommitRow[]> {
   const rows = await query<GitCommitRowRaw>(`

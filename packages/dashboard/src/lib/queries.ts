@@ -197,11 +197,20 @@ export interface GitStats {
   total_commits: number;
   agent_commits: number;
   human_commits: number;
+  linked_agent_commits: number;
+  unlinked_agent_commits: number;
   total_insertions: number;
   total_deletions: number;
   agent_insertions: number;
   files_changed: number;
   repos: number;
+}
+
+export interface CommitAttributionRow {
+  project: string;
+  agent_commits: number;
+  linked_agent_commits: number;
+  unlinked_agent_commits: number;
 }
 
 export interface GitTimelineRow {

@@ -28,6 +28,14 @@ window.
    (timestamp window, branch overlap, Co-Authored-By trailer matching).
 3. Re-scan + verify the ratio drops.
 
+**Known sub-bug (found while writing the test for step 1).** The
+dashboard's ingest-time session backfill at
+`packages/dashboard/server/db.ts:444` promotes ANY orphan commit
+matching a session's project + timestamp window to `agentAuthored = 1`,
+including human commits the user happened to make during an agent
+session. That inflates `agent_commits` itself. Address as part of
+step 2.
+
 **Boundary.** Don't conflate this with the validation panel or any
 new productivity card. One PR per behaviour change.
 

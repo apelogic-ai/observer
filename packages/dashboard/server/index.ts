@@ -15,7 +15,7 @@ import {
   getSecurityFindings, getSecurityTimeline, getSecuritySessions, getPermissions,
   getProjects, getModels, getSessions, getProjectList, getModelList, getAgentList, getToolList,
   getToolDetail, getSkills, getSkillUsage, getSkillSessions,
-  getGitStats, getGitTimeline, getGitCommits, getGitSessions,
+  getGitStats, getGitTimeline, getGitCommits, getGitSessions, getCommitAttributionByProject, getUnlinkedAgentCommits,
   getCommitDetail, getSessionCommits, getSessionSummary, getSessionDetail,
   type Filters,
 } from "./queries";
@@ -99,6 +99,12 @@ const routes: Record<string, Handler> = {
   "/api/agent-list": async () => getAgentList(),
   "/api/tool-list": async () => getToolList(),
   "/api/git-stats": async (url) => getGitStats(filters(url)),
+  "/api/git-attribution": async (url) => getCommitAttributionByProject(filters(url)),
+  "/api/git-attribution/unlinked": async (url) => {
+    const project = url.searchParams.get("project");
+    if (!project) return { error: "project param required" };
+    return getUnlinkedAgentCommits(project, filters(url));
+  },
   "/api/git-timeline": async (url) => getGitTimeline(filters(url)),
   "/api/git-commits": async (url) => getGitCommits(filters(url), parsePositiveInt(url.searchParams.get("limit")) ?? 50),
   "/api/commit-detail": async (url) => {

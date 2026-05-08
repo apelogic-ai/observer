@@ -6,7 +6,7 @@ import type {
   SessionRow, SkillRow, SkillUsageRow, SkillSessionRow, ToolDetail, StumbleRow, DarkSpendRow,
   SecurityFindingRow, SecurityTimelineRow, SecuritySessionRow,
   PermissionRow, ExistingSettings,
-  GitStats, GitTimelineRow, GitCommitRow, GitSessionRow,
+  GitStats, GitTimelineRow, GitCommitRow, GitSessionRow, CommitAttributionRow,
 } from "@/lib/queries";
 
 export interface DashboardData {
@@ -164,6 +164,7 @@ export interface GitData {
   stats: GitStats;
   timeline: GitTimelineRow[];
   commits: GitCommitRow[];
+  attribution: CommitAttributionRow[];
 }
 
 export function useGitData(filters: DashboardFilters) {
@@ -182,10 +183,11 @@ export function useGitData(filters: DashboardFilters) {
       fetchJson<GitStats>(`/api/git-stats${params}`),
       fetchJson<GitTimelineRow[]>(`/api/git-timeline${params}`),
       fetchJson<GitCommitRow[]>(`/api/git-commits${params}`),
+      fetchJson<CommitAttributionRow[]>(`/api/git-attribution${params}`),
     ])
-      .then(([stats, timeline, commits]) => {
+      .then(([stats, timeline, commits, attribution]) => {
         if (cancelled) return;
-        setData({ stats, timeline, commits });
+        setData({ stats, timeline, commits, attribution });
         setError(null);
         setLoading(false);
       })
@@ -200,6 +202,33 @@ export function useGitData(filters: DashboardFilters) {
 
   const refresh = useCallback(() => setTick((t) => t + 1), []);
   return { data, loading, error, refresh };
+}
+
+export function useUnlinkedAgentCommits(project: string | null, filters: DashboardFilters) {
+  const [rows, setRows] = useState<GitCommitRow[] | null>(null);
+  const { days } = filters;
+
+  // Reset to "loading" whenever the inputs change. Render-phase
+  // prev-key pattern, same as useSkillSessions, to satisfy
+  // react-hooks/set-state-in-effect.
+  const key = `${project ?? ""}|${days ?? ""}`;
+  const [prevKey, setPrevKey] = useState(key);
+  if (prevKey !== key) {
+    setPrevKey(key);
+    setRows(null);
+  }
+
+  useEffect(() => {
+    if (!project) return;
+    let cancelled = false;
+    const params = buildParams({ days, project: null }, { project });
+    fetchJson<GitCommitRow[]>(`/api/git-attribution/unlinked${params}`)
+      .then((d) => { if (!cancelled) setRows(d); })
+      .catch(() => { if (!cancelled) setRows([]); });
+    return () => { cancelled = true; };
+  }, [project, days]);
+
+  return rows;
 }
 
 export function useSessionCommits(sessionId: string | null) {
