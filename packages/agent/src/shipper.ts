@@ -50,10 +50,11 @@ export interface ShipperConfig {
   maxBatchEntries?: number;
   /** Max combined UTF-8 byte size of `entries` per batch. Splits earlier
    *  than `maxBatchEntries` when individual entries are large (e.g. Codex
-   *  rollouts with multi-KB tool output). Default 6 MiB — comfortably
-   *  under the ingestor's 8 MiB body cap once JSON-string escaping is
-   *  factored in. A single entry larger than the budget is shipped alone
-   *  rather than dropped. */
+   *  rollouts with multi-KB tool output, or `compacted` events that inline
+   *  the full conversation history). Default 24 MiB — sits under the
+   *  ingestor's 32 MiB body cap with margin for JSON-string escaping and
+   *  the batch envelope. A single entry larger than the budget is shipped
+   *  alone rather than dropped. */
   maxBatchBytes?: number;
   ship: (batch: ShippedBatch) => Promise<void>;
 }
@@ -61,7 +62,7 @@ export interface ShipperConfig {
 type OffsetMap = Record<string, number>; // fileHash → byte offset
 
 const DEFAULT_MAX_BATCH_ENTRIES = 5000;
-const DEFAULT_MAX_BATCH_BYTES = 6 * 1024 * 1024;
+const DEFAULT_MAX_BATCH_BYTES = 24 * 1024 * 1024;
 const NEWLINE = 0x0a;
 
 function fileHash(path: string): string {
