@@ -802,13 +802,20 @@ async function sessionRollups(f: Filters): Promise<DarkSpendRow[]> {
     GROUP BY sessionId
   `);
 
+  // Only agent-authored commits count toward session metrics. A
+  // human commit can land with sessionId set (e.g. through a
+  // backfill heuristic, or — historically — the now-fixed bug that
+  // promoted any in-window orphan to agentAuthored=1). The session
+  // rollup powers dark-spend / zero-code, where the question is
+  // "how productive was the agent" — credit for human-author LoC
+  // would silently flatter the ratio.
   const gitRows = await query<{ sessionId: string; commits: number; loc: number }>(`
     SELECT
       sessionId,
       COUNT(*) AS commits,
       COALESCE(SUM(COALESCE(insertions, 0) + COALESCE(deletions, 0)), 0) AS loc
     FROM git_events
-    WHERE eventType = 'commit' AND sessionId IS NOT NULL
+    WHERE eventType = 'commit' AND sessionId IS NOT NULL AND agentAuthored = 1
     GROUP BY sessionId
   `);
   const gitBySession = new Map<string, { commits: number; loc: number }>();
