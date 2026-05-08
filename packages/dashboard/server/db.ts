@@ -444,16 +444,84 @@ function backfillCommitSessions(db: Database): number {
     `UPDATE git_events SET sessionId = ?, agentAuthored = 1, agentName = COALESCE(agentName, ?) WHERE commitSha = ?`,
   );
   let filled = 0;
+  const stillOrphan: { commitSha: string; timestamp: string }[] = [];
   for (const c of orphans) {
     const candidates = byProject.get(c.project);
-    if (!candidates) continue;
     const ts = new Date(c.timestamp).getTime();
     if (isNaN(ts)) continue;
-    for (const s of candidates) {
-      if (ts >= s.start && ts <= s.end) {
-        update.run(s.sessionId, s.agent, c.commitSha);
+    let linked = false;
+    if (candidates) {
+      for (const s of candidates) {
+        if (ts >= s.start && ts <= s.end) {
+          update.run(s.sessionId, s.agent, c.commitSha);
+          filled++;
+          linked = true;
+          break;
+        }
+      }
+    }
+    if (!linked) stillOrphan.push({ commitSha: c.commitSha, timestamp: c.timestamp });
+  }
+
+  // Second pass: cross-project fallback keyed on agentName + nearest
+  // tool-call activity. The motivating case is Claude Code launched
+  // from cwd `db-mcp` (so session.project=db-mcp) calling tools that
+  // shell into the boost-dbt repo and commit there. session.project
+  // ≠ commit.project, so the first pass misses; the commit's
+  // agentName ("claude_code") + timestamp uniquely identify the
+  // session.
+  //
+  // Critically, we don't use [session.start, session.end] bounds
+  // here. Long-running Claude Code conversations span days with
+  // sparse activity, so envelope-matching produces many false
+  // candidates and the "exactly one" rule rejects everything. We
+  // restrict candidates to sessions with a tool_call within ±30min
+  // of the commit, then pick the one whose NEAREST tool_call is
+  // closest. If two sessions have an equally-close tool_call (rare
+  // tie), leave the commit orphan rather than guess.
+  const ACTIVITY_WINDOW_MS = 30 * 60 * 1000;
+  if (stillOrphan.length > 0) {
+    const orphansWithAgent = db
+      .prepare(
+        `SELECT commitSha, timestamp, agentName FROM git_events
+          WHERE sessionId IS NULL AND agentAuthored = 1 AND agentName IS NOT NULL`,
+      )
+      .all() as { commitSha: string; timestamp: string; agentName: string }[];
+    const findActivity = db.prepare(
+      `SELECT sessionId, timestamp FROM traces
+        WHERE agent = ? AND entryType = 'tool_call'
+          AND sessionId IS NOT NULL
+          AND timestamp >= ? AND timestamp <= ?`,
+    );
+    const update2 = db.prepare(
+      `UPDATE git_events SET sessionId = ? WHERE commitSha = ?`,
+    );
+    for (const c of orphansWithAgent) {
+      const ts = new Date(c.timestamp).getTime();
+      if (isNaN(ts)) continue;
+      const lo = new Date(ts - ACTIVITY_WINDOW_MS).toISOString();
+      const hi = new Date(ts + ACTIVITY_WINDOW_MS).toISOString();
+      const rows = findActivity.all(c.agentName, lo, hi) as { sessionId: string; timestamp: string }[];
+      if (rows.length === 0) continue;
+      // Reduce to (sessionId → minDistance). If two sessions tie at
+      // the minimum, we abstain — a wrong link costs more here than
+      // an undercounted one.
+      const minPerSession = new Map<string, number>();
+      for (const r of rows) {
+        const dt = Math.abs(new Date(r.timestamp).getTime() - ts);
+        const cur = minPerSession.get(r.sessionId);
+        if (cur === undefined || dt < cur) minPerSession.set(r.sessionId, dt);
+      }
+      let bestSid: string | null = null;
+      let bestDt = Infinity;
+      let tied = false;
+      for (const [sid, dt] of minPerSession) {
+        if (dt < bestDt)      { bestSid = sid; bestDt = dt; tied = false; }
+        else if (dt === bestDt) tied = true;
+      }
+      if (bestSid && !tied) {
+        update2.run(bestSid, c.commitSha);
         filled++;
-        break;
       }
     }
   }
