@@ -32,22 +32,38 @@ const DEFAULT_MAX_BODY_BYTES = 8 * 1024 * 1024;
 
 /** Read the request body as a string, capped at `maxBytes`. Rejects with a
  *  "body too large" error once the cap is exceeded so a malicious POST can't
- *  exhaust process memory. */
+ *  exhaust process memory.
+ *
+ *  Once the cap is hit we stop accumulating chunks (drop them on the floor)
+ *  and pause the stream, but we do NOT destroy the request — the request
+ *  and response share a socket, so destroying it would tear down the
+ *  response before the 413 could flush. The handler still gets to write a
+ *  proper 413; without that, Caddy in front saw an upstream that closed
+ *  with no status and turned it into a 502 with an empty body. */
 function readBody(req: IncomingMessage, maxBytes: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let total = 0;
+    let overflowed = false;
     req.on("data", (chunk: Buffer) => {
+      if (overflowed) return;
       total += chunk.length;
       if (total > maxBytes) {
-        req.destroy();
+        overflowed = true;
+        req.pause();
         reject(new Error(`body too large (>${maxBytes} bytes)`));
         return;
       }
       chunks.push(chunk);
     });
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    req.on("error", reject);
+    req.on("end", () => {
+      if (overflowed) return;
+      resolve(Buffer.concat(chunks).toString("utf8"));
+    });
+    req.on("error", (err) => {
+      if (overflowed) return;
+      reject(err);
+    });
   });
 }
 
@@ -87,7 +103,15 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
       try {
         body = await readBody(req, maxBodyBytes);
       } catch (err) {
-        json(res, 413, { error: String(err) });
+        // The client may still be uploading bytes after we hit the cap.
+        // Sending Connection: close tells Node to drop the socket after
+        // this response, so we don't have to drain or contend with
+        // leftover data on a keep-alive channel.
+        res.writeHead(413, {
+          "Content-Type": "application/json",
+          "Connection": "close",
+        });
+        res.end(JSON.stringify({ error: String(err) }));
         return;
       }
 
