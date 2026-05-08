@@ -51,6 +51,25 @@ in the same workstream:
 
 Coverage went 97.5% → 98.8% with the corrected denominator.
 
+**Open: agent-side scanner has the same promotion bug.**
+`packages/agent/src/git/scanner.ts:259` (`attributeFromSessions`)
+flips `agentAuthored=true` on any commit that falls inside a
+session window. Same shape as the dashboard backfill bug, but it
+runs at scan time so the false positives end up in normalized
+on-disk data — my dashboard-side fix only stops new promotions, not
+historical ones.
+
+Particularly bad for codex: codex doesn't write `Co-Authored-By`
+trailers, so 100% of its 211 "agent commits" in the live data are
+attributed via this session-window heuristic. Until the agent is
+patched and a re-scan runs, "codex agent commits" includes humans
+who happened to commit during a codex session.
+
+Fixing this is an agent-side change (separate package) plus a
+forced re-scan. Out of scope for the dashboard PR; tracked here so
+it surfaces when item #2 (parser changes) gets picked up — that
+work also needs a re-scan, so the two could ship together.
+
 **Boundary.** Don't conflate this with the validation panel or any
 new productivity card. One PR per behaviour change.
 
