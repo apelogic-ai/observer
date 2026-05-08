@@ -28,13 +28,28 @@ window.
    (timestamp window, branch overlap, Co-Authored-By trailer matching).
 3. Re-scan + verify the ratio drops.
 
-**Known sub-bug (found while writing the test for step 1).** The
-dashboard's ingest-time session backfill at
-`packages/dashboard/server/db.ts:444` promotes ANY orphan commit
-matching a session's project + timestamp window to `agentAuthored = 1`,
-including human commits the user happened to make during an agent
-session. That inflates `agent_commits` itself. Address as part of
-step 2.
+**Sub-bug found and fixed.** The dashboard's ingest-time session
+backfill used to promote ANY orphan commit matching a session's
+project + timestamp window to `agentAuthored = 1`, including human
+commits the user happened to make during an agent session — that
+silently inflated `agent_commits` by ~35% on the live data (279 of
+787 previously-tagged commits were actually human). The backfill
+now narrows its target to commits already tagged agent-authored at
+scan time; ratio integrity is restored.
+
+**Step 2 status (cross-project + activity-window backfill).** Done
+in the same workstream:
+
+- session.project ≠ commit.project no longer blocks attribution. A
+  second pass keys on `agentName` + nearest tool-call activity
+  (±60min window, closest-activity-wins, ties abstain). Catches the
+  diagnosed "Claude Code launched from db-mcp shells into boost-dbt
+  and commits" pattern.
+- The remaining ~6 orphans on the live dashboard need >2h-out
+  matching to find any candidate. We tested wider windows and they
+  start producing coincidental links; left as legitimate gaps.
+
+Coverage went 97.5% → 98.8% with the corrected denominator.
 
 **Boundary.** Don't conflate this with the validation panel or any
 new productivity card. One PR per behaviour change.
