@@ -124,6 +124,7 @@ const EMPTY_TRACE: Omit<TraceEntry, "id" | "timestamp" | "agent" | "sessionId" |
   gitRepo: null, gitBranch: null, gitCommit: null,
   userPrompt: null, assistantText: null, thinking: null, reasoning: null, systemPrompt: null,
   toolResultContent: null, fileContent: null, stdout: null, queryData: null,
+  exitCode: null, durationMs: null, success: null,
 };
 
 interface ComposerData {

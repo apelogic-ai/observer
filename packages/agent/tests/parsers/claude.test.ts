@@ -179,6 +179,78 @@ describe("parseClaudeEntry", () => {
     expect(entry!.toolCallId).toBe("toolu_skill1");
   });
 
+  it("tool_result entries surface success based on is_error flag", () => {
+    // Claude Code tool_result rows have an `is_error: bool` field. The
+    // parser used to compute a `success` value but never returned it
+    // — surface it on the entry so downstream metrics (validation
+    // outcomes, failed-command loops) have a reliable signal.
+    const ok = parseClaudeEntry({
+      type: "user",
+      timestamp: "2026-04-08T10:00:02.000Z",
+      message: {
+        content: [
+          { type: "tool_result", tool_use_id: "t1", content: "all good", is_error: false },
+        ],
+      },
+    }, sessionId);
+    expect(ok!.success).toBe(true);
+
+    const fail = parseClaudeEntry({
+      type: "user",
+      timestamp: "2026-04-08T10:00:03.000Z",
+      message: {
+        content: [
+          { type: "tool_result", tool_use_id: "t2", content: "permission denied", is_error: true },
+        ],
+      },
+    }, sessionId);
+    expect(fail!.success).toBe(false);
+  });
+
+  it("tool_result success falls back to substring heuristic when is_error is missing", () => {
+    // Older Claude Code traces don't always set is_error. Fall back
+    // to the cheap substring scan on the result text — better than
+    // null when we have signal but not perfect signal.
+    const flaky = parseClaudeEntry({
+      type: "user",
+      timestamp: "2026-04-08T10:00:04.000Z",
+      message: {
+        content: [
+          { type: "tool_result", tool_use_id: "t3", content: "TypeError: undefined is not a function" },
+        ],
+      },
+    }, sessionId);
+    expect(flaky!.success).toBe(false);
+
+    const clean = parseClaudeEntry({
+      type: "user",
+      timestamp: "2026-04-08T10:00:05.000Z",
+      message: {
+        content: [
+          { type: "tool_result", tool_use_id: "t4", content: "compilation finished" },
+        ],
+      },
+    }, sessionId);
+    expect(clean!.success).toBe(true);
+  });
+
+  it("Claude tool_result has null exitCode and durationMs (raw shape doesn't carry them)", () => {
+    // Claude Code's protocol doesn't emit a structured exit code or
+    // a wall-time field on tool results. Surface explicit nulls so
+    // dashboard SQL can distinguish "we don't know" from "exit 0".
+    const e = parseClaudeEntry({
+      type: "user",
+      timestamp: "2026-04-08T10:00:06.000Z",
+      message: {
+        content: [
+          { type: "tool_result", tool_use_id: "t5", content: "ok", is_error: false },
+        ],
+      },
+    }, sessionId);
+    expect(e!.exitCode).toBeNull();
+    expect(e!.durationMs).toBeNull();
+  });
+
   it("parseClaudeEntries returns multiple entries for multi-block messages", async () => {
     const { parseClaudeEntries } = await import("../../src/parsers/claude");
     const raw = {

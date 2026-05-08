@@ -159,6 +159,76 @@ describe("parseCodexEntry", () => {
     expect(entry!.toolCallId).toBe("call_456");
   });
 
+  it("function_call_output extracts exit code from the embedded `Process exited with code N` line", () => {
+    // Codex doesn't emit exit_code as a structured field — it's
+    // serialized into the output text. Pull it out so downstream
+    // metrics (validation outcomes, failed-command loops) get a
+    // first-class signal instead of substring-scanning the body.
+    const raw = {
+      timestamp: "2026-04-08T12:00:01.000Z",
+      type: "response_item",
+      payload: {
+        type: "function_call_output",
+        output: "Chunk ID: abc123\nWall time: 0.0000 seconds\nProcess exited with code 0\nOriginal token count: 5\nOutput:\nfile.txt created\n",
+        call_id: "call_okay",
+      },
+    };
+    const entry = parseCodexEntry(raw, sessionId);
+    expect(entry!.exitCode).toBe(0);
+    expect(entry!.success).toBe(true);
+  });
+
+  it("non-zero exit code marks success=false", () => {
+    const raw = {
+      timestamp: "2026-04-08T12:00:02.000Z",
+      type: "response_item",
+      payload: {
+        type: "function_call_output",
+        output: "Chunk ID: abc124\nWall time: 1.2 seconds\nProcess exited with code 1\nOutput:\nbash: command not found\n",
+        call_id: "call_fail",
+      },
+    };
+    const entry = parseCodexEntry(raw, sessionId);
+    expect(entry!.exitCode).toBe(1);
+    expect(entry!.success).toBe(false);
+  });
+
+  it("function_call_output extracts wall time as durationMs", () => {
+    // Wall time uses fractional seconds; we report milliseconds for
+    // consistency with the rest of the schema.
+    const raw = {
+      timestamp: "2026-04-08T12:00:03.000Z",
+      type: "response_item",
+      payload: {
+        type: "function_call_output",
+        output: "Chunk ID: abc125\nWall time: 2.5 seconds\nProcess exited with code 0\nOutput:\n",
+        call_id: "call_dur",
+      },
+    };
+    const entry = parseCodexEntry(raw, sessionId);
+    expect(entry!.durationMs).toBe(2500);
+  });
+
+  it("function_call_output without the codex envelope leaves exitCode/durationMs null", () => {
+    // If a tool didn't go through codex's shell wrapper (older
+    // formats, custom tools), the output won't have the
+    // "Process exited with code" / "Wall time" lines — surface
+    // explicit nulls rather than guess.
+    const raw = {
+      timestamp: "2026-04-08T12:00:04.000Z",
+      type: "response_item",
+      payload: {
+        type: "function_call_output",
+        output: "just a plain string",
+        call_id: "call_plain",
+      },
+    };
+    const entry = parseCodexEntry(raw, sessionId);
+    expect(entry!.exitCode).toBeNull();
+    expect(entry!.durationMs).toBeNull();
+    expect(entry!.success).toBeNull();
+  });
+
   it("returns null for unparseable entries", () => {
     expect(parseCodexEntry({}, sessionId)).toBeNull();
     expect(parseCodexEntry({ type: "unknown" }, sessionId)).toBeNull();

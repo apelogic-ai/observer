@@ -62,6 +62,21 @@ export interface TraceEntry {
   fileContent: string | null;
   stdout: string | null;
   queryData: string | null;
+
+  // --- TOOL-RESULT METADATA ---
+  // Filled in only on tool_result rows where the source signal is
+  // available. Kept outside the disclosure tiers above because they
+  // carry no content — just numeric / bool indicators of how the
+  // tool call resolved. See parsers/{claude,codex}.ts for sources.
+  /** Process exit code (codex shell tool only — claude has no
+   *  structured exit code in its raw shape). */
+  exitCode: number | null;
+  /** Wall-clock duration of the tool call in milliseconds (codex
+   *  shell only — extracted from the "Wall time: N seconds" line). */
+  durationMs: number | null;
+  /** Did the tool call succeed? Derived from exitCode === 0 when
+   *  available; from `is_error` (or substring fallback) for claude. */
+  success: boolean | null;
 }
 
 // ---------------------------------------------------------------------------

@@ -51,6 +51,9 @@ const EMPTY_TRACE: Omit<TraceEntry, "id" | "timestamp" | "agent" | "sessionId" |
   fileContent: null,
   stdout: null,
   queryData: null,
+  exitCode: null,
+  durationMs: null,
+  success: null,
 };
 
 /**
@@ -131,17 +134,25 @@ export function parseClaudeEntry(
   // Tool result
   if (blockType === "tool_result") {
     const resultContent = firstBlock.content;
+    // is_error is the strongest signal — when set, trust it. When
+    // missing on older traces, fall back to a substring scan over
+    // the (truncated) result text. Better-than-null when we have
+    // partial signal; the dashboard can still distinguish "we know
+    // it failed" (false) from "we don't know" (null) downstream.
+    const hasIsError = firstBlock.is_error !== undefined;
     const isError = firstBlock.is_error === true;
     let preview: string | null = null;
-
     if (typeof resultContent === "string") preview = truncate(resultContent, 200);
     else if (Array.isArray(resultContent)) preview = truncate(extractText(resultContent), 200);
 
-    let success: boolean | null = null;
-    if (isError) success = false;
-    else if (preview) {
+    let success: boolean | null;
+    if (hasIsError) {
+      success = !isError;
+    } else if (preview) {
       const lower = preview.toLowerCase();
       success = !(lower.includes("error") || lower.includes("failed") || lower.includes("exception"));
+    } else {
+      success = null;
     }
 
     return {
@@ -152,6 +163,7 @@ export function parseClaudeEntry(
       toolResultContent: typeof resultContent === "string"
         ? resultContent
         : Array.isArray(resultContent) ? extractText(resultContent) : null,
+      success,
     };
   }
 
