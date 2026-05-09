@@ -139,6 +139,22 @@ export interface ValidationCoverageRow {
   validatedAfterEdit: boolean;
 }
 
+export interface InterventionRateRow {
+  sessionId: string;
+  agent: string;
+  project: string | null;
+  started: string;
+  ended: string;
+  userTurns: number;
+  toolCalls: number;
+  commits: number;
+  locDelta: number;
+  tokens: number;
+  toolsPerTurn: number;
+  turnsPerCommit: number | null;
+  turnsPerLoc: number | null;
+}
+
 export interface ValidationLoopRow {
   sessionId: string;
   agent: string;

@@ -164,15 +164,19 @@ add complexity without much marginal signal on the live data.
 
 ## 5. User intervention rate (autonomy score)
 
-Sessions with extreme user-message counts (375 / 240 / 149 / 134 / 113
-turns) are useful proxies for "agent needed too much steering."
+**Status: shipped** as new `/autonomy` page. Per-session row of
+user-turn count + tool calls + commits + LoC + tokens, plus three
+derived ratios:
+- **tools per turn** — high = autonomous (a lot done per nudge),
+  low = stalling
+- **turns per commit** — null when no commits
+- **turns per LoC** — null when no LoC
 
-Surface:
-- user turns per commit
-- user turns per LoC delta
-- tool calls per user turn
-
-Pure SQL on existing data — no new instrumentation needed.
+Sorted user-turn-desc so the most-handheld sessions land at top.
+Live state: 1,241 sessions with user turns. Top 8 are all codex /
+db-mcp with 80–124 turns each — same project pattern as the
+boost-dbt commit-attribution oddity. Most-autonomous claude_code
+sessions hit ~190 tool calls per turn.
 
 ## 6. Search-to-edit ratio (navigation friction)
 
@@ -190,6 +194,26 @@ elapsed-time from first user message to first edit / test / commit.
 Identifies sessions where the agent over-explored before acting.
 
 Pure SQL on existing data.
+
+## UX: sortable + indicated tables
+
+**Cross-cutting** — observed while scanning /autonomy: every table
+on the dashboard hard-codes its sort order and gives no UI signal
+that the column it ranks by is *the* sort column. Two missing UX
+affordances:
+
+- **Sort indicator.** The column the table is ranked by should
+  carry an arrow / chevron showing direction.
+- **Click-to-sort.** Each column header should be clickable to
+  re-sort by that column. Currently every page bakes "rank by X
+  desc" into the SQL — useful as a default, but a user comparing
+  sessions across three different metrics has to re-query.
+
+Lift the table primitive into a shared component and add both. The
+existing pages (sessions, dark-spend, zero-code, security, skills,
+permissions, validation, autonomy, …) all benefit. Likely a single
+PR that introduces the primitive and migrates one page, then a
+follow-up sweep.
 
 ## 8. Per-session productivity score (composite)
 

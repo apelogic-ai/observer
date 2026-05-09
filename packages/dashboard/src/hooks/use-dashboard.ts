@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import type {
   Stats, ActivityRow, HeatmapRow, TokenRow, ToolRow, ProjectRow, ModelRow,
-  SessionRow, SkillRow, SkillUsageRow, SkillSessionRow, ToolDetail, StumbleRow, DarkSpendRow, ValidationCoverageRow, ValidationLoopRow,
+  SessionRow, SkillRow, SkillUsageRow, SkillSessionRow, ToolDetail, StumbleRow, DarkSpendRow, ValidationCoverageRow, ValidationLoopRow, InterventionRateRow,
   SecurityFindingRow, SecurityTimelineRow, SecuritySessionRow,
   PermissionRow, ExistingSettings,
   GitStats, GitTimelineRow, GitCommitRow, GitSessionRow, CommitAttributionRow,
@@ -333,6 +333,22 @@ export function useValidationCoverage(filters: DashboardFilters) {
     let cancelled = false;
     const params = buildParams({ days, project, agent });
     fetchJson<ValidationCoverageRow[]>(`/api/validation${params}`)
+      .then((d) => { if (!cancelled) setRows(d); })
+      .catch(() => { if (!cancelled) setRows([]); });
+    return () => { cancelled = true; };
+  }, [days, project, agent]);
+
+  return rows;
+}
+
+export function useInterventionRate(filters: DashboardFilters) {
+  const [rows, setRows] = useState<InterventionRateRow[] | null>(null);
+  const { days, project, agent } = filters;
+
+  useEffect(() => {
+    let cancelled = false;
+    const params = buildParams({ days, project, agent });
+    fetchJson<InterventionRateRow[]>(`/api/autonomy${params}`)
       .then((d) => { if (!cancelled) setRows(d); })
       .catch(() => { if (!cancelled) setRows([]); });
     return () => { cancelled = true; };
