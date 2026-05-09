@@ -1092,6 +1092,129 @@ export async function getValidationLoops(
   `);
 }
 
+// ── Intervention rate (autonomy) ───────────────────────────────
+
+export interface InterventionRateRow {
+  sessionId: string;
+  agent: string;
+  project: string | null;
+  started: string;
+  ended: string;
+  /** User-message turns — how often the human nudged the agent. */
+  userTurns: number;
+  /** All tool_call rows the agent fired in this session. */
+  toolCalls: number;
+  /** Agent-authored commits linked to this session. */
+  commits: number;
+  /** Sum of insertions + deletions across linked agent commits. */
+  locDelta: number;
+  tokens: number;
+  /** Tools per user turn. High = autonomous (agent gets a lot done
+   *  per nudge). Low = stalling / needs hand-holding. Always >= 0
+   *  since userTurns > 0 by the query's contract. */
+  toolsPerTurn: number;
+  /** Turns per commit — null when no commits (no denominator). */
+  turnsPerCommit: number | null;
+  /** Turns per LoC delta — null when no LoC. */
+  turnsPerLoc: number | null;
+}
+
+interface InterventionRateRaw {
+  sessionId: string;
+  agent: string;
+  project: string | null;
+  started: string;
+  ended: string;
+  userTurns: number;
+  toolCalls: number;
+  commits: number;
+  locDelta: number;
+  tokens: number;
+}
+
+/**
+ * Per-session "autonomy score" inputs. Counts user-turn messages
+ * (how often the human nudged), tool_call rows the agent fired,
+ * agent-authored commits + LoC linked to the session, and tokens.
+ * Only sessions with >= 1 user turn appear — system-only sessions
+ * carry no intervention signal.
+ *
+ * Sorted by userTurns descending so the most-interventional
+ * sessions land at the top.
+ */
+export async function getInterventionRate(
+  f: Filters = {},
+): Promise<InterventionRateRow[]> {
+  const rows = await query<InterventionRateRaw>(`
+    WITH user_turns AS (
+      SELECT sessionId, COUNT(*) AS userTurns
+      FROM traces
+      ${where(f, [`entryType = 'message'`, `role = 'user'`, `sessionId IS NOT NULL`])}
+      GROUP BY sessionId
+      HAVING COUNT(*) > 0
+    ),
+    tool_calls AS (
+      SELECT sessionId, COUNT(*) AS toolCalls
+      FROM traces
+      ${where(f, [`entryType = 'tool_call'`, `sessionId IS NOT NULL`])}
+      GROUP BY sessionId
+    ),
+    sessions AS (
+      SELECT
+        sessionId,
+        MIN(agent)     AS agent,
+        MAX(project)   AS project,
+        MIN(timestamp) AS started,
+        MAX(timestamp) AS ended,
+        COALESCE(SUM(${TU_TOTAL}), 0) AS tokens
+      FROM traces
+      ${where(f, [`sessionId IS NOT NULL`])}
+      GROUP BY sessionId
+    ),
+    commits AS (
+      SELECT sessionId,
+             COUNT(*) AS commits,
+             COALESCE(SUM(COALESCE(insertions, 0) + COALESCE(deletions, 0)), 0) AS locDelta
+      FROM git_events
+      WHERE eventType = 'commit'
+        AND sessionId IS NOT NULL
+        AND agentAuthored = 1
+      GROUP BY sessionId
+    )
+    SELECT
+      u.sessionId, s.agent, s.project, s.started, s.ended,
+      u.userTurns,
+      COALESCE(tc.toolCalls, 0) AS toolCalls,
+      COALESCE(c.commits, 0)    AS commits,
+      COALESCE(c.locDelta, 0)   AS locDelta,
+      s.tokens
+    FROM user_turns u
+    JOIN sessions s ON s.sessionId = u.sessionId
+    LEFT JOIN tool_calls tc ON tc.sessionId = u.sessionId
+    LEFT JOIN commits c ON c.sessionId = u.sessionId
+    ORDER BY u.userTurns DESC
+  `);
+
+  return rows.map((r) => {
+    const tokens = Number(r.tokens);
+    const userTurns = Number(r.userTurns);
+    const toolCalls = Number(r.toolCalls);
+    const commits = Number(r.commits);
+    const locDelta = Number(r.locDelta);
+    return {
+      ...r,
+      tokens,
+      userTurns,
+      toolCalls,
+      commits,
+      locDelta,
+      toolsPerTurn: toolCalls / userTurns,
+      turnsPerCommit: commits > 0 ? userTurns / commits : null,
+      turnsPerLoc: locDelta > 0 ? userTurns / locDelta : null,
+    };
+  });
+}
+
 // ── Projects ───────────────────────────────────────────────────
 
 export interface ProjectRow {
