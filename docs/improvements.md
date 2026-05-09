@@ -145,15 +145,22 @@ spend. Config-driven pattern list deferred to follow-up.
 
 ## 4. Validation-loop detector ("stuck agent" signal)
 
-Several sessions ran 200–456 validation commands. That's a different
-shape from generic stumbles: same test fails → same edit → same test.
+**Status: shipped** as a second card on `/validation`. Per
+(sessionId, command) row, surfaces validation invocations where the
+same test/lint/build/typecheck command ran ≥3 times in one session.
+Failure count is read from PR #25's `success` column on tool_result
+rows joined to the call by toolCallId, so the table distinguishes
+"ran the suite a few times on purpose" from "stuck on a red test."
 
-Add a detector for `T → E → T → E → T` cycles where T is a
-validation-tool call with the same arguments and E is an edit to the
-same file. Rank by tokens and active minutes.
+Live state: 156 loops detected. Worst cases include `bun run build`
+× 16 (9 failures) and `bun run test` × 25 (7 failures) — exactly
+the shapes the original review flagged (200-456 validation commands
+in single sessions).
 
-Depends on **#2** for clean signal (need to know which T calls
-actually failed).
+**Simplification vs original spec:** we don't enforce strict
+T → E → T → E ordering or "edit to same file between attempts."
+Repetition + failure rate already tells the story; ordering checks
+add complexity without much marginal signal on the live data.
 
 ## 5. User intervention rate (autonomy score)
 

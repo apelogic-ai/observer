@@ -139,6 +139,17 @@ export interface ValidationCoverageRow {
   validatedAfterEdit: boolean;
 }
 
+export interface ValidationLoopRow {
+  sessionId: string;
+  agent: string;
+  project: string | null;
+  command: string;
+  attempts: number;
+  failures: number;
+  startedAt: string;
+  endedAt: string;
+}
+
 export interface ProjectRow {
   project: string;
   entries: number;
