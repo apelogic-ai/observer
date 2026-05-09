@@ -1016,6 +1016,82 @@ export async function getValidationCoverage(
     });
 }
 
+// ── Validation loops (stuck-agent detector) ────────────────────
+
+export interface ValidationLoopRow {
+  sessionId: string;
+  agent: string;
+  project: string | null;
+  command: string;
+  /** How many times this validation command ran in the session. */
+  attempts: number;
+  /** How many of those linked to a tool_result with success=false. */
+  failures: number;
+  /** Wall-clock window of the loop (first call → last result). */
+  startedAt: string;
+  endedAt: string;
+}
+
+const VALIDATION_LOOP_THRESHOLD = 3;
+
+/**
+ * Find "stuck agent" loops: same validation command (test / lint /
+ * typecheck / build) running again and again in one session, often
+ * with the same failures repeating. Different shape from generic
+ * stumbles — those flag any repeated tool call; this requires the
+ * call to be a validation invocation, and we report failure count
+ * separately so the user can tell "thrashing" from "running the
+ * suite twice on purpose".
+ *
+ * Failures derive from PR #25's `success` column on tool_result
+ * rows, joined to the tool_call by `toolCallId`. Rows surface only
+ * when attempts >= VALIDATION_LOOP_THRESHOLD; sort by failures desc,
+ * then attempts desc — the most stuck loops at the top.
+ */
+export async function getValidationLoops(
+  f: Filters = {},
+): Promise<ValidationLoopRow[]> {
+  const cmdLikeClause = VALIDATION_COMMAND_PATTERNS
+    .map((p) => `command LIKE '${esc(p)}'`)
+    .join(" OR ");
+
+  return query<ValidationLoopRow>(`
+    WITH validation_calls AS (
+      SELECT sessionId, MIN(agent) AS agent, MAX(project) AS project,
+             toolCallId, command, MIN(timestamp) AS callAt
+      FROM traces
+      ${where(f, [
+        `entryType = 'tool_call'`,
+        `(toolName = 'Bash' OR toolName = 'shell')`,
+        `command IS NOT NULL`,
+        `toolCallId IS NOT NULL`,
+        `(${cmdLikeClause})`,
+      ])}
+      GROUP BY sessionId, toolCallId, command
+    ),
+    -- Pick up the matching tool_result row for each call so we can
+    -- read its success bit. Only one result per toolCallId, so a
+    -- straight join is fine.
+    results AS (
+      SELECT toolCallId, success, MAX(timestamp) AS resultAt
+      FROM traces
+      WHERE entryType = 'tool_result' AND toolCallId IS NOT NULL
+      GROUP BY toolCallId
+    )
+    SELECT
+      v.sessionId, v.agent, v.project, v.command,
+      COUNT(*) AS attempts,
+      SUM(CASE WHEN r.success = 0 THEN 1 ELSE 0 END) AS failures,
+      MIN(v.callAt) AS startedAt,
+      COALESCE(MAX(r.resultAt), MAX(v.callAt)) AS endedAt
+    FROM validation_calls v
+    LEFT JOIN results r USING (toolCallId)
+    GROUP BY v.sessionId, v.command
+    HAVING COUNT(*) >= ${VALIDATION_LOOP_THRESHOLD}
+    ORDER BY failures DESC, attempts DESC
+  `);
+}
+
 // ── Projects ───────────────────────────────────────────────────
 
 export interface ProjectRow {

@@ -2,14 +2,14 @@
 
 import Link from "next/link";
 import { useMemo } from "react";
-import { useValidationCoverage } from "@/hooks/use-dashboard";
+import { useValidationCoverage, useValidationLoops } from "@/hooks/use-dashboard";
 import { useFilters } from "@/hooks/use-filters";
 import { PageHeader } from "@/components/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { formatNumber } from "@/lib/format";
 import { AGENT_COLORS } from "@/lib/colors";
-import type { ValidationCoverageRow } from "@/lib/queries";
+import type { ValidationCoverageRow, ValidationLoopRow } from "@/lib/queries";
 
 /**
  * "Did the agent verify its own work before finishing?" surfaced
@@ -43,6 +43,7 @@ function formatTokens(n: number): string {
 export default function ValidationPage() {
   const { filters, setDays, setAgent, setProject, setGranularity, buildQs } = useFilters();
   const data = useValidationCoverage(filters);
+  const loops = useValidationLoops(filters);
 
   const summary = useMemo(() => {
     if (!data) return null;
@@ -113,7 +114,75 @@ export default function ValidationPage() {
           )}
         </CardContent>
       </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Stuck-test loops</CardTitle>
+          <p className="text-xs text-muted-foreground mt-1">
+            The same validation command running ≥3 times in one
+            session. When most attempts fail, that&apos;s the
+            T → E → T → E shape of an agent stuck on a red test —
+            a different signal from generic stumbles, since here we
+            know the call was a test or lint and we know how it
+            resolved. Sorted failures first.
+          </p>
+        </CardHeader>
+        <CardContent>
+          {loops === null ? (
+            <div className="text-sm text-muted-foreground">Loading…</div>
+          ) : loops.length === 0 ? (
+            <div className="text-sm text-muted-foreground">
+              No validation loops in this window.
+            </div>
+          ) : (
+            <LoopsTable rows={loops} />
+          )}
+        </CardContent>
+      </Card>
     </main>
+  );
+}
+
+function LoopsTable({ rows }: { rows: ValidationLoopRow[] }) {
+  return (
+    <table className="w-full text-sm">
+      <thead className="text-xs text-muted-foreground border-b border-border">
+        <tr>
+          <th className="text-left py-2 font-normal">Session</th>
+          <th className="text-left py-2 font-normal">Agent</th>
+          <th className="text-left py-2 font-normal">Project</th>
+          <th className="text-left py-2 font-normal">Command</th>
+          <th className="text-right py-2 font-normal">Attempts</th>
+          <th className="text-right py-2 font-normal">Failures</th>
+          <th className="text-right py-2 font-normal">When</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((r) => (
+          <tr key={`${r.sessionId}\t${r.command}`} className="border-b border-border/40">
+            <td className="py-2 font-mono">
+              <Link href={`/session?id=${encodeURIComponent(r.sessionId)}`} className="text-brand hover:underline">
+                {r.sessionId.slice(0, 12)}
+              </Link>
+            </td>
+            <td className="py-2">
+              <Badge
+                variant="outline"
+                className="text-[10px]"
+                style={{ borderColor: AGENT_COLORS[r.agent], color: AGENT_COLORS[r.agent] }}
+              >
+                {r.agent.replace("_", " ")}
+              </Badge>
+            </td>
+            <td className="py-2 text-muted-foreground">{r.project ?? "—"}</td>
+            <td className="py-2 font-mono text-xs max-w-[420px] truncate">{r.command}</td>
+            <td className="py-2 tabular-nums text-right">{formatNumber(r.attempts)}</td>
+            <td className="py-2 tabular-nums text-right text-orange-500">{formatNumber(r.failures)}</td>
+            <td className="py-2 tabular-nums text-right text-muted-foreground">{r.startedAt.slice(0, 10)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }
 
