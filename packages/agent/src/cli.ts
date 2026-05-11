@@ -950,10 +950,12 @@ async function updateAction(): Promise<void> {
   console.log(`Platform: ${target}`);
   console.log();
 
-  // Tag scheme matches what release.yml publishes (`v<version>`). Allow an
-  // OBSERVER_REPO override so forks/test releases can repoint without a
-  // recompile.
-  const repo = process.env.OBSERVER_REPO ?? "apelogic-ai/observer";
+  // Tag scheme matches what release.yml publishes (`v<version>`). The
+  // repo is hardcoded — no env override. A single line in a shell rc
+  // or CI env could otherwise flip the next update to fetch from an
+  // attacker-controlled fork (OBS-003, 2026-05 review). Forks that
+  // genuinely need a different update source can recompile.
+  const repo = "apelogic-ai/observer";
   console.log("Checking for updates...");
   let latestTag: string;
   try {

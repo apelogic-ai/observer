@@ -44,6 +44,16 @@ COPY packages/api/tsconfig.json /app/packages/api/tsconfig.json
 # Workspace metadata for bun's resolver.
 COPY package.json /app/package.json
 
+# Default to production so the ingestor refuses to fall back to its
+# local-dev API key when OBSERVER_API_KEYS is unset (OBS-006,
+# 2026-05 review). docker-compose.yml previously set this; baking
+# it into the image protects bare `docker run` / mis-configured
+# Kubernetes pods that don't set NODE_ENV explicitly. Note: the
+# main.ts startup check now also refuses to start without
+# OBSERVER_API_KEYS regardless of NODE_ENV — this is defence in
+# depth.
+ENV NODE_ENV=production
+
 # Drop privileges. The bun image ships a `bun` user with uid 1000.
 USER bun
 

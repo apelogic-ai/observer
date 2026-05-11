@@ -22,8 +22,16 @@ export interface IngestorConfig {
    *  the local filesystem; pass a custom backend for tests. Wins over
    *  `dataDir` when both are supplied. */
   storage?: Storage;
-  trustedKeys?: Record<string, string>;   // fingerprint → PEM public key
-  apiKeys?: string[];                      // valid API keys
+  /** Ed25519 trust map: fingerprint → { developer, PEM public key }.
+   *  The `developer` binds the key to a tenant identity so the
+   *  authenticated caller can only write batches for their own
+   *  developer (OBS-004, 2026-05 review). */
+  trustedKeys?: Record<string, { developer: string; publicKeyPem: string }>;
+  /** API key → developer map. Same tenant-binding semantics as
+   *  `trustedKeys`: each key authenticates exactly one developer.
+   *  A batch whose `developer` field doesn't match the authenticated
+   *  developer is rejected (OBS-004). */
+  apiKeys?: Record<string, string>;
   /** Max request body size in bytes. Defaults to 32 MiB — sized to accept
    *  Codex `compacted` events that inline the full conversation history,
    *  which routinely cross 8 MiB on long sessions. Override via the
@@ -89,7 +97,10 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
     throw new Error("createIngestor requires either `storage` or `dataDir`");
   }
   const store = new Store(config.storage ?? config.dataDir!);
-  const validApiKeys = new Set(config.apiKeys ?? []);
+  // Tenant binding: each credential resolves to exactly one developer.
+  // Reject batches whose `developer` field doesn't match the resolved
+  // tenant (OBS-004, 2026-05 review).
+  const apiKeyToDeveloper = new Map<string, string>(Object.entries(config.apiKeys ?? {}));
   const trustedKeys = config.trustedKeys ?? {};
   const maxBodyBytes = config.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
 
@@ -119,35 +130,38 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
       }
 
       // --- Authentication ---
+      // Both auth modes (API key + Ed25519 fingerprint) resolve to a
+      // developer identity; the batch's `developer` field must match
+      // that identity (OBS-004). authenticatedDeveloper stays null
+      // until a credential validates AND resolves a tenant.
       const authHeader = req.headers["authorization"];
       const signature = req.headers["x-observer-signature"] as string | undefined;
       const fingerprint = req.headers["x-observer-key-fingerprint"] as string | undefined;
 
-      let authenticated = false;
+      let authenticatedDeveloper: string | null = null;
 
       // API key auth
       if (authHeader?.startsWith("Bearer ")) {
         const key = authHeader.slice(7);
-        if (validApiKeys.has(key)) {
-          authenticated = true;
-        }
+        const dev = apiKeyToDeveloper.get(key);
+        if (dev) authenticatedDeveloper = dev;
       }
 
       // Signature auth
-      if (!authenticated && signature && fingerprint) {
-        const publicKeyPem = trustedKeys[fingerprint];
-        if (!publicKeyPem) {
+      if (authenticatedDeveloper === null && signature && fingerprint) {
+        const entry = trustedKeys[fingerprint];
+        if (!entry) {
           json(res, 401, { error: "Unknown key fingerprint" });
           return;
         }
-        if (!verifyEd25519(body, signature, publicKeyPem)) {
+        if (!verifyEd25519(body, signature, entry.publicKeyPem)) {
           json(res, 403, { error: "Invalid signature" });
           return;
         }
-        authenticated = true;
+        authenticatedDeveloper = entry.developer;
       }
 
-      if (!authenticated) {
+      if (authenticatedDeveloper === null) {
         json(res, 401, { error: "Authentication required" });
         return;
       }
@@ -169,6 +183,16 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
 
       const batchId = typeof batch.batchId === "string" ? batch.batchId : undefined;
       const developer = String(batch.developer ?? "unknown");
+
+      // Tenant binding: the credential resolves to a developer, and the
+      // batch's `developer` must match. Without this, any authenticated
+      // caller could pre-claim another developer's batchIds and cause
+      // the legitimate batches to be silently dropped as duplicates
+      // (OBS-004, 2026-05 review).
+      if (developer !== authenticatedDeveloper) {
+        json(res, 403, { error: "developer mismatch: batch's developer field does not match the authenticated identity" });
+        return;
+      }
 
       // Dedup: if we've already received this batchId, return 200 (idempotent)
       if (batchId && (await store.isDuplicate(batchId, developer))) {

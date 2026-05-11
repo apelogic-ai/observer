@@ -24,17 +24,41 @@ const port = parseInt(process.argv.find((a) => a.startsWith("--port="))?.split("
 const dataDir = process.argv.find((a) => a.startsWith("--data-dir="))?.split("=")[1] ??
   process.argv[process.argv.indexOf("--data-dir") + 1] ?? `${process.env.HOME}/.observer/lakehouse`;
 
-// OBSERVER_API_KEYS is required for any non-development environment. The
-// dev fallback is a single fixed key, clearly flagged in the startup log.
-const isDev = process.env.NODE_ENV === "development" || process.env.NODE_ENV === undefined;
+// OBSERVER_API_KEYS is required. No NODE_ENV fallback — the previous
+// fallback to a hardcoded "key_local_dev" Bearer token was reachable
+// from any deployment that didn't explicitly set NODE_ENV
+// (OBS-006, 2026-05 review): the Dockerfile didn't set it, only
+// docker-compose.yml did, so bare `docker run` or a misconfigured
+// Kubernetes pod ended up authenticating any request with a
+// publicly-known key.
+//
+// Format: each entry is `<developer>:<key>`, e.g.
+//   OBSERVER_API_KEYS=alice:key_abc,bob:key_def
+// The developer prefix binds the key to a tenant identity so a
+// caller can't claim other developers' batches (OBS-004).
 const rawKeys = process.env.OBSERVER_API_KEYS?.split(",").map((k) => k.trim()).filter(Boolean) ?? [];
-if (rawKeys.length === 0 && !isDev) {
+if (rawKeys.length === 0) {
   console.error("Refusing to start: OBSERVER_API_KEYS is not set.");
-  console.error("Set NODE_ENV=development to use the local dev key, or provide real keys.");
+  console.error("Format: <developer>:<key>,<developer>:<key>");
+  console.error('Example: OBSERVER_API_KEYS="alice:key_abc,bob:key_def"');
   process.exit(1);
 }
-const apiKeys = rawKeys.length > 0 ? rawKeys : ["key_local_dev"];
-const usingDevKey = rawKeys.length === 0;
+const apiKeys = new Map<string, string>();   // key → developer
+for (const entry of rawKeys) {
+  const colon = entry.indexOf(":");
+  if (colon <= 0 || colon === entry.length - 1) {
+    console.error(`Refusing to start: OBSERVER_API_KEYS entry "${entry}" is missing a developer prefix.`);
+    console.error("Format: <developer>:<key> per entry. Each key must be bound to a single developer (OBS-004).");
+    process.exit(1);
+  }
+  const developer = entry.slice(0, colon).trim();
+  const key = entry.slice(colon + 1).trim();
+  if (apiKeys.has(key)) {
+    console.error(`Refusing to start: API key listed twice (developers "${apiKeys.get(key)}" and "${developer}").`);
+    process.exit(1);
+  }
+  apiKeys.set(key, developer);
+}
 
 // Storage backend
 const storageKind = (process.env.OBSERVER_STORAGE ?? "fs").toLowerCase();
@@ -76,13 +100,17 @@ if (rawMaxBody) {
 console.log(`Observer API starting...`);
 console.log(`  Port:    ${port}`);
 console.log(`  Storage: ${storageDescription}`);
-console.log(`  API keys: ${apiKeys.length} configured${usingDevKey ? " (DEV FALLBACK — do not use in production)" : ""}`);
+console.log(`  API keys: ${apiKeys.size} configured (bound to ${new Set(apiKeys.values()).size} developer${new Set(apiKeys.values()).size === 1 ? "" : "s"})`);
 if (maxBodyBytes !== undefined) {
   console.log(`  Max body: ${maxBodyBytes} bytes (override)`);
 }
 console.log();
 
-createIngestor({ port, dataDir, storage, apiKeys, maxBodyBytes }).then(() => {
+createIngestor({
+  port, dataDir, storage,
+  apiKeys: Object.fromEntries(apiKeys),
+  maxBodyBytes,
+}).then(() => {
   console.log(`Listening on http://localhost:${port}`);
   console.log(`  POST /api/ingest  — receive batches`);
   console.log(`  GET  /health      — health check`);
