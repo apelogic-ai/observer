@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import type {
   Stats, ActivityRow, HeatmapRow, TokenRow, ToolRow, ProjectRow, ModelRow,
-  SessionRow, SkillRow, SkillUsageRow, SkillSessionRow, ToolDetail, StumbleRow, DarkSpendRow, ValidationCoverageRow, ValidationLoopRow, InterventionRateRow,
+  SessionRow, SkillRow, SkillUsageRow, SkillSessionRow, ToolDetail, StumbleRow, DarkSpendRow, ValidationCoverageRow, ValidationLoopRow, InterventionRateRow, SearchToEditRow, FirstActionLatencyRow,
   SecurityFindingRow, SecurityTimelineRow, SecuritySessionRow,
   PermissionRow, ExistingSettings,
   GitStats, GitTimelineRow, GitCommitRow, GitSessionRow, CommitAttributionRow,
@@ -338,6 +338,34 @@ export function useValidationCoverage(filters: DashboardFilters) {
     return () => { cancelled = true; };
   }, [days, project, agent]);
 
+  return rows;
+}
+
+export function useSearchToEdit(filters: DashboardFilters) {
+  const [rows, setRows] = useState<SearchToEditRow[] | null>(null);
+  const { days, project, agent } = filters;
+  useEffect(() => {
+    let cancelled = false;
+    const params = buildParams({ days, project, agent });
+    fetchJson<SearchToEditRow[]>(`/api/efficiency/search-to-edit${params}`)
+      .then((d) => { if (!cancelled) setRows(d); })
+      .catch(() => { if (!cancelled) setRows([]); });
+    return () => { cancelled = true; };
+  }, [days, project, agent]);
+  return rows;
+}
+
+export function useFirstActionLatency(filters: DashboardFilters) {
+  const [rows, setRows] = useState<FirstActionLatencyRow[] | null>(null);
+  const { days, project, agent } = filters;
+  useEffect(() => {
+    let cancelled = false;
+    const params = buildParams({ days, project, agent });
+    fetchJson<FirstActionLatencyRow[]>(`/api/efficiency/first-action${params}`)
+      .then((d) => { if (!cancelled) setRows(d); })
+      .catch(() => { if (!cancelled) setRows([]); });
+    return () => { cancelled = true; };
+  }, [days, project, agent]);
   return rows;
 }
 

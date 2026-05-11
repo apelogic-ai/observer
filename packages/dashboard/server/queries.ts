@@ -1215,6 +1215,226 @@ export async function getInterventionRate(
   });
 }
 
+// ── Session efficiency: search-to-edit ratio + first-action latency ──
+
+/**
+ * Tool names that count as "reading" — looking around the codebase
+ * without changing it. Bash/shell calls are also treated as reads
+ * when the command starts with a known navigation verb (grep, find,
+ * ls, cat, head, tail). The list is intentionally short — a long
+ * tail of obscure shell tools isn't worth chasing for v1.
+ */
+const READ_TOOL_NAMES = new Set([
+  "Read", "Glob", "Grep",                      // Claude Code
+  "search", "grep", "list", "read",            // Cursor (post-normalization)
+  "ToolSearch",
+]);
+const READ_COMMAND_PATTERNS: string[] = [
+  "grep%", "rg %", "rg\t%",
+  "find %", "find .%",
+  "ls%", "cat %", "head %", "tail %", "less %", "more %",
+  "git log%", "git show%", "git diff%", "git status%", "git blame%",
+  "wc -l%",
+];
+
+export interface SearchToEditRow {
+  sessionId: string;
+  agent: string;
+  project: string | null;
+  reads: number;
+  edits: number;
+  ratio: number;
+  started: string;
+  ended: string;
+  tokens: number;
+}
+
+/**
+ * "Navigation friction" per session — high reads-per-edit means the
+ * agent grep'd around a lot before making a small change. Filtered
+ * to sessions with at least one edit; pure exploration sessions
+ * don't have the signal we want.
+ *
+ * Read-detection covers both shape (toolName in READ_TOOL_NAMES)
+ * AND a Bash/shell call whose command starts with a navigation verb,
+ * because grep/find/ls fire as Bash calls in the live data, not as
+ * dedicated read-tool primitives.
+ */
+export async function getSearchToEditRatio(
+  f: Filters = {},
+): Promise<SearchToEditRow[]> {
+  const editToolList = [...EDIT_TOOL_NAMES].map((t) => `'${esc(t)}'`).join(", ");
+  const readToolList = [...READ_TOOL_NAMES].map((t) => `'${esc(t)}'`).join(", ");
+  const readCmdClause = READ_COMMAND_PATTERNS
+    .map((p) => `command LIKE '${esc(p)}'`)
+    .join(" OR ");
+
+  const rows = await query<{
+    sessionId: string; agent: string; project: string | null;
+    reads: number; edits: number;
+    started: string; ended: string; tokens: number;
+  }>(`
+    WITH read_calls AS (
+      SELECT sessionId, COUNT(*) AS reads
+      FROM traces
+      ${where(f, [
+        `entryType = 'tool_call'`,
+        `sessionId IS NOT NULL`,
+        `(toolName IN (${readToolList})
+          OR ((toolName = 'Bash' OR toolName = 'shell') AND command IS NOT NULL AND (${readCmdClause})))`,
+      ])}
+      GROUP BY sessionId
+    ),
+    edit_calls AS (
+      SELECT sessionId, COUNT(*) AS edits
+      FROM traces
+      ${where(f, [
+        `entryType = 'tool_call'`,
+        `sessionId IS NOT NULL`,
+        `toolName IN (${editToolList})`,
+      ])}
+      GROUP BY sessionId
+      HAVING COUNT(*) > 0
+    ),
+    sessions AS (
+      SELECT
+        sessionId,
+        MIN(agent)     AS agent,
+        MAX(project)   AS project,
+        MIN(timestamp) AS started,
+        MAX(timestamp) AS ended,
+        COALESCE(SUM(${TU_TOTAL}), 0) AS tokens
+      FROM traces
+      ${where(f, [`sessionId IS NOT NULL`])}
+      GROUP BY sessionId
+    )
+    SELECT
+      e.sessionId, s.agent, s.project,
+      COALESCE(r.reads, 0) AS reads,
+      e.edits,
+      s.started, s.ended, s.tokens
+    FROM edit_calls e
+    JOIN sessions s ON s.sessionId = e.sessionId
+    LEFT JOIN read_calls r ON r.sessionId = e.sessionId
+  `);
+
+  return rows
+    .map((r) => ({ ...r, tokens: Number(r.tokens), ratio: Number(r.reads) / Number(r.edits) }))
+    .sort((a, b) => b.ratio - a.ratio);
+}
+
+export interface FirstActionLatencyRow {
+  sessionId: string;
+  agent: string;
+  project: string | null;
+  /** First user message timestamp. */
+  firstUserMsgAt: string;
+  /** First edit / validation-shaped Bash / linked agent commit. */
+  firstActionAt: string;
+  latencyMs: number;
+  tokens: number;
+}
+
+/**
+ * Time between the first user message and the first useful action
+ * (edit, validation Bash/shell call, or linked agent commit). Long
+ * latencies = the agent over-explored before doing anything. Only
+ * sessions with at least one such action appear; sessions that
+ * never produced one carry no latency to measure.
+ */
+export async function getFirstActionLatency(
+  f: Filters = {},
+): Promise<FirstActionLatencyRow[]> {
+  const editToolList = [...EDIT_TOOL_NAMES].map((t) => `'${esc(t)}'`).join(", ");
+  const cmdLikeClause = VALIDATION_COMMAND_PATTERNS
+    .map((p) => `command LIKE '${esc(p)}'`)
+    .join(" OR ");
+
+  const rows = await query<{
+    sessionId: string; agent: string; project: string | null;
+    firstUserMsgAt: string; firstActionAt: string;
+    tokens: number;
+  }>(`
+    WITH actions AS (
+      -- "Useful action" = edit-shaped tool call OR validation
+      -- Bash/shell call OR a linked agent commit. Treat all three
+      -- via UNION ALL so MIN(timestamp) just works.
+      SELECT sessionId, MIN(timestamp) AS firstActionAt FROM (
+        SELECT sessionId, timestamp
+        FROM traces
+        ${where(f, [
+          `entryType = 'tool_call'`,
+          `sessionId IS NOT NULL`,
+          `(toolName IN (${editToolList})
+            OR ((toolName = 'Bash' OR toolName = 'shell') AND command IS NOT NULL AND (${cmdLikeClause})))`,
+        ])}
+        UNION ALL
+        SELECT sessionId, timestamp
+        FROM git_events
+        WHERE eventType = 'commit'
+          AND sessionId IS NOT NULL
+          AND agentAuthored = 1
+      )
+      GROUP BY sessionId
+    ),
+    -- Use the LAST user message before the first action, not the
+    -- first one in the session. Long-running sessions (Codex
+    -- Desktop keeps a single conversation alive across days) have
+    -- a first-msg timestamp from when the conversation started,
+    -- but the action we're measuring was triggered by a much
+    -- later prompt. "Last preceding prompt → action" captures the
+    -- intent of the doc spec (over-exploration delay) without
+    -- the multi-day false positives.
+    user_msg AS (
+      -- All user messages, then we constrain to those at-or-before
+      -- the session's first action and pick the LAST one. Cleaner
+      -- as a sub-SELECT than wedging a JOIN into the where() helper,
+      -- which prepends an unaliased timestamp-IS-NOT-NULL filter.
+      SELECT um.sessionId, MAX(um.timestamp) AS firstUserMsgAt
+      FROM (
+        SELECT sessionId, timestamp
+        FROM traces
+        ${where(f, [`entryType = 'message'`, `role = 'user'`, `sessionId IS NOT NULL`])}
+      ) um
+      JOIN actions a ON a.sessionId = um.sessionId
+      WHERE um.timestamp <= a.firstActionAt
+      GROUP BY um.sessionId
+    ),
+    sessions AS (
+      SELECT
+        sessionId,
+        MIN(agent)     AS agent,
+        MAX(project)   AS project,
+        COALESCE(SUM(${TU_TOTAL}), 0) AS tokens
+      FROM traces
+      ${where(f, [`sessionId IS NOT NULL`])}
+      GROUP BY sessionId
+    )
+    SELECT
+      u.sessionId, s.agent, s.project,
+      u.firstUserMsgAt, a.firstActionAt,
+      s.tokens
+    FROM user_msg u
+    JOIN actions a USING (sessionId)
+    JOIN sessions s USING (sessionId)
+  `);
+
+  // Cap at 2 hours. Beyond that, the latency reflects a session
+  // resumed after a long gap, not the agent over-exploring before
+  // acting — including those drags the page towards multi-day
+  // outliers that aren't actionable as a quality signal. The
+  // doc's motivating example was "20-60+ minutes," so 2h is
+  // comfortably wider than the signal we want to catch.
+  const MAX_LATENCY_MS = 2 * 60 * 60 * 1000;
+  return rows
+    .map((r) => {
+      const latencyMs = new Date(r.firstActionAt).getTime() - new Date(r.firstUserMsgAt).getTime();
+      return { ...r, tokens: Number(r.tokens), latencyMs };
+    })
+    .filter((r) => r.latencyMs >= 0 && r.latencyMs <= MAX_LATENCY_MS)
+    .sort((a, b) => b.latencyMs - a.latencyMs);
+}
+
 // ── Projects ───────────────────────────────────────────────────
 
 export interface ProjectRow {
