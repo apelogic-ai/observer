@@ -112,7 +112,9 @@ vi .env
 
 Set:
 - `DOMAIN=api.dev.observer.apelogic.ai`
-- `OBSERVER_API_KEYS=` (generate with `openssl rand -hex 32`)
+- `OBSERVER_API_KEYS=<developer>:<key>[,<developer>:<key>...]`
+  (each entry binds a key to a developer for tenant isolation;
+  generate key values with `openssl rand -hex 32`)
 - `OBSERVER_S3_BUCKET=` (from terraform output)
 - `OBSERVER_S3_REGION=` (matches `aws_region` from terraform.tfvars)
 
@@ -140,9 +142,9 @@ curl -fsSL https://api.dev.observer.apelogic.ai/health
 # {"status":"ok"}
 
 curl -X POST https://api.dev.observer.apelogic.ai/api/ingest \
-  -H "Authorization: Bearer <one of your OBSERVER_API_KEYS>" \
+  -H "Authorization: Bearer <the key half of one OBSERVER_API_KEYS entry>" \
   -H "Content-Type: application/json" \
-  -d '{"developer":"you@example.com","machine":"laptop","agent":"claude_code","project":"smoke","sourceFile":"/x","shippedAt":"2026-04-29T00:00:00Z","entries":["{\"a\":1}"]}'
+  -d '{"developer":"<the developer half of the same entry>","machine":"laptop","agent":"claude_code","project":"smoke","sourceFile":"/x","shippedAt":"2026-04-29T00:00:00Z","entries":["{\"a\":1}"]}'
 # {"status":"ok","entryCount":1}
 ```
 

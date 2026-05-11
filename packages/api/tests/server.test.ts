@@ -42,9 +42,12 @@ describe("Ingestor server", () => {
     const config: IngestorConfig = {
       port: PORT,
       dataDir,
-      // Register the test key
-      trustedKeys: { [fp]: kp.publicKeyPem },
-      apiKeys: ["key_test_valid"],
+      // Register the test key. Tenant binding (OBS-004) means each
+      // credential maps to a developer; the test fixtures below
+      // post batches with developer="alice@acme.com" so we bind
+      // both auth methods to that identity.
+      trustedKeys: { [fp]: { developer: "alice@acme.com", publicKeyPem: kp.publicKeyPem } },
+      apiKeys: { "key_test_valid": "alice@acme.com" },
     };
     server = await createIngestor(config);
   });
@@ -113,8 +116,11 @@ describe("Ingestor server", () => {
 
   it("accepts batch with valid Ed25519 signature", async () => {
     const kp = loadKeypair(keyDir)!;
+    // The trustedKey is bound to alice@acme.com — tenant binding
+    // (OBS-004) requires the batch's developer to match. The
+    // separate tenant-binding.test.ts covers the mismatch branch.
     const batch = {
-      developer: "bob",
+      developer: "alice@acme.com",
       machine: "bob-pc",
       agent: "codex",
       project: "signed-proj",
@@ -184,7 +190,8 @@ describe("Ingestor server", () => {
 
   it("stores the batch in the lakehouse", async () => {
     const batch = {
-      developer: "stored@acme.com",
+      // Must match the api key's bound developer (OBS-004).
+      developer: "alice@acme.com",
       machine: "m",
       agent: "claude_code",
       project: "store-test",
@@ -227,7 +234,7 @@ describe("Ingestor server — large bodies", () => {
     server = await createIngestor({
       port: LARGE_PORT,
       dataDir,
-      apiKeys: ["key_test_valid"],
+      apiKeys: { "key_test_valid": "large-body@acme.com" },
       maxBodyBytes: LARGE_CAP,
     });
   });
@@ -279,7 +286,7 @@ describe("Ingestor server — body overflow", () => {
     server = await createIngestor({
       port: OVERFLOW_PORT,
       dataDir,
-      apiKeys: ["key_test_valid"],
+      apiKeys: { "key_test_valid": "x" },
       maxBodyBytes: MAX_BYTES,
     });
   });

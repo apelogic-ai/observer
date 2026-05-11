@@ -15,5 +15,8 @@
   },
   "packageManager": "bun@1.2.0",
   "trustedDependencies": [
-  ]
+  ],
+  "overrides": {
+    "@dotenvx/dotenvx": "1.61.6"
+  }
 }

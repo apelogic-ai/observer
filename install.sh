@@ -7,11 +7,14 @@
 # Environment variables:
 #   OBSERVER_VERSION  — specific version (default: latest)
 #   OBSERVER_DIR      — install directory (default: ~/.local/bin)
-#   OBSERVER_REPO     — owner/repo override (default: apelogic-ai/observer)
+#
+# Note: the upstream repo is hardcoded. A single line in a shell rc
+# or CI env could otherwise flip the install to fetch from an
+# attacker-controlled fork (OBS-003, 2026-05 review).
 
 set -euo pipefail
 
-REPO="${OBSERVER_REPO:-apelogic-ai/observer}"
+REPO="apelogic-ai/observer"
 INSTALL_DIR="${OBSERVER_DIR:-$HOME/.local/bin}"
 BINARY_NAME="observer"
 
@@ -127,23 +130,29 @@ main() {
     error "Download failed. Check https://github.com/${REPO}/releases for available versions."
   fi
 
-  # Verify checksum
+  # Verify checksum. Fail closed: if the .sha256 download fails for any
+  # reason, refuse to install. A network-position adversary who can
+  # serve the binary URL but block the checksum URL would otherwise
+  # get code execution on every install (OBS-001, 2026-05 review).
+  # Matches the in-binary updater's behaviour at cli.ts:993-998.
   local tmp_checksum
   tmp_checksum=$(mktemp)
-  if curl -fsSL "$checksum_url" -o "$tmp_checksum" 2>/dev/null; then
-    local expected actual
-    expected=$(awk '{print $1}' "$tmp_checksum")
-    if command -v sha256sum &>/dev/null; then
-      actual=$(sha256sum "$tmp_file" | awk '{print $1}')
-    else
-      actual=$(shasum -a 256 "$tmp_file" | awk '{print $1}')
-    fi
-    if [ "$expected" != "$actual" ]; then
-      rm -f "$tmp_file" "$tmp_checksum"
-      error "Checksum mismatch! Expected $expected, got $actual"
-    fi
-    dim "Checksum verified"
+  if ! curl -fsSL "$checksum_url" -o "$tmp_checksum" 2>/dev/null; then
+    rm -f "$tmp_file" "$tmp_checksum"
+    error "Could not download checksum from ${checksum_url}. Refusing to install an unverified binary."
   fi
+  local expected actual
+  expected=$(awk '{print $1}' "$tmp_checksum")
+  if command -v sha256sum &>/dev/null; then
+    actual=$(sha256sum "$tmp_file" | awk '{print $1}')
+  else
+    actual=$(shasum -a 256 "$tmp_file" | awk '{print $1}')
+  fi
+  if [ "$expected" != "$actual" ]; then
+    rm -f "$tmp_file" "$tmp_checksum"
+    error "Checksum mismatch! Expected $expected, got $actual"
+  fi
+  dim "Checksum verified"
   rm -f "$tmp_checksum"
 
   # Install (dest declared at top for early-exit version check)

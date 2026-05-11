@@ -20,6 +20,22 @@ function findFiles(dir: string, suffix: string): string[] {
   }
   return results;
 }
+
+/**
+ * Return all `.meta.json` files under the lakehouse whose embedded
+ * `project` field matches. Used per-test to scope assertions to the
+ * batches that test produced — the lakehouse partition hashes the
+ * developer, so we can't filter by path; project is the next-best
+ * test-scoped discriminator.
+ */
+function filterByProject(lakehouseDir: string, project: string): string[] {
+  return findFiles(join(lakehouseDir, "raw"), ".meta.json").filter((f) => {
+    try {
+      const m = JSON.parse(readFileSync(f, "utf-8")) as { project?: string };
+      return m.project === project;
+    } catch { return false; }
+  });
+}
 import type { Server } from "node:http";
 
 // Agent modules
@@ -56,8 +72,21 @@ describe("E2E: agent → ingestor → lakehouse", () => {
     server = await createIngestor({
       port: PORT,
       dataDir: lakehouseDir,
-      trustedKeys: { [fp]: kp.publicKeyPem },
-      apiKeys: ["key_e2e_test"],
+      // Each test in this file uses its own developer label. To
+      // keep tenant binding strict (OBS-004) AND avoid one
+      // gigantic test setup, we register one key per developer
+      // up-front. Each test posts with `developer = <its-dev>`
+      // and authenticates with the matching `key_<dev>`.
+      trustedKeys: { [fp]: { developer: "e2e-dev", publicKeyPem: kp.publicKeyPem } },
+      apiKeys: {
+        "key_e2e_test":         "e2e-dev",
+        "key_signer":           "signer@acme.com",
+        "key_multi_batch_dev":  "multi-batch-dev@acme.com",
+        "key_byte_split_dev":   "byte-split-dev@acme.com",
+        "key_retry_dev":        "retry-dev@acme.com",
+        "key_partial_dev":      "partial-dev@acme.com",
+        "key_secrets_dev":      "secrets-dev",
+      },
     });
   });
 
@@ -86,7 +115,7 @@ describe("E2E: agent → ingestor → lakehouse", () => {
     });
 
     const shipper = new Shipper({
-      developer: "e2e-developer@acme.com",
+      developer: "e2e-dev",
       machine: "e2e-machine",
       stateDir: agentStateDir,
       redactSecrets: true,
@@ -111,7 +140,7 @@ describe("E2E: agent → ingestor → lakehouse", () => {
     // Verify metadata
     const metaFiles = findFiles(join(lakehouseDir, "raw"), ".meta.json");
     const meta = JSON.parse(readFileSync(metaFiles[0], "utf-8"));
-    expect(meta.developer).toBe("e2e-developer@acme.com");
+    expect(meta.developer).toBe("e2e-dev");
     expect(meta.machine).toBe("e2e-machine");
     expect(meta.agent).toBe("claude_code");
     expect(meta.entryCount).toBe(2);
@@ -137,7 +166,7 @@ describe("E2E: agent → ingestor → lakehouse", () => {
     });
 
     const shipper = new Shipper({
-      developer: "signer@acme.com",
+      developer: "e2e-dev",
       machine: "sign-machine",
       stateDir: signedStateDir,
       redactSecrets: false,
@@ -152,7 +181,7 @@ describe("E2E: agent → ingestor → lakehouse", () => {
     expect(metaFiles.length).toBeGreaterThanOrEqual(1);
 
     const meta = JSON.parse(readFileSync(metaFiles[0], "utf-8"));
-    expect(meta.developer).toBe("signer@acme.com");
+    expect(meta.developer).toBe("e2e-dev");
   });
 
   it("splits a multi-batch file by entry count and ships every batch", async () => {
@@ -176,7 +205,7 @@ describe("E2E: agent → ingestor → lakehouse", () => {
       apiKey: "key_e2e_test",
     });
     const shipper = new Shipper({
-      developer: "multi-batch-dev@acme.com",
+      developer: "e2e-dev",
       machine: "m",
       stateDir: makeTmpDir(),
       redactSecrets: false,
@@ -187,9 +216,12 @@ describe("E2E: agent → ingestor → lakehouse", () => {
     const n = await shipper.processFile(traceFile, "claude_code", "multi-batch-proj");
     expect(n).toBe(3);
 
-    const metaFiles = findFiles(join(lakehouseDir, "raw"), ".meta.json").filter((f) =>
-      readFileSync(f, "utf-8").includes("multi-batch-dev@acme.com"),
-    );
+    // Filter by the `project` field in the meta JSON: each test
+    // shares the lakehouse and the e2e-dev tenant binding, so the
+    // developer string is no longer a unique discriminator. The
+    // lakehouse partition hashes the developer, so the project
+    // name is the cleanest test-scoped filter.
+    const metaFiles = filterByProject(lakehouseDir, "multi-batch-proj");
     expect(metaFiles).toHaveLength(3);
     const totalEntries = metaFiles.reduce(
       (sum, f) => sum + JSON.parse(readFileSync(f, "utf-8")).entryCount,
@@ -216,7 +248,7 @@ describe("E2E: agent → ingestor → lakehouse", () => {
       apiKey: "key_e2e_test",
     });
     const shipper = new Shipper({
-      developer: "byte-split-dev@acme.com",
+      developer: "e2e-dev",
       machine: "m",
       stateDir: makeTmpDir(),
       redactSecrets: false,
@@ -228,9 +260,7 @@ describe("E2E: agent → ingestor → lakehouse", () => {
     const n = await shipper.processFile(traceFile, "claude_code", "byte-split-proj");
     expect(n).toBeGreaterThanOrEqual(3);
 
-    const metaFiles = findFiles(join(lakehouseDir, "raw"), ".meta.json").filter((f) =>
-      readFileSync(f, "utf-8").includes("byte-split-dev@acme.com"),
-    );
+    const metaFiles = filterByProject(lakehouseDir, "byte-split-proj");
     const totalEntries = metaFiles.reduce(
       (sum, f) => sum + JSON.parse(readFileSync(f, "utf-8")).entryCount,
       0,
@@ -256,7 +286,7 @@ describe("E2E: agent → ingestor → lakehouse", () => {
     console.error = () => {};
     try {
       const failing = new Shipper({
-        developer: "retry-dev@acme.com",
+        developer: "e2e-dev",
         machine: "m",
         stateDir,
         redactSecrets: false,
@@ -273,7 +303,7 @@ describe("E2E: agent → ingestor → lakehouse", () => {
       apiKey: "key_e2e_test",
     });
     const good = new Shipper({
-      developer: "retry-dev@acme.com",
+      developer: "e2e-dev",
       machine: "m",
       stateDir,
       redactSecrets: false,
@@ -284,9 +314,7 @@ describe("E2E: agent → ingestor → lakehouse", () => {
     // Third poll: offset advanced — nothing new.
     expect(await good.processFile(traceFile, "claude_code", "retry-proj")).toBe(0);
 
-    const metaFiles = findFiles(join(lakehouseDir, "raw"), ".meta.json").filter((f) =>
-      readFileSync(f, "utf-8").includes("retry-dev@acme.com"),
-    );
+    const metaFiles = filterByProject(lakehouseDir, "retry-proj");
     expect(metaFiles).toHaveLength(1);
   });
 
@@ -309,7 +337,7 @@ describe("E2E: agent → ingestor → lakehouse", () => {
       apiKey: "key_e2e_test",
     });
     const shipper = new Shipper({
-      developer: "partial-dev@acme.com",
+      developer: "e2e-dev",
       machine: "m",
       stateDir,
       redactSecrets: false,
@@ -317,9 +345,7 @@ describe("E2E: agent → ingestor → lakehouse", () => {
     });
 
     await shipper.processFile(traceFile, "claude_code", "partial-proj");
-    const firstMetas = findFiles(join(lakehouseDir, "raw"), ".meta.json").filter((f) =>
-      readFileSync(f, "utf-8").includes("partial-dev@acme.com"),
-    );
+    const firstMetas = filterByProject(lakehouseDir, "partial-proj");
     expect(firstMetas).toHaveLength(1);
     expect(JSON.parse(readFileSync(firstMetas[0], "utf-8")).entryCount).toBe(2);
 
@@ -333,9 +359,7 @@ describe("E2E: agent → ingestor → lakehouse", () => {
     );
     await shipper.processFile(traceFile, "claude_code", "partial-proj");
 
-    const secondMetas = findFiles(join(lakehouseDir, "raw"), ".meta.json").filter((f) =>
-      readFileSync(f, "utf-8").includes("partial-dev@acme.com"),
-    );
+    const secondMetas = filterByProject(lakehouseDir, "partial-proj");
     expect(secondMetas).toHaveLength(2);
     const total = secondMetas.reduce(
       (s, f) => s + JSON.parse(readFileSync(f, "utf-8")).entryCount,
@@ -361,7 +385,7 @@ describe("E2E: agent → ingestor → lakehouse", () => {
     });
 
     const shipper = new Shipper({
-      developer: "secrets-dev",
+      developer: "e2e-dev",
       stateDir: secretsStateDir,
       redactSecrets: true,
       ship: httpShip,
@@ -388,7 +412,7 @@ describe("E2E: body-cap surfaces a clean 413 to the agent (the bug from #21 fix)
     server = await createIngestor({
       port: SMALL_PORT,
       dataDir: makeTmpDir(),
-      apiKeys: ["key_e2e_test"],
+      apiKeys: { "key_e2e_test": "e2e-dev" },
       maxBodyBytes: SMALL_CAP,
     });
   });
@@ -413,7 +437,7 @@ describe("E2E: body-cap surfaces a clean 413 to the agent (the bug from #21 fix)
     // Disable the agent's own byte cap so we deliberately produce a too-big
     // batch — we're exercising the ingestor's overflow path here.
     const shipper = new Shipper({
-      developer: "oversize-dev@acme.com",
+      developer: "e2e-dev",
       machine: "m",
       stateDir: makeTmpDir(),
       redactSecrets: false,
