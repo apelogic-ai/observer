@@ -139,6 +139,28 @@ export interface ValidationCoverageRow {
   validatedAfterEdit: boolean;
 }
 
+export interface SearchToEditRow {
+  sessionId: string;
+  agent: string;
+  project: string | null;
+  reads: number;
+  edits: number;
+  ratio: number;
+  started: string;
+  ended: string;
+  tokens: number;
+}
+
+export interface FirstActionLatencyRow {
+  sessionId: string;
+  agent: string;
+  project: string | null;
+  firstUserMsgAt: string;
+  firstActionAt: string;
+  latencyMs: number;
+  tokens: number;
+}
+
 export interface InterventionRateRow {
   sessionId: string;
   agent: string;

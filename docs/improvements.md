@@ -180,20 +180,30 @@ sessions hit ~190 tool calls per turn.
 
 ## 6. Search-to-edit ratio (navigation friction)
 
-One real example: 403 searches vs 58 edits, 148M tokens. High
-read/grep/find activity before a small edit suggests the repo lacks
-discoverable structure / docs / tests.
+**Status: shipped** as first card on `/efficiency`. Per-session
+ratio of read-shaped tool calls (Read/grep/find/ls/cat/git log) to
+edit-shaped ones. Read detection covers both shape (toolName) AND
+Bash/shell commands with navigation verbs, since grep/find/ls fire
+as Bash calls in live data, not dedicated read primitives.
 
-Compute per-session ratio of `(read-shaped tools) / (edit-shaped tools)`.
-Pure SQL on existing data.
+Live worst case: 343 reads vs 38 edits in a single claude_code /
+engage-media-frontend session (9× ratio). Matches the original
+review's 403/58 example.
 
 ## 7. First-useful-action latency
 
-Some sessions waited 20–60+ minutes before first edit. Measure
-elapsed-time from first user message to first edit / test / commit.
-Identifies sessions where the agent over-explored before acting.
+**Status: shipped** as second card on `/efficiency`. Per-session
+elapsed time from the **last user message before the first useful
+action** (not the first message — long-running Codex sessions span
+days with idle gaps that produce nonsense values). Useful action =
+edit-shaped tool call, validation Bash/shell command, or linked
+agent commit.
 
-Pure SQL on existing data.
+Capped at 2 hours: anything beyond is a session resumed after a
+long gap rather than over-exploration, and including those drags
+the page toward multi-day outliers. Live state: 40 sessions in
+window, median 3.5m, top over-explorers are codex/nexus with
+~13-20 minute delays — the doc's motivating "20+ minute" pattern.
 
 ## UX: sortable + indicated tables
 
