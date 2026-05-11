@@ -699,8 +699,8 @@ run as non-root.
 
 | Variable | Required | Behavior |
 |----------|----------|----------|
-| `OBSERVER_API_KEYS` | yes (in production) | Comma-separated list of accepted Bearer keys. Empty + `NODE_ENV != "development"` → startup fails with a clear error. Dev fallback: hardcoded `key_local_dev` with a prominent warning. |
-| `NODE_ENV` | no | `development` enables the dev API key fallback. Anything else (including unset) requires `OBSERVER_API_KEYS`. |
+| `OBSERVER_API_KEYS` | yes | Comma-separated `<developer>:<key>` pairs. Each key resolves to exactly one developer; batches whose `developer` field doesn't match the authenticated key are rejected 403 (OBS-004 in the 2026-05 review). Empty → startup fails regardless of `NODE_ENV`; the hardcoded `key_local_dev` fallback that previously kicked in for bare `docker run` / misconfigured pods has been removed (OBS-006). |
+| `NODE_ENV` | no | Cosmetic only — no longer changes auth behaviour. The Dockerfile bakes in `production` as defence in depth. |
 
 **Config object** (for programmatic embedding):
 
@@ -708,9 +708,11 @@ run as non-root.
 interface IngestorConfig {
   port: number;
   dataDir: string;
-  trustedKeys?: Record<string, string>; // fingerprint → PEM public key
-  apiKeys?: string[];                   // accepted Bearer keys
-  maxBodyBytes?: number;                // default 8 * 1024 * 1024
+  // fingerprint → { developer, PEM public key }
+  trustedKeys?: Record<string, { developer: string; publicKeyPem: string }>;
+  // bearer key → developer
+  apiKeys?: Record<string, string>;
+  maxBodyBytes?: number;                // default 32 * 1024 * 1024
 }
 ```
 
@@ -724,8 +726,13 @@ configured (don't deploy this way in production).
 
 **Bearer API key:**
 
-- Set `OBSERVER_API_KEYS=key_a,key_b,key_c` at startup.
+- Set `OBSERVER_API_KEYS=alice:key_a,bob:key_b` at startup. Each entry
+  is `<developer>:<key>`; the developer prefix binds the key to a
+  tenant identity.
 - Agents send `Authorization: Bearer <key>`.
+- The ingestor rejects batches whose `developer` field doesn't match
+  the key's bound developer (403, `developer mismatch`). This stops
+  the cross-tenant deduplication-poisoning attack flagged as OBS-004.
 - Rotation: deploy a new instance with both old and new keys, migrate
   agents, then remove the old keys. There is no key TTL — rotation is
   operator-driven.
