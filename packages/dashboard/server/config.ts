@@ -65,6 +65,11 @@ export interface CliOverrides {
   logLevel?: LogLevel;
   logFile?: string;
   logStderr?: boolean;
+  /** Explicit operator acknowledgement that exposing the unauth'd
+   *  dashboard on a non-loopback interface is intended (OBS-008,
+   *  2026-05 review). Without this flag set, `start()` refuses to
+   *  bind to anything other than the loopback. */
+  unsafeLanNoAuth?: boolean;
 }
 
 export function loadDashboardConfig(cli: CliOverrides = {}): DashboardConfig {
@@ -177,6 +182,7 @@ export function parseCliArgs(argv: string[]): CliOverrides {
       case "--log-level":   { const lvl = parseLogLevel(next(i)); if (lvl) out.logLevel = lvl; i++; break; }
       case "--log-file":    { out.logFile = next(i); i++; break; }
       case "--log-stderr":  { out.logStderr = true; break; }
+      case "--unsafe-lan-no-auth": { out.unsafeLanNoAuth = true; break; }
       case "--help":
       case "-h":            { printHelp(); process.exit(0); }
     }
@@ -196,7 +202,12 @@ Flags:
   --ui-port <n>        Next UI port (env: OBSERVER_UI_PORT)
   --data-dir <path>    Normalized traces dir (env: OBSERVER_DATA_DIR)
   --bind <host>        Hostname to bind to. Default 127.0.0.1; set 0.0.0.0
-                       to expose on LAN. (env: OBSERVER_BIND)
+                       to expose on LAN. (env: OBSERVER_BIND) Requires
+                       --unsafe-lan-no-auth on non-loopback binds.
+  --unsafe-lan-no-auth Acknowledge that the unauthenticated dashboard
+                       will be reachable from any host that can reach
+                       the bound interface. Required for any bind
+                       other than 127.0.0.1 / ::1 / localhost.
   --static-dir <path>  Dashboard static assets (env: OBSERVER_STATIC_DIR)
   --config <path>      Config file (env: OBSERVER_CONFIG)
   --log-level <lvl>    silent | error | info | debug (env: OBSERVER_LOG_LEVEL)

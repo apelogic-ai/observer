@@ -185,7 +185,8 @@ export async function start(overrides: Partial<CliOverrides> = {}): Promise<Star
   // overrides are defaults injected by callers (e.g. compiled-entry passes
   // staticDir from the extracted tarball). argv still wins so the user can
   // --static-dir a local out/ for debugging.
-  const cfg = loadDashboardConfig({ ...overrides, ...parseCliArgs(process.argv.slice(2)) });
+  const cli = { ...overrides, ...parseCliArgs(process.argv.slice(2)) };
+  const cfg = loadDashboardConfig(cli);
   initLog(cfg.log);
 
   await initDb(cfg.dataDir);
@@ -197,10 +198,27 @@ export async function start(overrides: Partial<CliOverrides> = {}): Promise<Star
   // user understands the surface area.
   const isLoopback = cfg.bind === "127.0.0.1" || cfg.bind === "localhost" || cfg.bind === "::1";
   const displayHost = isLoopback ? "localhost" : cfg.bind;
+
+  // OBS-008: refuse to bind to a non-loopback interface without an
+  // explicit operator acknowledgement. The dashboard has no auth and
+  // serves prompts/responses verbatim — an accidental --bind 0.0.0.0
+  // (or an OBSERVER_BIND env var leaking into a deploy) would expose
+  // every session detail to anyone on the same network. We previously
+  // just printed a warning; now we fail closed and tell the operator
+  // exactly which flag turns it on.
+  if (!isLoopback && !cli.unsafeLanNoAuth) {
+    console.error(
+      `Refusing to bind to "${cfg.bind}" — the dashboard has no auth and exposes session prompts/responses.\n` +
+      `If this is intentional (e.g. a developer VM where everyone on the LAN is trusted), re-run with --unsafe-lan-no-auth.\n` +
+      `Otherwise, set --bind 127.0.0.1 (the default) or remove the OBSERVER_BIND override.`,
+    );
+    process.exit(2);
+  }
+
   console.log(`Observer Dashboard`);
   console.log(`  Data:   ${getDataDir()}`);
   console.log(`  Static: ${cfg.staticDir}`);
-  console.log(`  URL:    http://${displayHost}:${cfg.port}${isLoopback ? "" : "  (LAN-exposed; no auth)"}`);
+  console.log(`  URL:    http://${displayHost}:${cfg.port}${isLoopback ? "" : "  (LAN-exposed; no auth — explicitly enabled via --unsafe-lan-no-auth)"}`);
   console.log(`  Config: ${cfg.configPath}`);
   console.log(`  Logs:   ${cfg.log.level === "silent" ? "off" : cfg.log.file} (level=${cfg.log.level}${cfg.log.stderr ? ", stderr=on" : ""})`);
 
