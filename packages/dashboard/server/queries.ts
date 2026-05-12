@@ -1,4 +1,4 @@
-import { query } from "./db";
+import { query, type SQLQueryBindings } from "./db";
 
 /**
  * Query layer over the SQLite tables built in ./db.ts. Conventions:
@@ -31,17 +31,90 @@ function dateTrunc(f: Filters, col = "timestamp"): string {
   }
 }
 
-function esc(s: string): string {
+/**
+ * String-quote helper retained ONLY for cases where we interpolate
+ * a closed-set string constant — e.g. building an IN-list of tool
+ * names from the compile-time EDIT_TOOL_NAMES / READ_TOOL_NAMES /
+ * validation-prefix arrays. NEVER pass user input here; bind via `?`
+ * placeholders (see OBS-023, 2026-05 review).
+ */
+function escConstant(s: string): string {
   return s.replace(/'/g, "''");
 }
 
-/** Build a WHERE clause from common filters. Extra conditions can be prepended. */
-function where(f: Filters, extra?: string[]): string {
-  const conds: string[] = extra ? [...extra] : [];
+interface SQLFragment {
+  sql: string;
+  params: SQLQueryBindings[];
+}
+
+/**
+ * Tagged-template helper that runs a query with bind parameters.
+ * Interpolating a string is treated as a literal SQL fragment (must
+ * be a compile-time constant — see escConstant above). Interpolating
+ * an SQLFragment merges its `?` placeholders into the surrounding
+ * template and forwards its params positionally. Use this anywhere a
+ * filter helper (where / securityWhere / gitWhere) is embedded.
+ *
+ * Example:
+ *   const rows = await queryWhere<X>`
+ *     SELECT ... FROM y ${where(f, ["extra"])} ORDER BY ...
+ *   `;
+ */
+async function queryWhere<T = Record<string, unknown>>(
+  template: TemplateStringsArray,
+  ...values: (SQLFragment | string | number)[]
+): Promise<T[]> {
+  let sql = template[0] ?? "";
+  const params: SQLQueryBindings[] = [];
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i];
+    if (typeof v === "string" || typeof v === "number") {
+      sql += String(v);
+    } else if (v && typeof v === "object" && "sql" in v) {
+      sql += v.sql;
+      params.push(...v.params);
+    }
+    sql += template[i + 1] ?? "";
+  }
+  return query<T>(sql, params);
+}
+
+/**
+ * Build a WHERE clause from common filters. Returns both the SQL
+ * fragment (with `?` placeholders) and the matching positional
+ * params array. Manual string-concat of `f.project`, `f.agent`, etc.
+ * used to live here — every new filter was one forgotten `esc()`
+ * away from injection on any non-loopback bind (OBS-023).
+ */
+/** Small helper: build a "?" placeholder bound to a single value.
+ *  Use inside a queryWhere`...` template to inject a user-controlled
+ *  scalar (sessionId, sha, tool name from URL, …) without string
+ *  concatenation. */
+function bind(value: SQLQueryBindings): SQLFragment {
+  return { sql: "?", params: [value] };
+}
+
+/** Build an IN-list of bind placeholders for an array of scalars. */
+function bindList(values: readonly SQLQueryBindings[]): SQLFragment {
+  return {
+    sql: values.length === 0 ? "(NULL)" : `(${values.map(() => "?").join(",")})`,
+    params: [...values],
+  };
+}
+
+function where(f: Filters, extra?: (string | SQLFragment)[]): SQLFragment {
+  const conds: string[] = [];
+  const params: SQLQueryBindings[] = [];
+  if (extra) {
+    for (const e of extra) {
+      if (typeof e === "string") conds.push(e);
+      else { conds.push(e.sql); params.push(...e.params); }
+    }
+  }
   conds.push(`timestamp IS NOT NULL`);
-  if (f.days)    conds.push(`timestamp >= date('now', '-${f.days} days')`);
-  if (f.project) conds.push(`project = '${esc(f.project)}'`);
-  if (f.model)   conds.push(`model = '${esc(f.model)}'`);
+  if (f.days)    conds.push(`timestamp >= date('now', '-${Number(f.days)} days')`);
+  if (f.project) { conds.push(`project = ?`); params.push(f.project); }
+  if (f.model)   { conds.push(`model = ?`); params.push(f.model); }
   if (f.tool) {
     // Sentinel "*mcp" filters across all MCP tools regardless of naming
     // convention (Claude Code emits `mcp:server:tool`, the API uses
@@ -49,11 +122,12 @@ function where(f: Filters, extra?: string[]): string {
     if (f.tool === "*mcp") {
       conds.push(`(toolName LIKE 'mcp:%' OR toolName LIKE 'mcp\\_\\_%' ESCAPE '\\')`);
     } else {
-      conds.push(`toolName = '${esc(f.tool)}'`);
+      conds.push(`toolName = ?`);
+      params.push(f.tool);
     }
   }
-  if (f.agent)   conds.push(`agent = '${esc(f.agent)}'`);
-  return `WHERE ${conds.join(" AND ")}`;
+  if (f.agent)   { conds.push(`agent = ?`); params.push(f.agent); }
+  return { sql: `WHERE ${conds.join(" AND ")}`, params };
 }
 
 /** json_extract on tokenUsage — null-safe SUM helper. */
@@ -84,7 +158,7 @@ export interface Stats {
 }
 
 export async function getStats(f: Filters = {}): Promise<Stats> {
-  const rows = await query<Stats>(`
+  const rows = await queryWhere<Stats>`
     SELECT
       COUNT(*)                          AS total_entries,
       COUNT(DISTINCT sessionId)         AS total_sessions,
@@ -96,7 +170,7 @@ export async function getStats(f: Filters = {}): Promise<Stats> {
       COALESCE(SUM(${TU_CACHE_C}), 0)   AS total_cache_creation
     FROM traces
     ${where(f)}
-  `);
+  `;
   return rows[0];
 }
 
@@ -110,7 +184,7 @@ export interface ActivityRow {
 }
 
 export async function getActivity(f: Filters = {}): Promise<ActivityRow[]> {
-  return query<ActivityRow>(`
+  return queryWhere<ActivityRow>`
     SELECT
       ${dateTrunc(f)} AS date,
       agent,
@@ -120,7 +194,7 @@ export async function getActivity(f: Filters = {}): Promise<ActivityRow[]> {
     ${where(f)}
     GROUP BY date, agent
     ORDER BY date
-  `);
+  `;
 }
 
 // ── Activity heatmap (date × project × agent) ────────────────
@@ -137,7 +211,7 @@ export interface HeatmapRow {
  *  with per-cell agent breakdown. Drops null projects (rows we couldn't
  *  attribute to a workspace). */
 export async function getHeatmap(f: Filters = {}): Promise<HeatmapRow[]> {
-  return query<HeatmapRow>(`
+  return queryWhere<HeatmapRow>`
     SELECT
       ${dateTrunc(f)} AS date,
       project,
@@ -147,7 +221,7 @@ export async function getHeatmap(f: Filters = {}): Promise<HeatmapRow[]> {
     ${where(f, ["project IS NOT NULL"])}
     GROUP BY date, project, agent
     ORDER BY date
-  `);
+  `;
 }
 
 // ── Tokens ─────────────────────────────────────────────────────
@@ -161,7 +235,7 @@ export interface TokenRow {
 }
 
 export async function getTokens(f: Filters = {}): Promise<TokenRow[]> {
-  return query<TokenRow>(`
+  return queryWhere<TokenRow>`
     SELECT
       ${dateTrunc(f)} AS date,
       COALESCE(SUM(${TU_INPUT}), 0)   AS input_tokens,
@@ -172,7 +246,7 @@ export async function getTokens(f: Filters = {}): Promise<TokenRow[]> {
     ${where(f, ["tokenUsage IS NOT NULL"])}
     GROUP BY date
     ORDER BY date
-  `);
+  `;
 }
 
 // ── Security findings ─────────────────────────────────────────
@@ -200,23 +274,30 @@ interface SecurityFindingRawRow extends Omit<SecurityFindingRow, "agents"> { age
 
 /** Filter helper for security_findings — same shape as `where()` for traces,
  *  but the table doesn't have toolName/model so those filters are ignored. */
-function securityWhere(f: Filters, extra?: string[]): string {
-  const conds: string[] = extra ? [...extra] : [];
+function securityWhere(f: Filters, extra?: (string | SQLFragment)[]): SQLFragment {
+  const conds: string[] = [];
+  const params: SQLQueryBindings[] = [];
+  if (extra) {
+    for (const e of extra) {
+      if (typeof e === "string") conds.push(e);
+      else { conds.push(e.sql); params.push(...e.params); }
+    }
+  }
   conds.push(`timestamp IS NOT NULL`);
   // `date` (single calendar day) takes precedence over `days` (a window).
   // Used by the leaks page's chart click-to-drill — nonsense to combine.
-  if (f.date) conds.push(`date(timestamp) = '${esc(f.date)}'`);
-  else if (f.days) conds.push(`timestamp >= date('now', '-${f.days} days')`);
-  if (f.project) conds.push(`project = '${esc(f.project)}'`);
-  if (f.agent)   conds.push(`agent = '${esc(f.agent)}'`);
-  return `WHERE ${conds.join(" AND ")}`;
+  if (f.date) { conds.push(`date(timestamp) = ?`); params.push(f.date); }
+  else if (f.days) conds.push(`timestamp >= date('now', '-${Number(f.days)} days')`);
+  if (f.project) { conds.push(`project = ?`); params.push(f.project); }
+  if (f.agent)   { conds.push(`agent = ?`); params.push(f.agent); }
+  return { sql: `WHERE ${conds.join(" AND ")}`, params };
 }
 
 export async function getSecurityFindings(
   f: Filters = {},
   limit = 25,
 ): Promise<SecurityFindingRow[]> {
-  const rows = await query<SecurityFindingRawRow>(`
+  const rows = await queryWhere<SecurityFindingRawRow>`
     SELECT
       patternType        AS patternType,
       COUNT(*)           AS count,
@@ -234,7 +315,7 @@ export async function getSecurityFindings(
     GROUP BY patternType
     ORDER BY count DESC
     LIMIT ${limit}
-  `);
+  `;
   return rows.map((r) => ({ ...r, agents: parseJsonArray(r.agents) }));
 }
 
@@ -250,7 +331,7 @@ export interface SecurityTimelineRow {
  * Total for a day = sum of its rows.
  */
 export async function getSecurityTimeline(f: Filters = {}): Promise<SecurityTimelineRow[]> {
-  return query<SecurityTimelineRow>(`
+  return queryWhere<SecurityTimelineRow>`
     SELECT
       ${dateTrunc(f)} AS date,
       patternType     AS patternType,
@@ -259,7 +340,7 @@ export async function getSecurityTimeline(f: Filters = {}): Promise<SecurityTime
     ${securityWhere(f)}
     GROUP BY date, patternType
     ORDER BY date, patternType
-  `);
+  `;
 }
 
 export interface SecuritySessionRow {
@@ -278,7 +359,7 @@ export async function getSecuritySessions(
   f: Filters = {},
   limit = 50,
 ): Promise<SecuritySessionRow[]> {
-  const rows = await query<SecuritySessionRawRow>(`
+  const rows = await queryWhere<SecuritySessionRawRow>`
     SELECT
       sessionId,
       MIN(agent)   AS agent,
@@ -296,7 +377,7 @@ export async function getSecuritySessions(
     GROUP BY sessionId
     ORDER BY count DESC
     LIMIT ${limit}
-  `);
+  `;
   return rows.map((r) => ({ ...r, patterns: parseJsonArray(r.patterns) }));
 }
 
@@ -365,11 +446,11 @@ interface PermRawRow {
 }
 
 export async function getPermissions(f: Filters = {}): Promise<PermissionRow[]> {
-  const rows = await query<PermRawRow>(`
+  const rows = await queryWhere<PermRawRow>`
     SELECT toolName, command, sessionId
     FROM traces
     ${where(f, ["entryType = 'tool_call'", "toolName IS NOT NULL"])}
-  `);
+  `;
 
   // Aggregate counts + distinct sessions per (tool, path) pair.
   type Bucket = { tool: string; path: string[]; count: number; sessions: Set<string> };
@@ -512,7 +593,7 @@ interface ToolRowRaw extends Omit<ToolRow, "agents"> { agents: string }
  * - agents: json_group_array(DISTINCT agent), parsed back to an array client-side.
  */
 export async function getTools(f: Filters = {}, limit = 25): Promise<ToolRow[]> {
-  const rows = await query<ToolRowRaw>(`
+  const rows = await queryWhere<ToolRowRaw>`
     SELECT
       toolName AS tool_name,
       COUNT(*) AS count,
@@ -531,7 +612,7 @@ export async function getTools(f: Filters = {}, limit = 25): Promise<ToolRow[]> 
     GROUP BY toolName
     ORDER BY count DESC
     LIMIT ${limit}
-  `);
+  `;
   return rows.map((r) => ({ ...r, agents: parseJsonArray(r.agents) }));
 }
 
@@ -584,7 +665,7 @@ function motifShape(toolName: string, command: string | null, filePath: string |
 }
 
 export async function getMotifs(f: Filters = {}, limit = 25): Promise<MotifRow[]> {
-  const rows = await query<MotifRawRow>(`
+  const rows = await queryWhere<MotifRawRow>`
     SELECT
       toolName,
       command,
@@ -593,7 +674,7 @@ export async function getMotifs(f: Filters = {}, limit = 25): Promise<MotifRow[]
       ${TU_TOTAL} AS tokens
     FROM traces
     ${where(f, ["entryType = 'tool_call'", "toolName IS NOT NULL"])}
-  `);
+  `;
 
   type Bucket = { toolName: string; shape: string; occurrences: number; sessions: Set<string>; tokens: number };
   const buckets = new Map<string, Bucket>();
@@ -688,7 +769,7 @@ function incidentShape(_toolName: string, command: string | null, filePath: stri
 }
 
 export async function getStumbles(f: Filters = {}, limit = 25): Promise<StumbleRow[]> {
-  const rows = await query<StumbleRawRow>(`
+  const rows = await queryWhere<StumbleRawRow>`
     SELECT
       sessionId,
       agent,
@@ -700,18 +781,18 @@ export async function getStumbles(f: Filters = {}, limit = 25): Promise<StumbleR
       ${TU_TOTAL} AS tokens
     FROM traces
     ${where(f, ["entryType = 'tool_call'", "toolName IS NOT NULL", "sessionId IS NOT NULL"])}
-  `);
+  `;
 
   // Session-wide totals come from message rows (where codex attributes its
   // tokens), not just the tool_call rows. We pull this in a second query so
   // the per-incident bucketing stays simple. Sessions outside the filter
   // window are skipped — the JOIN-equivalent here is the lookup map.
-  const sessionTokenRows = await query<{ sessionId: string; total: number }>(`
+  const sessionTokenRows = await queryWhere<{ sessionId: string; total: number }>`
     SELECT sessionId, SUM(${TU_TOTAL}) AS total
     FROM traces
     ${where(f, ["sessionId IS NOT NULL"])}
     GROUP BY sessionId
-  `);
+  `;
   const sessionTokens = new Map<string, number>();
   for (const r of sessionTokenRows) sessionTokens.set(r.sessionId, Number(r.total) || 0);
 
@@ -786,10 +867,10 @@ export interface DarkSpendRow {
  * each adds its own filter and sort on top.
  */
 async function sessionRollups(f: Filters): Promise<DarkSpendRow[]> {
-  const sessionRows = await query<{
+  const sessionRows = await queryWhere<{
     sessionId: string; agent: string; project: string | null;
     started: string; ended: string; tokens: number;
-  }>(`
+  }>`
     SELECT
       sessionId,
       MIN(agent) AS agent,
@@ -800,7 +881,7 @@ async function sessionRollups(f: Filters): Promise<DarkSpendRow[]> {
     FROM traces
     ${where(f, ["sessionId IS NOT NULL"])}
     GROUP BY sessionId
-  `);
+  `;
 
   // Only agent-authored commits count toward session metrics. A
   // human commit can land with sessionId set (e.g. through a
@@ -823,12 +904,12 @@ async function sessionRollups(f: Filters): Promise<DarkSpendRow[]> {
 
   // Per-session timestamps for active-time computation (wall minus gaps
   // > 5 min). Sessions reused across days otherwise look multi-day.
-  const tsRows = await query<{ sessionId: string; timestamp: string }>(`
+  const tsRows = await queryWhere<{ sessionId: string; timestamp: string }>`
     SELECT sessionId, timestamp
     FROM traces
     ${where(f, ["sessionId IS NOT NULL"])}
     ORDER BY sessionId, timestamp
-  `);
+  `;
   const tsBySession = new Map<string, string[]>();
   for (const r of tsRows) {
     let arr = tsBySession.get(r.sessionId);
@@ -951,18 +1032,18 @@ export interface ValidationCoverageRow {
 export async function getValidationCoverage(
   f: Filters = {},
 ): Promise<ValidationCoverageRow[]> {
-  const editToolList = [...EDIT_TOOL_NAMES].map((t) => `'${esc(t)}'`).join(", ");
+  const editToolList = [...EDIT_TOOL_NAMES].map((t) => `'${escConstant(t)}'`).join(", ");
   const cmdLikeClause = VALIDATION_COMMAND_PATTERNS
-    .map((p) => `command LIKE '${esc(p)}'`)
+    .map((p) => `command LIKE '${escConstant(p)}'`)
     .join(" OR ");
 
-  const rows = await query<{
+  const rows = await queryWhere<{
     sessionId: string; agent: string; project: string | null;
     started: string; ended: string;
     tokens: number;
     lastEditAt: string;
     lastValidationAt: string | null;
-  }>(`
+  }>`
     WITH edits AS (
       SELECT sessionId, MAX(timestamp) AS lastEditAt
       FROM traces
@@ -998,7 +1079,7 @@ export async function getValidationCoverage(
     FROM edits e
     JOIN sessions s USING (sessionId)
     LEFT JOIN validations v USING (sessionId)
-  `);
+  `;
 
   return rows
     .map((r) => ({
@@ -1052,10 +1133,10 @@ export async function getValidationLoops(
   f: Filters = {},
 ): Promise<ValidationLoopRow[]> {
   const cmdLikeClause = VALIDATION_COMMAND_PATTERNS
-    .map((p) => `command LIKE '${esc(p)}'`)
+    .map((p) => `command LIKE '${escConstant(p)}'`)
     .join(" OR ");
 
-  return query<ValidationLoopRow>(`
+  return queryWhere<ValidationLoopRow>`
     WITH validation_calls AS (
       SELECT sessionId, MIN(agent) AS agent, MAX(project) AS project,
              toolCallId, command, MIN(timestamp) AS callAt
@@ -1089,7 +1170,7 @@ export async function getValidationLoops(
     GROUP BY v.sessionId, v.command
     HAVING COUNT(*) >= ${VALIDATION_LOOP_THRESHOLD}
     ORDER BY failures DESC, attempts DESC
-  `);
+  `;
 }
 
 // ── Intervention rate (autonomy) ───────────────────────────────
@@ -1145,7 +1226,7 @@ interface InterventionRateRaw {
 export async function getInterventionRate(
   f: Filters = {},
 ): Promise<InterventionRateRow[]> {
-  const rows = await query<InterventionRateRaw>(`
+  const rows = await queryWhere<InterventionRateRaw>`
     WITH user_turns AS (
       SELECT sessionId, COUNT(*) AS userTurns
       FROM traces
@@ -1193,7 +1274,7 @@ export async function getInterventionRate(
     LEFT JOIN tool_calls tc ON tc.sessionId = u.sessionId
     LEFT JOIN commits c ON c.sessionId = u.sessionId
     ORDER BY u.userTurns DESC
-  `);
+  `;
 
   return rows.map((r) => {
     const tokens = Number(r.tokens);
@@ -1263,17 +1344,17 @@ export interface SearchToEditRow {
 export async function getSearchToEditRatio(
   f: Filters = {},
 ): Promise<SearchToEditRow[]> {
-  const editToolList = [...EDIT_TOOL_NAMES].map((t) => `'${esc(t)}'`).join(", ");
-  const readToolList = [...READ_TOOL_NAMES].map((t) => `'${esc(t)}'`).join(", ");
+  const editToolList = [...EDIT_TOOL_NAMES].map((t) => `'${escConstant(t)}'`).join(", ");
+  const readToolList = [...READ_TOOL_NAMES].map((t) => `'${escConstant(t)}'`).join(", ");
   const readCmdClause = READ_COMMAND_PATTERNS
-    .map((p) => `command LIKE '${esc(p)}'`)
+    .map((p) => `command LIKE '${escConstant(p)}'`)
     .join(" OR ");
 
-  const rows = await query<{
+  const rows = await queryWhere<{
     sessionId: string; agent: string; project: string | null;
     reads: number; edits: number;
     started: string; ended: string; tokens: number;
-  }>(`
+  }>`
     WITH read_calls AS (
       SELECT sessionId, COUNT(*) AS reads
       FROM traces
@@ -1316,7 +1397,7 @@ export async function getSearchToEditRatio(
     FROM edit_calls e
     JOIN sessions s ON s.sessionId = e.sessionId
     LEFT JOIN read_calls r ON r.sessionId = e.sessionId
-  `);
+  `;
 
   return rows
     .map((r) => ({ ...r, tokens: Number(r.tokens), ratio: Number(r.reads) / Number(r.edits) }))
@@ -1345,16 +1426,16 @@ export interface FirstActionLatencyRow {
 export async function getFirstActionLatency(
   f: Filters = {},
 ): Promise<FirstActionLatencyRow[]> {
-  const editToolList = [...EDIT_TOOL_NAMES].map((t) => `'${esc(t)}'`).join(", ");
+  const editToolList = [...EDIT_TOOL_NAMES].map((t) => `'${escConstant(t)}'`).join(", ");
   const cmdLikeClause = VALIDATION_COMMAND_PATTERNS
-    .map((p) => `command LIKE '${esc(p)}'`)
+    .map((p) => `command LIKE '${escConstant(p)}'`)
     .join(" OR ");
 
-  const rows = await query<{
+  const rows = await queryWhere<{
     sessionId: string; agent: string; project: string | null;
     firstUserMsgAt: string; firstActionAt: string;
     tokens: number;
-  }>(`
+  }>`
     WITH actions AS (
       -- "Useful action" = edit-shaped tool call OR validation
       -- Bash/shell call OR a linked agent commit. Treat all three
@@ -1417,7 +1498,7 @@ export async function getFirstActionLatency(
     FROM user_msg u
     JOIN actions a USING (sessionId)
     JOIN sessions s USING (sessionId)
-  `);
+  `;
 
   // Cap at 2 hours. Beyond that, the latency reflects a session
   // resumed after a long gap, not the agent over-exploring before
@@ -1635,7 +1716,7 @@ export interface ProjectRow {
 }
 
 export async function getProjects(f: Filters = {}): Promise<ProjectRow[]> {
-  return query<ProjectRow>(`
+  return queryWhere<ProjectRow>`
     SELECT
       project,
       COUNT(*) AS entries,
@@ -1646,7 +1727,7 @@ export async function getProjects(f: Filters = {}): Promise<ProjectRow[]> {
     ${where(f, ["project IS NOT NULL"])}
     GROUP BY project
     ORDER BY total_tokens DESC
-  `);
+  `;
 }
 
 // ── Models ─────────────────────────────────────────────────────
@@ -1658,7 +1739,7 @@ export interface ModelRow {
 }
 
 export async function getModels(f: Filters = {}): Promise<ModelRow[]> {
-  return query<ModelRow>(`
+  return queryWhere<ModelRow>`
     SELECT
       model,
       COUNT(*) AS count,
@@ -1667,7 +1748,7 @@ export async function getModels(f: Filters = {}): Promise<ModelRow[]> {
     ${where(f, ["model IS NOT NULL"])}
     GROUP BY model
     ORDER BY total_tokens DESC
-  `);
+  `;
 }
 
 // ── Sessions ───────────────────────────────────────────────────
@@ -1684,16 +1765,22 @@ export interface SessionRow {
 
 export async function getSessions(f: Filters = {}, limit = 50): Promise<SessionRow[]> {
   // Tool/model filter restricts to sessions that contain a matching entry.
-  const sessionFilter: string[] = ["sessionId IS NOT NULL"];
+  const sessionFilter: (string | SQLFragment)[] = ["sessionId IS NOT NULL"];
   if (f.tool) {
-    sessionFilter.push(`sessionId IN (SELECT DISTINCT sessionId FROM traces WHERE toolName = '${esc(f.tool)}')`);
+    sessionFilter.push({
+      sql: `sessionId IN (SELECT DISTINCT sessionId FROM traces WHERE toolName = ?)`,
+      params: [f.tool],
+    });
   }
   if (f.model) {
-    sessionFilter.push(`sessionId IN (SELECT DISTINCT sessionId FROM traces WHERE model = '${esc(f.model)}')`);
+    sessionFilter.push({
+      sql: `sessionId IN (SELECT DISTINCT sessionId FROM traces WHERE model = ?)`,
+      params: [f.model],
+    });
   }
   const sessFilter: Filters = { days: f.days, project: f.project, granularity: f.granularity };
 
-  return query<SessionRow>(`
+  return queryWhere<SessionRow>`
     SELECT
       sessionId AS session_id,
       MIN(agent) AS agent,
@@ -1707,7 +1794,7 @@ export async function getSessions(f: Filters = {}, limit = 50): Promise<SessionR
     GROUP BY sessionId
     ORDER BY started DESC
     LIMIT ${limit}
-  `);
+  `;
 }
 
 // ── Tool detail (drill-down) ───────────────────────────────────
@@ -1729,41 +1816,41 @@ export interface ToolDetail {
 }
 
 export async function getToolDetail(tool: string, f: Filters = {}): Promise<ToolDetail> {
-  const toolCond = `toolName = '${esc(tool)}'`;
-  const w = where(f, [toolCond]);
+  const toolFrag: SQLFragment = { sql: "toolName = ?", params: [tool] };
+  const w = where(f, [toolFrag]);
 
   const [totalRows, commands, files, timeline, byAgent, projects, models] = await Promise.all([
-    query<{ total: number }>(`SELECT COUNT(*) AS total FROM traces ${w}`),
+    query<{ total: number }>(`SELECT COUNT(*) AS total FROM traces ${w.sql}`, w.params),
     query<ToolDetailRow>(`
       SELECT command AS value, COUNT(*) AS count
-      FROM traces ${w} AND command IS NOT NULL
+      FROM traces ${w.sql} AND command IS NOT NULL
       GROUP BY command ORDER BY count DESC LIMIT 15
-    `),
+    `, w.params),
     query<ToolDetailRow>(`
       SELECT filePath AS value, COUNT(*) AS count
-      FROM traces ${w} AND filePath IS NOT NULL
+      FROM traces ${w.sql} AND filePath IS NOT NULL
       GROUP BY filePath ORDER BY count DESC LIMIT 15
-    `),
+    `, w.params),
     query<{ date: string; count: number }>(`
       SELECT ${dateTrunc(f)} AS date, COUNT(*) AS count
-      FROM traces ${w}
+      FROM traces ${w.sql}
       GROUP BY date ORDER BY date
-    `),
+    `, w.params),
     query<{ agent: string; count: number }>(`
       SELECT agent, COUNT(*) AS count
-      FROM traces ${w}
+      FROM traces ${w.sql}
       GROUP BY agent ORDER BY count DESC
-    `),
+    `, w.params),
     query<{ project: string; count: number }>(`
       SELECT project, COUNT(*) AS count
-      FROM traces ${w} AND project IS NOT NULL
+      FROM traces ${w.sql} AND project IS NOT NULL
       GROUP BY project ORDER BY count DESC
-    `),
+    `, w.params),
     query<{ model: string; count: number }>(`
       SELECT model, COUNT(*) AS count
-      FROM traces ${w} AND model IS NOT NULL
+      FROM traces ${w.sql} AND model IS NOT NULL
       GROUP BY model ORDER BY count DESC
-    `),
+    `, w.params),
   ]);
 
   return {
@@ -1849,7 +1936,7 @@ export async function getSkillUsage(f: Filters = {}): Promise<SkillUsageRow[]> {
     `length(toolName) > 6`,
   ]);
 
-  const rows = await query<SkillUsageRaw>(`
+  const rows = await queryWhere<SkillUsageRaw>`
     WITH events AS (
       SELECT
         CASE
@@ -1862,7 +1949,7 @@ export async function getSkillUsage(f: Filters = {}): Promise<SkillUsageRow[]> {
       ${slashWhere}
       UNION ALL
       SELECT
-        substr(toolName, 7) AS name,    -- length('skill:') = 6
+        substr(toolName, 7) AS name,
         agent, sessionId, project, timestamp
       FROM traces
       ${toolWhere}
@@ -1874,8 +1961,6 @@ export async function getSkillUsage(f: Filters = {}): Promise<SkillUsageRow[]> {
       COUNT(DISTINCT project)   AS projects,
       MIN(timestamp) AS firstSeen,
       MAX(timestamp) AS lastSeen,
-      -- group_concat doesn't promise ordering across rows; we sort in TS
-      -- to keep the agent list deterministic.
       (SELECT group_concat(DISTINCT a) FROM (
          SELECT DISTINCT agent AS a FROM events e2 WHERE e2.name = events.name
        )) AS agentsCsv
@@ -1884,7 +1969,7 @@ export async function getSkillUsage(f: Filters = {}): Promise<SkillUsageRow[]> {
     GROUP BY name
     ORDER BY count DESC, name ASC
     LIMIT 200
-  `);
+  `;
 
   // Real traces contain user prompts that start with `/` but aren't
   // slash commands — most commonly Unix paths (`/private/tmp/...`) or
@@ -1940,8 +2025,7 @@ export async function getSkillSessions(name: string, f: Filters = {}): Promise<S
     `toolName LIKE 'skill:%'`,
     `length(toolName) > 6`,
   ]);
-  const escName = esc(name);
-  return query<SkillSessionRow>(`
+  return queryWhere<SkillSessionRow>`
     WITH events AS (
       SELECT
         CASE
@@ -1965,11 +2049,11 @@ export async function getSkillSessions(name: string, f: Filters = {}): Promise<S
       MIN(timestamp) AS firstSeen,
       MAX(timestamp) AS lastSeen
     FROM events
-    WHERE name = '${escName}' AND sessionId IS NOT NULL
+    WHERE name = ${bind(name)} AND sessionId IS NOT NULL
     GROUP BY sessionId, agent, project
     ORDER BY lastSeen DESC
     LIMIT 200
-  `);
+  `;
 }
 
 /**
@@ -1979,7 +2063,7 @@ export async function getSkillSessions(name: string, f: Filters = {}): Promise<S
  * DuckDB regex but produces the same result on real data.
  */
 export async function getSkills(f: Filters = {}): Promise<SkillRow[]> {
-  return query<SkillRow>(`
+  return queryWhere<SkillRow>`
     SELECT
       CASE
         WHEN instr(trim(userPrompt), ' ') > 0
@@ -1998,7 +2082,7 @@ export async function getSkills(f: Filters = {}): Promise<SkillRow[]> {
     GROUP BY skill
     ORDER BY count DESC
     LIMIT 20
-  `);
+  `;
 }
 
 // ── Lists (for selectors) ─────────────────────────────────────
@@ -2045,12 +2129,19 @@ export async function getToolList(): Promise<string[]> {
 
 // ── Git Events ──────────────────────────────────────────────────
 
-function gitWhere(f: Filters, extra?: string[]): string {
-  const conds: string[] = extra ? [...extra] : [];
+function gitWhere(f: Filters, extra?: (string | SQLFragment)[]): SQLFragment {
+  const conds: string[] = [];
+  const params: SQLQueryBindings[] = [];
+  if (extra) {
+    for (const e of extra) {
+      if (typeof e === "string") conds.push(e);
+      else { conds.push(e.sql); params.push(...e.params); }
+    }
+  }
   conds.push(`timestamp IS NOT NULL`);
-  if (f.days)    conds.push(`timestamp >= date('now', '-${f.days} days')`);
-  if (f.project) conds.push(`project = '${esc(f.project)}'`);
-  return `WHERE ${conds.join(" AND ")}`;
+  if (f.days)    conds.push(`timestamp >= date('now', '-${Number(f.days)} days')`);
+  if (f.project) { conds.push(`project = ?`); params.push(f.project); }
+  return { sql: `WHERE ${conds.join(" AND ")}`, params };
 }
 
 export interface GitStats {
@@ -2072,7 +2163,7 @@ export interface GitStats {
 }
 
 export async function getGitStats(f: Filters = {}): Promise<GitStats> {
-  const rows = await query<GitStats>(`
+  const rows = await queryWhere<GitStats>`
     SELECT
       COUNT(*) AS total_commits,
       COUNT(*) FILTER (WHERE agentAuthored = 1) AS agent_commits,
@@ -2086,7 +2177,7 @@ export async function getGitStats(f: Filters = {}): Promise<GitStats> {
       COUNT(DISTINCT repo) AS repos
     FROM git_events
     ${gitWhere(f, ["eventType = 'commit'"])}
-  `);
+  `;
   return rows[0];
 }
 
@@ -2110,7 +2201,7 @@ export interface CommitAttributionRow {
 export async function getCommitAttributionByProject(
   f: Filters = {},
 ): Promise<CommitAttributionRow[]> {
-  return query<CommitAttributionRow>(`
+  return queryWhere<CommitAttributionRow>`
     SELECT
       project,
       COUNT(*) FILTER (WHERE agentAuthored = 1) AS agent_commits,
@@ -2121,7 +2212,7 @@ export async function getCommitAttributionByProject(
     GROUP BY project
     HAVING COUNT(*) FILTER (WHERE agentAuthored = 1) > 0
     ORDER BY unlinked_agent_commits DESC, agent_commits DESC, project ASC
-  `);
+  `;
 }
 
 export interface GitTimelineRow {
@@ -2133,7 +2224,7 @@ export interface GitTimelineRow {
 }
 
 export async function getGitTimeline(f: Filters = {}): Promise<GitTimelineRow[]> {
-  return query<GitTimelineRow>(`
+  return queryWhere<GitTimelineRow>`
     SELECT
       ${dateTrunc(f)} AS date,
       COUNT(*) FILTER (WHERE agentAuthored = 1) AS agent_commits,
@@ -2144,7 +2235,7 @@ export async function getGitTimeline(f: Filters = {}): Promise<GitTimelineRow[]>
     ${gitWhere(f, ["eventType = 'commit'"])}
     GROUP BY date
     ORDER BY date
-  `);
+  `;
 }
 
 export interface GitCommitRow {
@@ -2177,8 +2268,7 @@ export async function getUnlinkedAgentCommits(
   f: Filters = {},
   limit = 100,
 ): Promise<GitCommitRow[]> {
-  const safe = esc(project);
-  const rows = await query<GitCommitRowRaw>(`
+  const rows = await queryWhere<GitCommitRowRaw>`
     SELECT
       commitSha AS commit_sha,
       timestamp,
@@ -2198,16 +2288,16 @@ export async function getUnlinkedAgentCommits(
       "eventType = 'commit'",
       "agentAuthored = 1",
       "sessionId IS NULL",
-      `project = '${safe}'`,
+      { sql: "project = ?", params: [project] },
     ])}
     ORDER BY timestamp DESC
-    LIMIT ${limit}
-  `);
+    LIMIT ${Number(limit)}
+  `;
   return rows.map((r) => ({ ...r, agent_authored: Boolean(r.agent_authored) }));
 }
 
 export async function getGitCommits(f: Filters = {}, limit = 50): Promise<GitCommitRow[]> {
-  const rows = await query<GitCommitRowRaw>(`
+  const rows = await queryWhere<GitCommitRowRaw>`
     SELECT
       commitSha AS commit_sha,
       timestamp,
@@ -2226,7 +2316,7 @@ export async function getGitCommits(f: Filters = {}, limit = 50): Promise<GitCom
     ${gitWhere(f, ["eventType = 'commit'"])}
     ORDER BY timestamp DESC
     LIMIT ${limit}
-  `);
+  `;
   return rows.map((r) => ({ ...r, agent_authored: Boolean(r.agent_authored) }));
 }
 
@@ -2274,9 +2364,9 @@ export async function getCommitDetail(sha: string): Promise<CommitDetail | null>
       sessionId AS session_id,
       files
     FROM git_events
-    WHERE commitSha = '${esc(sha)}'
+    WHERE commitSha = ?
     LIMIT 1
-  `);
+  `, [sha]);
   const r = rows[0];
   if (!r) return null;
   return {
@@ -2310,9 +2400,9 @@ export async function getSessionCommits(sessionId: string): Promise<GitCommitRow
       agentName                 AS agent_name,
       sessionId                 AS session_id
     FROM git_events
-    WHERE sessionId = '${esc(sessionId)}' AND eventType = 'commit'
+    WHERE sessionId = ? AND eventType = 'commit'
     ORDER BY timestamp ASC
-  `);
+  `, [sessionId]);
   return rows.map((r) => ({ ...r, agent_authored: Boolean(r.agent_authored) }));
 }
 
@@ -2337,14 +2427,15 @@ export interface GitSessionRow {
 
 export async function getGitSessions(f: Filters): Promise<GitSessionRow[]> {
   // Find session_ids that produced commits in-filter.
-  const ids = await query<{ session_id: string }>(`
+  const ids = await queryWhere<{ session_id: string }>`
     SELECT DISTINCT sessionId AS session_id
     FROM git_events
     ${gitWhere(f, ["eventType = 'commit'", "sessionId IS NOT NULL"])}
-  `);
+  `;
   if (ids.length === 0) return [];
 
-  const idList = ids.map((r) => `'${esc(r.session_id)}'`).join(",");
+  const idValues = ids.map((r) => r.session_id);
+  const idPlaceholders = idValues.map(() => "?").join(",");
   const meta = await query<{
     session_id: string; agent: string; project: string;
     started: string; ended: string;
@@ -2362,9 +2453,9 @@ export async function getGitSessions(f: Filters): Promise<GitSessionRow[]> {
       COALESCE(SUM(${TU_OUTPUT}), 0) AS output_tokens,
       COALESCE(SUM(${TU_CACHE_R}),0) AS cache_read
     FROM traces
-    WHERE sessionId IN (${idList})
+    WHERE sessionId IN (${idPlaceholders})
     GROUP BY sessionId, agent
-  `);
+  `, idValues);
 
   const commitRows = await query<GitCommitRowRaw>(`
     SELECT
@@ -2382,9 +2473,9 @@ export async function getGitSessions(f: Filters): Promise<GitSessionRow[]> {
       COALESCE(agentAuthored, 0) AS agent_authored,
       agentName                 AS agent_name
     FROM git_events
-    WHERE sessionId IN (${idList}) AND eventType = 'commit'
+    WHERE sessionId IN (${idPlaceholders}) AND eventType = 'commit'
     ORDER BY timestamp ASC
-  `);
+  `, idValues);
 
   const commitsBySession = new Map<string, GitCommitRow[]>();
   for (const c of commitRows) {
@@ -2477,23 +2568,23 @@ export async function getSessionSummary(sessionId: string): Promise<SessionSumma
         COALESCE(SUM(${TU_OUTPUT}), 0) AS output_tokens,
         COALESCE(SUM(${TU_CACHE_R}), 0) AS cache_read
       FROM traces
-      WHERE sessionId = '${esc(sessionId)}'
+      WHERE sessionId = ?
       GROUP BY sessionId
-    `),
+    `, [sessionId]),
     query<{ tool_name: string; count: number }>(`
       SELECT toolName AS tool_name, COUNT(*) AS count
       FROM traces
-      WHERE sessionId = '${esc(sessionId)}' AND toolName IS NOT NULL
+      WHERE sessionId = ? AND toolName IS NOT NULL
       GROUP BY toolName
       ORDER BY count DESC
-    `),
+    `, [sessionId]),
     query<{ model: string; count: number }>(`
       SELECT model, COUNT(*) AS count
       FROM traces
-      WHERE sessionId = '${esc(sessionId)}' AND model IS NOT NULL
+      WHERE sessionId = ? AND model IS NOT NULL
       GROUP BY model
       ORDER BY count DESC
-    `),
+    `, [sessionId]),
   ]);
   if (meta.length === 0) return null;
   return { ...meta[0], tools, models };
@@ -2522,9 +2613,9 @@ export async function getSessionDetail(sessionId: string): Promise<SessionDetail
       COALESCE(SUM(${TU_CACHE_R}), 0) AS cache_read,
       COALESCE(SUM(${TU_CACHE_C}), 0) AS cache_creation
     FROM traces
-    WHERE sessionId = '${esc(sessionId)}'
+    WHERE sessionId = ?
     GROUP BY sessionId
-  `);
+  `, [sessionId]);
   if (meta.length === 0) return null;
 
   const [entries, toolSummary, commits] = await Promise.all([
@@ -2542,19 +2633,19 @@ export async function getSessionDetail(sessionId: string): Promise<SessionDetail
         ${TU_INPUT}  AS input_tokens,
         ${TU_OUTPUT} AS output_tokens
       FROM traces
-      WHERE sessionId = '${esc(sessionId)}'
+      WHERE sessionId = ?
       ORDER BY timestamp
       LIMIT 500
-    `),
+    `, [sessionId]),
     query<{ tool_name: string; count: number }>(`
       SELECT
         toolName AS tool_name,
         COUNT(*) AS count
       FROM traces
-      WHERE sessionId = '${esc(sessionId)}' AND toolName IS NOT NULL
+      WHERE sessionId = ? AND toolName IS NOT NULL
       GROUP BY toolName
       ORDER BY count DESC
-    `),
+    `, [sessionId]),
     query<GitCommitRowRaw>(`
       SELECT
         commitSha AS commit_sha,
@@ -2571,18 +2662,18 @@ export async function getSessionDetail(sessionId: string): Promise<SessionDetail
         agentName AS agent_name,
         sessionId AS session_id
       FROM git_events
-      WHERE sessionId = '${esc(sessionId)}' AND eventType = 'commit'
+      WHERE sessionId = ? AND eventType = 'commit'
       ORDER BY timestamp
-    `),
+    `, [sessionId]),
   ]);
 
   // Pull every entry's timestamp once for active-time + sparkline. Cheap
   // even for 10K-entry sessions (one column scan + a sort).
   const allTimestamps = await query<{ timestamp: string }>(`
     SELECT timestamp FROM traces
-    WHERE sessionId = '${esc(sessionId)}'
+    WHERE sessionId = ?
     ORDER BY timestamp
-  `);
+  `, [sessionId]);
   const { active_ms, activity } = computeActivityProfile(
     allTimestamps.map((r) => r.timestamp),
     meta[0].started,
