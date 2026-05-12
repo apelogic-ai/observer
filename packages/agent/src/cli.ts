@@ -987,6 +987,7 @@ async function updateAction(): Promise<void> {
   const baseUrl = `https://github.com/${repo}/releases/download/${latestTag}`;
   const binaryUrl = `${baseUrl}/observer-${target}${ext}`;
   const checksumUrl = `${binaryUrl}.sha256`;
+  const bundleUrl = `${binaryUrl}.bundle`;
 
   // Download checksum FIRST so we never write an unverified binary to disk.
   // Mirrors install.sh; without this the updater is the soft underbelly of
@@ -1032,6 +1033,66 @@ async function updateAction(): Promise<void> {
     console.error(`  expected: ${expectedSha}`);
     console.error(`  got:      ${actualSha}`);
     return;
+  }
+
+  // Sigstore verification (OBS-002, 2026-05 review). Cosign signs
+  // each binary with an OIDC token minted for this repo's release
+  // workflow, so a swapped release asset will fail to produce a
+  // matching certificate-identity / OIDC-issuer pair.
+  //
+  // - Cosign on PATH → verify; abort on failure.
+  // - Cosign missing & OBSERVER_REQUIRE_SIGNATURE=1 → abort.
+  // - Cosign missing & flag unset → warn, accept .sha256-only.
+  const requireSignature = process.env.OBSERVER_REQUIRE_SIGNATURE === "1";
+  const cosignPath = (() => {
+    try {
+      const out = execSync(process.platform === "win32" ? "where cosign" : "command -v cosign", { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+      return out.split(/\r?\n/)[0] || null;
+    } catch {
+      return null;
+    }
+  })();
+  if (cosignPath) {
+    console.log("Verifying signature with cosign...");
+    let bundleBytes: Uint8Array;
+    try {
+      const res = await fetch(bundleUrl);
+      if (!res.ok) {
+        console.error(`Cosign bundle missing at ${bundleUrl} (HTTP ${res.status}). Refusing to install an unverified binary.`);
+        return;
+      }
+      bundleBytes = new Uint8Array(await res.arrayBuffer());
+    } catch (err) {
+      console.error("Cosign bundle fetch failed:", err instanceof Error ? err.message : err);
+      return;
+    }
+    const { writeFileSync: writeTmp, unlinkSync, mkdtempSync } = require("node:fs") as typeof import("node:fs");
+    const { tmpdir } = require("node:os") as typeof import("node:os");
+    const { join: pjoin } = require("node:path") as typeof import("node:path");
+    const dir = mkdtempSync(pjoin(tmpdir(), "observer-cosign-"));
+    const binTmp = pjoin(dir, "blob");
+    const bundleTmp = pjoin(dir, "blob.bundle");
+    writeTmp(binTmp, bytes);
+    writeTmp(bundleTmp, bundleBytes);
+    try {
+      execSync(
+        `"${cosignPath}" verify-blob --bundle "${bundleTmp}" --certificate-identity-regexp "^https://github\\.com/${repo}/" --certificate-oidc-issuer "https://token.actions.githubusercontent.com" "${binTmp}"`,
+        { stdio: "pipe" },
+      );
+      console.log("  ✓ Cosign verification passed");
+    } catch {
+      console.error("Cosign verification failed — refusing to install.");
+      try { unlinkSync(binTmp); unlinkSync(bundleTmp); } catch { /* best-effort cleanup */ }
+      return;
+    }
+    try { unlinkSync(binTmp); unlinkSync(bundleTmp); } catch { /* best-effort cleanup */ }
+  } else if (requireSignature) {
+    console.error("OBSERVER_REQUIRE_SIGNATURE=1 set but cosign is not on PATH. Install cosign (https://docs.sigstore.dev/cosign/installation) and retry.");
+    return;
+  } else {
+    console.warn("Note: cosign not found on PATH — installed binary is verified by SHA-256 only.");
+    console.warn("      Install cosign to enable sigstore signature verification, or set");
+    console.warn("      OBSERVER_REQUIRE_SIGNATURE=1 to refuse this fallback.");
   }
 
   // Atomic replace: write to sibling path, chmod, rename onto target.

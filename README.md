@@ -11,7 +11,7 @@ Both are independent. Most developers run only the local dashboard; orgs adding 
 
 ```bash
 # Install
-curl -fsSL https://observer.dev/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/apelogic-ai/observer/master/install.sh | bash
 
 # Configure (interactive — picks per-destination disclosure, asks where to
 # store the API key: keychain / env / literal / Ed25519-only)
