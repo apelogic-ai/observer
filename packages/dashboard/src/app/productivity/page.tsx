@@ -76,6 +76,38 @@ export default function ProductivityPage() {
     return { total: data.length, counts };
   }, [data]);
 
+  // Per-project median score + bucket counts. Sorted lowest-median
+  // first so the projects with the most struggling sessions surface.
+  const byProject = useMemo(() => {
+    if (!data) return null;
+    const groups = new Map<string, ProductivityScoreRow[]>();
+    for (const r of data) {
+      if (!r.project) continue;
+      const list = groups.get(r.project) ?? [];
+      list.push(r);
+      groups.set(r.project, list);
+    }
+    const rows = [...groups.entries()].map(([project, list]) => {
+      const counts: Record<ProductivityBucket, number> = {
+        "productive": 0, "expensive-but-productive": 0,
+        "stuck": 0, "needs-better-setup": 0,
+      };
+      for (const r of list) counts[r.bucket]++;
+      const scores = list.map((r) => r.score).sort((a, b) => a - b);
+      const mid = Math.floor(scores.length / 2);
+      const median = scores.length % 2 === 1
+        ? scores[mid]!
+        : (scores[mid - 1]! + scores[mid]!) / 2;
+      const worst = list.reduce((a, b) => (b.score < a.score ? b : a));
+      return { project, sessions: list.length, counts, median, worst };
+    });
+    rows.sort((a, b) => {
+      if (a.median !== b.median) return a.median - b.median;
+      return a.worst.score - b.worst.score;
+    });
+    return rows;
+  }, [data]);
+
   return (
     <main className="flex-1 p-6 space-y-6 max-w-[1600px] mx-auto w-full">
       <PageHeader
@@ -140,6 +172,24 @@ export default function ProductivityPage() {
         )}
       </Card>
 
+      {byProject && byProject.length > 1 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>By project</CardTitle>
+            <p className="text-xs text-muted-foreground mt-1">
+              Median score per session in each project, lowest-first.
+              The bucket strip shows the mix of session outcomes — a
+              project with all-productive sessions reads green;
+              friction-heavy projects skew toward purple
+              (needs-better-setup) or red (stuck).
+            </p>
+          </CardHeader>
+          <CardContent>
+            <ProjectBucketTable rows={byProject} />
+          </CardContent>
+        </Card>
+      )}
+
       <Card>
         <CardHeader>
           <CardTitle>Sessions, grouped by bucket</CardTitle>
@@ -163,6 +213,74 @@ export default function ProductivityPage() {
         </CardContent>
       </Card>
     </main>
+  );
+}
+
+interface ProjectBucketRow {
+  project: string;
+  sessions: number;
+  counts: Record<ProductivityBucket, number>;
+  median: number;
+  worst: ProductivityScoreRow;
+}
+
+function BucketStrip({ counts, total }: { counts: Record<ProductivityBucket, number>; total: number }) {
+  const order: ProductivityBucket[] = ["productive", "expensive-but-productive", "needs-better-setup", "stuck"];
+  return (
+    <div className="flex h-2 w-full overflow-hidden rounded">
+      {order.map((b) => {
+        const pct = total > 0 ? (counts[b] / total) * 100 : 0;
+        if (pct === 0) return null;
+        return (
+          <div
+            key={b}
+            className="h-full"
+            style={{ width: `${pct}%`, backgroundColor: BUCKET_COLORS[b] }}
+            title={`${BUCKET_LABELS[b]}: ${counts[b]} (${pct.toFixed(0)}%)`}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+function ProjectBucketTable({ rows }: { rows: ProjectBucketRow[] }) {
+  return (
+    <table className="w-full text-sm">
+      <thead className="text-xs text-muted-foreground border-b border-border">
+        <tr>
+          <th className="text-left py-2 font-normal">Project</th>
+          <th className="text-right py-2 font-normal">Sessions</th>
+          <th className="text-right py-2 font-normal">Median score</th>
+          <th className="text-left py-2 font-normal pl-4 w-[35%]">Mix</th>
+          <th className="text-right py-2 font-normal">Worst session</th>
+          <th className="text-right py-2 font-normal">Worst score</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((p) => (
+          <tr key={p.project} className="border-b border-border/40">
+            <td className="py-2">{p.project}</td>
+            <td className="py-2 tabular-nums text-right">{p.sessions}</td>
+            <td className="py-2 tabular-nums text-right font-medium">{Math.round(p.median)}</td>
+            <td className="py-2 pl-4">
+              <BucketStrip counts={p.counts} total={p.sessions} />
+            </td>
+            <td className="py-2 text-right">
+              <Link
+                href={`/session?id=${encodeURIComponent(p.worst.sessionId)}`}
+                className="text-brand hover:underline font-mono text-xs"
+              >
+                {p.worst.sessionId.slice(0, 12)}
+              </Link>
+            </td>
+            <td className="py-2 tabular-nums text-right" style={{ color: BUCKET_COLORS[p.worst.bucket] }}>
+              {p.worst.score}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }
 

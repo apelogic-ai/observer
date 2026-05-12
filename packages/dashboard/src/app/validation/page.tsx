@@ -9,6 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { formatNumber } from "@/lib/format";
 import { AGENT_COLORS } from "@/lib/colors";
+import { rollupByProject, type ProjectRollup } from "@/lib/project-rollup";
 import type { ValidationCoverageRow, ValidationLoopRow } from "@/lib/queries";
 
 /**
@@ -56,6 +57,43 @@ export default function ValidationPage() {
     return { total, validated, unvalidated: total - validated, pct, unvalidatedTokens };
   }, [data]);
 
+  // Per-project coverage. Headline metric is "% validated" — lower is
+  // worse — so we sort ascending. Worst session = the unvalidated row
+  // with the most tokens (the most expensive flail).
+  const byProject = useMemo(() => {
+    if (!data) return null;
+    const groups = new Map<string, ValidationCoverageRow[]>();
+    for (const r of data) {
+      if (!r.project) continue;
+      const list = groups.get(r.project) ?? [];
+      list.push(r);
+      groups.set(r.project, list);
+    }
+    const rows = [...groups.entries()].map(([project, list]) => {
+      const validated = list.filter((r) => r.validatedAfterEdit).length;
+      const unvalidated = list.filter((r) => !r.validatedAfterEdit);
+      const pct = list.length > 0 ? Math.round((validated / list.length) * 100) : 0;
+      const worst = unvalidated.length > 0
+        ? unvalidated.reduce((a, b) => (b.tokens > a.tokens ? b : a))
+        : null;
+      const unvalidatedTokens = unvalidated.reduce((acc, r) => acc + r.tokens, 0);
+      return { project, sessions: list.length, validated, unvalidated: unvalidated.length, pct, worst, unvalidatedTokens };
+    });
+    rows.sort((a, b) => {
+      if (a.pct !== b.pct) return a.pct - b.pct;
+      return b.unvalidatedTokens - a.unvalidatedTokens;
+    });
+    return rows;
+  }, [data]);
+
+  const loopsByProject = useMemo(() => {
+    if (!loops) return null;
+    return rollupByProject(loops, {
+      metric: (r) => r.failures,
+      extra: { attempts: (r) => r.attempts, failures: (r) => r.failures },
+    });
+  }, [loops]);
+
   return (
     <main className="flex-1 p-6 space-y-6 max-w-[1600px] mx-auto w-full">
       <PageHeader
@@ -94,6 +132,22 @@ export default function ValidationPage() {
         )}
       </Card>
 
+      {byProject && byProject.length > 1 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>By project</CardTitle>
+            <p className="text-xs text-muted-foreground mt-1">
+              % of edited sessions that ran a validation command after
+              the last edit, lowest-coverage-first. Worst session is
+              the un-validated row with the highest token spend.
+            </p>
+          </CardHeader>
+          <CardContent>
+            <CoverageProjectTable rows={byProject} />
+          </CardContent>
+        </Card>
+      )}
+
       <Card>
         <CardHeader>
           <CardTitle>Sessions, ranked by un-validated token spend</CardTitle>
@@ -127,6 +181,28 @@ export default function ValidationPage() {
             resolved. Sorted failures first.
           </p>
         </CardHeader>
+      </Card>
+
+      {loopsByProject && loopsByProject.length > 1 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>By project</CardTitle>
+            <p className="text-xs text-muted-foreground mt-1">
+              Per project: loop count, total attempts, total failures.
+              Worst loop is the (command, session) pair with the most
+              failures.
+            </p>
+          </CardHeader>
+          <CardContent>
+            <LoopsProjectTable rows={loopsByProject} />
+          </CardContent>
+        </Card>
+      )}
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Loops, ranked by failures</CardTitle>
+        </CardHeader>
         <CardContent>
           {loops === null ? (
             <div className="text-sm text-muted-foreground">Loading…</div>
@@ -140,6 +216,92 @@ export default function ValidationPage() {
         </CardContent>
       </Card>
     </main>
+  );
+}
+
+interface CoverageProjectRow {
+  project: string;
+  sessions: number;
+  validated: number;
+  unvalidated: number;
+  pct: number;
+  worst: ValidationCoverageRow | null;
+  unvalidatedTokens: number;
+}
+
+function CoverageProjectTable({ rows }: { rows: CoverageProjectRow[] }) {
+  return (
+    <div>
+      <table className="w-full text-sm">
+        <thead className="text-xs text-muted-foreground border-b border-border">
+          <tr>
+            <th className="text-left py-2 font-normal">Project</th>
+            <th className="text-right py-2 font-normal">Sessions</th>
+            <th className="text-right py-2 font-normal">Validated</th>
+            <th className="text-right py-2 font-normal">Un-validated tokens</th>
+            <th className="text-right py-2 font-normal">Worst session</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((p) => (
+            <tr key={p.project} className="border-b border-border/40">
+              <td className="py-2">{p.project}</td>
+              <td className="py-2 tabular-nums text-right">{p.sessions}</td>
+              <td className="py-2 tabular-nums text-right font-medium">
+                <span className={p.pct >= 50 ? "text-green-500" : "text-orange-500"}>
+                  {p.pct}%
+                </span>
+                <span className="text-muted-foreground"> ({p.validated}/{p.sessions})</span>
+              </td>
+              <td className="py-2 tabular-nums text-right text-muted-foreground">{formatTokens(p.unvalidatedTokens)}</td>
+              <td className="py-2 text-right">
+                {p.worst ? (
+                  <Link
+                    href={`/session?id=${encodeURIComponent(p.worst.sessionId)}`}
+                    className="text-brand hover:underline font-mono text-xs"
+                  >
+                    {p.worst.sessionId.slice(0, 12)}
+                  </Link>
+                ) : (
+                  <span className="text-muted-foreground">—</span>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function LoopsProjectTable({ rows }: { rows: ProjectRollup<ValidationLoopRow, { attempts: number; failures: number }>[] }) {
+  return (
+    <div>
+      <table className="w-full text-sm">
+        <thead className="text-xs text-muted-foreground border-b border-border">
+          <tr>
+            <th className="text-left py-2 font-normal">Project</th>
+            <th className="text-right py-2 font-normal">Loops</th>
+            <th className="text-right py-2 font-normal">Total attempts</th>
+            <th className="text-right py-2 font-normal">Total failures</th>
+            <th className="text-right py-2 font-normal">Worst loop</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((p) => (
+            <tr key={p.project} className="border-b border-border/40">
+              <td className="py-2">{p.project}</td>
+              <td className="py-2 tabular-nums text-right">{p.sessions}</td>
+              <td className="py-2 tabular-nums text-right text-muted-foreground">{formatNumber(p.extra.attempts)}</td>
+              <td className="py-2 tabular-nums text-right text-orange-500 font-medium">{formatNumber(p.extra.failures)}</td>
+              <td className="py-2 font-mono text-xs text-right text-muted-foreground max-w-[400px] truncate">
+                {p.worst.command} ({p.worst.failures}/{p.worst.attempts})
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 

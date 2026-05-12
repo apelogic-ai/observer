@@ -9,6 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { formatNumber } from "@/lib/format";
 import { AGENT_COLORS } from "@/lib/colors";
+import { rollupByProject, type ProjectRollup } from "@/lib/project-rollup";
 import type { InterventionRateRow } from "@/lib/queries";
 
 /**
@@ -55,6 +56,15 @@ export default function AutonomyPage() {
     const medianTpt = ratios.length > 0 ? ratios[Math.floor(ratios.length / 2)]! : 0;
     const chatOnly = total - active.length;
     return { total, totalTurns, avgTurns, medianTpt, activeCount: active.length, chatOnly };
+  }, [data]);
+
+  // Most-handheld project floats up: sort by median userTurns desc.
+  const byProject = useMemo(() => {
+    if (!data) return null;
+    return rollupByProject(data, {
+      metric: (r) => r.userTurns,
+      extra: { commits: (r) => r.commits, locDelta: (r) => r.locDelta },
+    });
   }, [data]);
 
   return (
@@ -105,6 +115,23 @@ export default function AutonomyPage() {
         )}
       </Card>
 
+      {byProject && byProject.length > 1 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>By project</CardTitle>
+            <p className="text-xs text-muted-foreground mt-1">
+              Median user-turn count per session in each project,
+              worst-first. A high median means every session in that
+              project tends to need a lot of steering — not just one
+              outlier.
+            </p>
+          </CardHeader>
+          <CardContent>
+            <ProjectTable rows={byProject} />
+          </CardContent>
+        </Card>
+      )}
+
       <Card>
         <CardHeader>
           <CardTitle>Sessions, ranked by user-turn count</CardTitle>
@@ -122,6 +149,44 @@ export default function AutonomyPage() {
         </CardContent>
       </Card>
     </main>
+  );
+}
+
+function ProjectTable({ rows }: { rows: ProjectRollup<InterventionRateRow, { commits: number; locDelta: number }>[] }) {
+  return (
+    <table className="w-full text-sm">
+      <thead className="text-xs text-muted-foreground border-b border-border">
+        <tr>
+          <th className="text-left py-2 font-normal">Project</th>
+          <th className="text-right py-2 font-normal">Sessions</th>
+          <th className="text-right py-2 font-normal">Median user-turns</th>
+          <th className="text-right py-2 font-normal">Total commits</th>
+          <th className="text-right py-2 font-normal">Total LoC</th>
+          <th className="text-right py-2 font-normal">Worst session</th>
+          <th className="text-right py-2 font-normal">Worst turns</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((p) => (
+          <tr key={p.project} className="border-b border-border/40">
+            <td className="py-2">{p.project}</td>
+            <td className="py-2 tabular-nums text-right">{p.sessions}</td>
+            <td className="py-2 tabular-nums text-right font-medium">{p.median.toFixed(0)}</td>
+            <td className="py-2 tabular-nums text-right text-muted-foreground">{formatNumber(p.extra.commits)}</td>
+            <td className="py-2 tabular-nums text-right text-muted-foreground">{formatNumber(p.extra.locDelta)}</td>
+            <td className="py-2 text-right">
+              <Link
+                href={`/session?id=${encodeURIComponent(p.worst.sessionId)}`}
+                className="text-brand hover:underline font-mono text-xs"
+              >
+                {p.worst.sessionId.slice(0, 12)}
+              </Link>
+            </td>
+            <td className="py-2 tabular-nums text-right text-muted-foreground">{formatNumber(p.worst.userTurns)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }
 
