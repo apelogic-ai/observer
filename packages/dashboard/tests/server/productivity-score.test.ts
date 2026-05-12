@@ -155,4 +155,23 @@ describe("getProductivityScore", () => {
     const beta = await getProductivityScore({ days: 1, project: "beta" });
     expect(beta.map((r) => r.sessionId)).toEqual(["stuck"]);
   });
+
+  it("assigns a numeric score 0-100 that orders within and across buckets", async () => {
+    const rows = await getProductivityScore({ days: 1 });
+    const good = rows.find((r) => r.sessionId === "good")!;
+    const stuck = rows.find((r) => r.sessionId === "stuck")!;
+    const thrash = rows.find((r) => r.sessionId === "thrash")!;
+
+    for (const r of rows) {
+      expect(r.score).toBeGreaterThanOrEqual(0);
+      expect(r.score).toBeLessThanOrEqual(100);
+    }
+    // Shipping + validating is the clearest "good" signal — it
+    // must outrank the no-commit cases. Whether stuck or thrash is
+    // worse is subjective (the bucket label is the headline; the
+    // score is a within-bucket tiebreaker), so we don't compare
+    // them directly here.
+    expect(good.score).toBeGreaterThan(thrash.score);
+    expect(good.score).toBeGreaterThan(stuck.score);
+  });
 });

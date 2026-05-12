@@ -185,6 +185,7 @@ export interface ProductivityScoreRow {
   redFlags: string[];
   greenFlags: string[];
   bucket: ProductivityBucket;
+  score: number;
 }
 
 export interface InterventionRateRow {

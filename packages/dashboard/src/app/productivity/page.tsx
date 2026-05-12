@@ -95,12 +95,31 @@ export default function ProductivityPage() {
         <CardHeader>
           <CardTitle>Composite score per session</CardTitle>
           <p className="text-sm text-muted-foreground">
-            Combines commit attribution, validation coverage,
-            stuck-test loops, user intervention, search/edit ratio,
-            and first-action latency into one bucketed view. Each
-            session lands in exactly one bucket; red and green flags
-            below show which dimensions drove the assignment.
-            Sessions that never edited code are filtered out.
+            <strong>What&apos;s in this view:</strong> every session in
+            the selected window that either edited code (Edit /
+            Write / apply_patch) or shipped a linked agent commit.
+            Pure-chat and read-only exploration sessions are
+            filtered out — they carry no quality signal.
+          </p>
+          <p className="text-sm text-muted-foreground mt-2">
+            <strong>How the score is calculated.</strong> Each
+            session starts at <span className="font-mono">50</span>.
+            Output bonuses: <span className="font-mono">+6</span>{" "}
+            per linked commit (capped at 5), up to{" "}
+            <span className="font-mono">+8</span> for LoC delivered,{" "}
+            <span className="font-mono">+10</span> for a validation
+            run after the last edit. Friction penalties:{" "}
+            <span className="font-mono">−8</span> per stuck-test loop
+            (capped at <span className="font-mono">−24</span>),{" "}
+            <span className="font-mono">−8</span> high intervention
+            (≥50 user turns), <span className="font-mono">−6</span>{" "}
+            high search/edit ratio (≥5×),{" "}
+            <span className="font-mono">−5</span> slow first action
+            (≥20m), <span className="font-mono">−12</span> dark spend
+            (≥1M tokens, ≤5 LoC), <span className="font-mono">−8</span>{" "}
+            no post-edit validation. Clamped to 0–100. The bucket
+            is derived from the score plus whether the session
+            shipped a commit, so the two views can&apos;t disagree.
           </p>
         </CardHeader>
         {summary && summary.total > 0 && (
@@ -127,7 +146,7 @@ export default function ProductivityPage() {
           <p className="text-xs text-muted-foreground mt-1">
             Productive at the top (baseline of what good looks like),
             then expensive-but-productive, stuck, and
-            needs-better-setup. Within each bucket: fewest red flags
+            needs-better-setup. Within each bucket: highest score
             first, then highest tokens.
           </p>
         </CardHeader>
@@ -148,6 +167,15 @@ export default function ProductivityPage() {
 }
 
 function ScoreTable({ rows }: { rows: ProductivityScoreRow[] }) {
+  // Group rows by bucket while preserving the upstream sort order
+  // (highest score first within each bucket).
+  const groups: { bucket: ProductivityBucket; rows: ProductivityScoreRow[] }[] = [];
+  for (const r of rows) {
+    const last = groups[groups.length - 1];
+    if (last && last.bucket === r.bucket) last.rows.push(r);
+    else groups.push({ bucket: r.bucket, rows: [r] });
+  }
+
   return (
     <table className="w-full text-sm">
       <thead className="text-xs text-muted-foreground border-b border-border">
@@ -155,60 +183,68 @@ function ScoreTable({ rows }: { rows: ProductivityScoreRow[] }) {
           <th className="text-left py-2 font-normal">Session</th>
           <th className="text-left py-2 font-normal">Agent</th>
           <th className="text-left py-2 font-normal">Project</th>
-          <th className="text-left py-2 font-normal">Bucket</th>
+          <th className="text-right py-2 font-normal">Score</th>
           <th className="text-right py-2 font-normal">Commits</th>
           <th className="text-right py-2 font-normal">LoC</th>
           <th className="text-right py-2 font-normal">Tokens</th>
           <th className="text-left py-2 font-normal pl-3">Flags</th>
         </tr>
       </thead>
-      <tbody>
-        {rows.map((r) => (
-          <tr key={r.sessionId} className="border-b border-border/40">
-            <td className="py-2 font-mono">
-              <Link href={`/session?id=${encodeURIComponent(r.sessionId)}`} className="text-brand hover:underline">
-                {r.sessionId.slice(0, 12)}
-              </Link>
-            </td>
-            <td className="py-2">
-              <Badge
-                variant="outline"
-                className="text-[10px]"
-                style={{ borderColor: AGENT_COLORS[r.agent], color: AGENT_COLORS[r.agent] }}
-              >
-                {r.agent.replace("_", " ")}
-              </Badge>
-            </td>
-            <td className="py-2 text-muted-foreground">{r.project ?? "—"}</td>
-            <td className="py-2">
-              <Badge
-                variant="outline"
-                className="text-[10px]"
-                style={{ borderColor: BUCKET_COLORS[r.bucket], color: BUCKET_COLORS[r.bucket] }}
-              >
-                {BUCKET_LABELS[r.bucket]}
-              </Badge>
-            </td>
-            <td className="py-2 tabular-nums text-right">{formatNumber(r.commits)}</td>
-            <td className="py-2 tabular-nums text-right">{formatNumber(r.locDelta)}</td>
-            <td className="py-2 tabular-nums text-right text-muted-foreground">{formatTokens(r.tokens)}</td>
-            <td className="py-2 pl-3">
-              <div className="flex flex-wrap gap-1">
-                {r.greenFlags.map((f) => (
-                  <span key={f} className="text-[10px] text-green-500" title={GREEN_FLAG_LABELS[f] ?? f}>
-                    ✓ {GREEN_FLAG_LABELS[f] ?? f}
-                  </span>
-                ))}
-                {r.redFlags.map((f) => (
-                  <span key={f} className="text-[10px] text-orange-500" title={RED_FLAG_LABELS[f] ?? f}>
-                    ✗ {RED_FLAG_LABELS[f] ?? f}
-                  </span>
-                ))}
-              </div>
+      {groups.map((g) => (
+        <tbody key={g.bucket}>
+          <tr>
+            <td
+              colSpan={8}
+              className="pt-6 pb-2 text-xs uppercase tracking-wider font-semibold border-b border-border"
+              style={{ color: BUCKET_COLORS[g.bucket] }}
+            >
+              {BUCKET_LABELS[g.bucket]}
+              <span className="ml-2 text-muted-foreground font-normal normal-case tracking-normal">
+                ({g.rows.length})
+              </span>
             </td>
           </tr>
-        ))}
-      </tbody>
+          {g.rows.map((r) => (
+            <tr key={r.sessionId} className="border-b border-border/40">
+              <td className="py-2 font-mono">
+                <Link href={`/session?id=${encodeURIComponent(r.sessionId)}`} className="text-brand hover:underline">
+                  {r.sessionId.slice(0, 12)}
+                </Link>
+              </td>
+              <td className="py-2">
+                <Badge
+                  variant="outline"
+                  className="text-[10px]"
+                  style={{ borderColor: AGENT_COLORS[r.agent], color: AGENT_COLORS[r.agent] }}
+                >
+                  {r.agent.replace("_", " ")}
+                </Badge>
+              </td>
+              <td className="py-2 text-muted-foreground">{r.project ?? "—"}</td>
+              <td className="py-2 tabular-nums text-right font-bold" style={{ color: BUCKET_COLORS[r.bucket] }}>
+                {r.score}
+              </td>
+              <td className="py-2 tabular-nums text-right">{formatNumber(r.commits)}</td>
+              <td className="py-2 tabular-nums text-right">{formatNumber(r.locDelta)}</td>
+              <td className="py-2 tabular-nums text-right text-muted-foreground">{formatTokens(r.tokens)}</td>
+              <td className="py-2 pl-3">
+                <div className="flex flex-wrap gap-1">
+                  {r.greenFlags.map((f) => (
+                    <span key={f} className="text-[10px] text-green-500" title={GREEN_FLAG_LABELS[f] ?? f}>
+                      ✓ {GREEN_FLAG_LABELS[f] ?? f}
+                    </span>
+                  ))}
+                  {r.redFlags.map((f) => (
+                    <span key={f} className="text-[10px] text-orange-500" title={RED_FLAG_LABELS[f] ?? f}>
+                      ✗ {RED_FLAG_LABELS[f] ?? f}
+                    </span>
+                  ))}
+                </div>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      ))}
     </table>
   );
 }

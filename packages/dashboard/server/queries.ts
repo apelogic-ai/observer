@@ -1463,6 +1463,12 @@ export interface ProductivityScoreRow {
   redFlags: string[];
   greenFlags: string[];
   bucket: ProductivityBucket;
+  /** 0-100 composite score. Baseline 50, plus rewards for output
+   *  (commits, LoC, validation) and penalties for friction
+   *  (stuck loops, dark spend, high intervention, etc.). Useful for
+   *  ranking within a bucket — the bucket is the headline, the score
+   *  is the tiebreaker. */
+  score: number;
 }
 
 /**
@@ -1543,17 +1549,35 @@ export async function getProductivityScore(
     if (s.commits >= 1) greenFlags.push("shipped-commit");
     if (cov?.validatedAfterEdit === true) greenFlags.push("validated");
 
-    // Bucket assignment. "stuck" is reserved for the specific
-    // shape of an agent looping on a failing test — not any
-    // expensive-but-unproductive session, since the latter
-    // includes the "high search ratio, no commit" pattern that
-    // belongs in needs-better-setup. Dark-spend stays a red flag
-    // for visibility but doesn't determine the bucket.
+    // Composite score on a 0-100 scale. Baseline 50 + output
+    // bonuses - friction penalties. Per-axis penalties are capped
+    // so one bad axis (e.g. many stuck-test loops) can't bottom
+    // out a session that otherwise shipped a lot of code. The
+    // bucket below is derived from this score, so the two views
+    // can't disagree by construction.
+    let score = 50;
+    score += Math.min(s.commits, 5) * 6;                  // up to +30
+    score += Math.min(s.locDelta / 200, 8);               // up to +8
+    if (cov?.validatedAfterEdit === true)  score += 10;
+    if (cov?.validatedAfterEdit === false) score -= 8;
+    score -= Math.min(stuckLoops * 8, 24);                // cap stuck penalty at -24
+    if (intRow && intRow.userTurns >= 50) score -= 8;
+    if (ratioRow && ratioRow.ratio >= 5)  score -= 6;
+    if (latRow && latRow.latencyMs >= 20 * 60 * 1000) score -= 5;
+    if (s.tokens >= 1_000_000 && s.locDelta <= 5) score -= 12;
+    score = Math.max(0, Math.min(100, Math.round(score)));
+
+    // Bucket assignment derived from score + structural signals.
+    // The two-axis decision: (a) did the session ship code? — splits
+    // productive variants from no-commit variants. (b) score —
+    // splits clean shipping from expensive-shipping, and stuck-loop
+    // sessions from generic friction.
     let bucket: ProductivityBucket;
-    if (s.commits >= 1 && redFlags.length <= 2) {
-      bucket = "productive";
-    } else if (s.commits >= 1) {
-      bucket = "expensive-but-productive";
+    if (s.commits >= 1) {
+      // A clean 1-commit + validation + no-friction session scores
+      // 66 (50 + 6 + 10); 65 keeps that in "productive" while
+      // pushing shipping-with-significant-friction below the line.
+      bucket = score >= 65 ? "productive" : "expensive-but-productive";
     } else if (stuckLoops >= 1) {
       bucket = "stuck";
     } else {
@@ -1578,6 +1602,7 @@ export async function getProductivityScore(
       redFlags,
       greenFlags,
       bucket,
+      score,
     });
   }
 
@@ -1592,7 +1617,8 @@ export async function getProductivityScore(
   };
   rows.sort((a, b) => {
     if (a.bucket !== b.bucket) return bucketOrder[a.bucket] - bucketOrder[b.bucket];
-    if (a.redFlags.length !== b.redFlags.length) return a.redFlags.length - b.redFlags.length;
+    // Within a bucket: highest score first (cleanest examples at top).
+    if (a.score !== b.score) return b.score - a.score;
     return b.tokens - a.tokens;
   });
   return rows;
