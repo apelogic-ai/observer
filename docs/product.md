@@ -597,7 +597,7 @@ GitHub Release `v{VERSION}`, and attaches binaries + checksums.
 ### 7.3 Install
 
 ```bash
-curl -fsSL https://observer.dev/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/apelogic-ai/observer/master/install.sh | bash
 ```
 
 The script:
@@ -605,11 +605,17 @@ The script:
 1. Detects platform (darwin/linux/windows) and architecture
 2. Fetches the latest `v*` release tag from the GitHub API
 3. Downloads the matching binary from GitHub Releases
-4. Verifies SHA-256 checksum
+4. Verifies sigstore cosign signature when cosign is on `PATH`; falls
+   back to SHA-256 only otherwise. `OBSERVER_REQUIRE_SIGNATURE=1`
+   refuses the fallback.
 5. Installs to `~/.local/bin/observer`
 6. Prints PATH guidance and next steps
 
 `OBSERVER_VERSION` and `OBSERVER_DIR` env vars override.
+
+The binary, its `.sha256`, and a cosign `.bundle` (keyless OIDC
+signature + certificate) are published together by the release
+workflow — see §7.5 below.
 
 ### 7.4 Build (local)
 
@@ -626,15 +632,27 @@ external dependencies. Includes the dashboard.
 
 ### 7.5 Update
 
-The agent checks for updates on startup (once per day):
+The agent compares its own version against the latest GitHub release:
 
 ```
-GET https://observer.dev/api/latest-version
-→ { "version": "0.1.13", "url": "...", "checksum": "sha256:..." }
+GET https://api.github.com/repos/apelogic-ai/observer/releases/latest
+→ { "tag_name": "v0.1.21", ... }
 ```
 
-If newer, logs a notice. `observer update` downloads, verifies
-checksum, replaces the binary in place, restarts the service.
+There is no observer-operated update endpoint — the agent talks to
+GitHub directly, so we never become a single-point-of-trust for
+auto-updates. (Sigstore signing closes the second part of that
+threat model: even if a GitHub release asset is tampered with, the
+cosign bundle binds the binary to the OIDC identity of the workflow
+that produced it; consumers verify against
+`https://github.com/apelogic-ai/observer/.*` as the certificate
+identity.)
+
+`observer update` downloads the binary, verifies the SHA-256, runs
+cosign verification when cosign is available, then atomically swaps
+the binary in place and restarts the service. Set
+`OBSERVER_REQUIRE_SIGNATURE=1` to refuse fallback to SHA-256-only
+verification.
 
 For enterprise deployments, set `update.enabled: false` and let MDM
 manage versions.

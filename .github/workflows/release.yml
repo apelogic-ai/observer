@@ -175,6 +175,14 @@ jobs:
     needs: [lint, typecheck, agent-tests, api-tests, dashboard-tests, e2e]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
+    # Keyless cosign needs an OIDC token to prove the workflow ran in
+    # this repository — `id-token: write` mints it. `contents: read`
+    # is the default but pinning makes the least-privilege intent
+    # explicit. Without these the cosign step fails with "no OIDC
+    # provider found" (OBS-002, 2026-05 review).
+    permissions:
+      id-token: write
+      contents: read
 
     strategy:
       matrix:
@@ -233,6 +241,28 @@ jobs:
           sha256sum observer-${{ matrix.target }}${{ matrix.ext }} > observer-${{ matrix.target }}${{ matrix.ext }}.sha256 \
             || shasum -a 256 observer-${{ matrix.target }}${{ matrix.ext }} > observer-${{ matrix.target }}${{ matrix.ext }}.sha256
 
+      # Sigstore keyless signing. Cosign signs the binary using an
+      # OIDC token minted by GitHub Actions for THIS workflow run in
+      # THIS repository, and writes a self-contained `.bundle` file
+      # carrying the signature + the Fulcio-issued short-lived
+      # certificate. Consumers verify with cosign and a
+      # certificate-identity / OIDC-issuer match — no long-lived
+      # secret to leak (OBS-002, 2026-05 review).
+      - name: Install cosign
+        uses: sigstore/cosign-installer@d7d6e113b16d7d6f3bbe9392ca45dbf6773c4b7c # v3.7.0
+        with:
+          cosign-release: "v2.4.1"
+
+      - name: Sign binary with cosign (keyless OIDC)
+        working-directory: packages/agent
+        shell: bash
+        env:
+          COSIGN_YES: "true"
+        run: |
+          cosign sign-blob \
+            --bundle observer-${{ matrix.target }}${{ matrix.ext }}.bundle \
+            observer-${{ matrix.target }}${{ matrix.ext }}
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -240,6 +270,7 @@ jobs:
           path: |
             packages/agent/observer-${{ matrix.target }}${{ matrix.ext }}
             packages/agent/observer-${{ matrix.target }}${{ matrix.ext }}.sha256
+            packages/agent/observer-${{ matrix.target }}${{ matrix.ext }}.bundle
 
   release:
     name: Create Release
@@ -287,10 +318,13 @@ jobs:
           files: |
             artifacts/observer-darwin-arm64/observer-darwin-arm64
             artifacts/observer-darwin-arm64/observer-darwin-arm64.sha256
+            artifacts/observer-darwin-arm64/observer-darwin-arm64.bundle
             artifacts/observer-linux-x64/observer-linux-x64
             artifacts/observer-linux-x64/observer-linux-x64.sha256
+            artifacts/observer-linux-x64/observer-linux-x64.bundle
             artifacts/observer-windows-x64/observer-windows-x64.exe
             artifacts/observer-windows-x64/observer-windows-x64.exe.sha256
+            artifacts/observer-windows-x64/observer-windows-x64.exe.bundle
           body: |
             ## Observer v${{ steps.version.outputs.version }}
 
@@ -300,10 +334,28 @@ jobs:
 
             **macOS / Linux:**
             ```bash
-            curl -fsSL https://observer.dev/install.sh | bash
+            curl -fsSL https://raw.githubusercontent.com/apelogic-ai/observer/master/install.sh | bash
             ```
 
             **Windows:** download `observer-windows-x64.exe` from the assets below.
+
+            ### Signature verification (optional, recommended)
+
+            Each binary ships with a sigstore cosign `.bundle` signed
+            by this workflow's OIDC identity. Verify before running:
+
+            ```bash
+            cosign verify-blob \
+              --bundle observer-linux-x64.bundle \
+              --certificate-identity-regexp '^https://github\.com/apelogic-ai/observer/' \
+              --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+              observer-linux-x64
+            ```
+
+            `install.sh` performs this verification automatically when
+            cosign is on `PATH`, and falls back to the `.sha256` check
+            otherwise. Set `OBSERVER_REQUIRE_SIGNATURE=1` to refuse
+            installs that can't be cosign-verified.
 
             ### Available downloads
             - **macOS (Apple Silicon):** `observer-darwin-arm64`

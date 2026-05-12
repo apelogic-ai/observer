@@ -80,3 +80,68 @@ describe("OBS-001: install.sh fails closed on checksum-fetch failure", () => {
     expect(checksumBlock![0]).toContain("! curl");
   });
 });
+
+describe("OBS-002: release artifacts are signed with sigstore cosign", () => {
+  // Producer side. The release workflow signs every binary with
+  // keyless cosign (OIDC from GitHub Actions) and publishes the
+  // resulting `.bundle` alongside the binary. A future commit that
+  // strips the signing step should fail this test loudly.
+  it(".github/workflows/release.yml installs cosign", () => {
+    const src = read(".github/workflows/release.yml");
+    expect(src).toMatch(/sigstore\/cosign-installer/);
+  });
+
+  it(".github/workflows/release.yml signs every binary with cosign sign-blob", () => {
+    const src = read(".github/workflows/release.yml");
+    expect(src).toMatch(/cosign sign-blob/);
+  });
+
+  it(".github/workflows/release.yml grants id-token: write for OIDC keyless signing", () => {
+    const src = read(".github/workflows/release.yml");
+    // Either at job level or at top-level permissions. The build
+    // matrix mints the OIDC token, so it must have id-token:write.
+    expect(src).toMatch(/id-token:\s*write/);
+  });
+
+  it(".github/workflows/release.yml publishes the .bundle alongside each binary", () => {
+    const src = read(".github/workflows/release.yml");
+    expect(src).toMatch(/\.bundle/);
+  });
+});
+
+describe("OBS-002 (consumer side): install.sh and updater verify signatures when cosign is available", () => {
+  it("install.sh checks for cosign and runs cosign verify-blob", () => {
+    const src = read("install.sh");
+    expect(src).toMatch(/cosign verify-blob/);
+  });
+
+  it("install.sh honours OBSERVER_REQUIRE_SIGNATURE for strict mode", () => {
+    const src = read("install.sh");
+    expect(src).toMatch(/OBSERVER_REQUIRE_SIGNATURE/);
+  });
+
+  it("packages/agent/src/cli.ts updater verifies the bundle with cosign when available", () => {
+    const src = read("packages/agent/src/cli.ts");
+    expect(src).toMatch(/cosign/);
+    expect(src).toMatch(/OBSERVER_REQUIRE_SIGNATURE/);
+  });
+});
+
+describe("OBS-018: doc cleanup — observer.dev/api/latest-version is not in the shipped docs", () => {
+  // The assessment flagged that docs/product.md described an
+  // observer.dev/api/latest-version endpoint that the agent never
+  // actually called. Stale doc → confusion about threat model.
+  it("docs/product.md does not describe a GET observer.dev/api/latest-version flow", () => {
+    const src = read("docs/product.md");
+    expect(src).not.toMatch(/observer\.dev\/api\/latest-version/);
+  });
+
+  it("docs/product.md and README.md route installs through the canonical GitHub URL", () => {
+    const product = read("docs/product.md");
+    const readme = read("README.md");
+    // Neither file should still publish https://observer.dev/install.sh,
+    // which currently 404s and is a perfect domain-takeover hook.
+    expect(product).not.toMatch(/observer\.dev\/install\.sh/);
+    expect(readme).not.toMatch(/observer\.dev\/install\.sh/);
+  });
+});
