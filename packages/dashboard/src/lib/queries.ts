@@ -161,6 +161,32 @@ export interface FirstActionLatencyRow {
   tokens: number;
 }
 
+export type ProductivityBucket =
+  | "productive"
+  | "expensive-but-productive"
+  | "stuck"
+  | "needs-better-setup";
+
+export interface ProductivityScoreRow {
+  sessionId: string;
+  agent: string;
+  project: string | null;
+  started: string;
+  ended: string;
+  tokens: number;
+  commits: number;
+  locDelta: number;
+  userTurns: number;
+  toolsPerTurn: number | null;
+  validatedAfterEdit: boolean | null;
+  stuckLoops: number;
+  searchToEditRatio: number | null;
+  firstActionMs: number | null;
+  redFlags: string[];
+  greenFlags: string[];
+  bucket: ProductivityBucket;
+}
+
 export interface InterventionRateRow {
   sessionId: string;
   agent: string;

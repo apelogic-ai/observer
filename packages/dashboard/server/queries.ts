@@ -1435,6 +1435,169 @@ export async function getFirstActionLatency(
     .sort((a, b) => b.latencyMs - a.latencyMs);
 }
 
+// ── Productivity score (composite) ─────────────────────────────
+
+export type ProductivityBucket =
+  | "productive"
+  | "expensive-but-productive"
+  | "stuck"
+  | "needs-better-setup";
+
+export interface ProductivityScoreRow {
+  sessionId: string;
+  agent: string;
+  project: string | null;
+  started: string;
+  ended: string;
+  tokens: number;
+  // Inputs (one per upstream metric)
+  commits: number;
+  locDelta: number;
+  userTurns: number;
+  toolsPerTurn: number | null;
+  validatedAfterEdit: boolean | null;
+  stuckLoops: number;
+  searchToEditRatio: number | null;
+  firstActionMs: number | null;
+  // Per-session red/green flags, with deterministic ordering.
+  redFlags: string[];
+  greenFlags: string[];
+  bucket: ProductivityBucket;
+}
+
+/**
+ * Composite per-session productivity score. Composes the outputs of
+ * items #1-#7 into a per-session row with red/green quality flags
+ * and a bucket label. Runs each upstream query independently and
+ * joins by sessionId in TS — six small SQL passes are easier to
+ * maintain than one monster query, and on the live data the total
+ * latency is ~250ms.
+ *
+ * Filter: sessions that edited code OR committed. Pure-chat and
+ * read-only exploration sessions don't have a quality signal worth
+ * scoring; they'd just drown the page in zeros.
+ *
+ * Bucketing rubric (chosen to be interpretable, not optimal):
+ *
+ *   productive               commits ≥ 1 AND red flags ≤ 2
+ *   expensive-but-productive commits ≥ 1 AND red flags ≥ 3
+ *   stuck                    commits = 0 AND (stuck-loops ≥ 1 OR
+ *                              dark-spend flag set)
+ *   needs-better-setup       commits = 0, no stuck loops, but
+ *                              ≥ 2 friction flags (search ratio,
+ *                              intervention, latency)
+ */
+export async function getProductivityScore(
+  f: Filters = {},
+): Promise<ProductivityScoreRow[]> {
+  // Run upstream queries in parallel. Each already respects
+  // project/agent/days filters via the shared `where()` helper.
+  const [rollups, validation, loops, intervention, searchToEdit, latency] =
+    await Promise.all([
+      sessionRollups(f),
+      getValidationCoverage(f),
+      getValidationLoops(f),
+      getInterventionRate(f),
+      getSearchToEditRatio(f),
+      getFirstActionLatency(f),
+    ]);
+
+  // Index by sessionId for O(1) joins below.
+  const validationBySession = new Map(validation.map((r) => [r.sessionId, r]));
+  const interventionBySession = new Map(intervention.map((r) => [r.sessionId, r]));
+  const ratioBySession = new Map(searchToEdit.map((r) => [r.sessionId, r]));
+  const latencyBySession = new Map(latency.map((r) => [r.sessionId, r]));
+  // Sum loop count per session (loops query returns one row per
+  // (sessionId, command); rolling them up here gives a session-level
+  // signal).
+  const loopsBySession = new Map<string, number>();
+  for (const l of loops) loopsBySession.set(l.sessionId, (loopsBySession.get(l.sessionId) ?? 0) + 1);
+
+  // Anchor on sessionRollups (every session with traces). A session
+  // is in-scope iff it committed OR appears in the validation
+  // coverage table (which requires at least one edit).
+  const rows: ProductivityScoreRow[] = [];
+  for (const s of rollups) {
+    const cov = validationBySession.get(s.sessionId);
+    const hasEdit = cov !== undefined;
+    if (!hasEdit && s.commits === 0) continue;   // pure exploration / chat
+
+    const intRow = interventionBySession.get(s.sessionId);
+    const ratioRow = ratioBySession.get(s.sessionId);
+    const latRow = latencyBySession.get(s.sessionId);
+    const stuckLoops = loopsBySession.get(s.sessionId) ?? 0;
+
+    // Red flags. Thresholds picked to flag the long tails the
+    // upstream pages already surface — staying consistent with
+    // /validation, /autonomy, /efficiency etc.
+    const redFlags: string[] = [];
+    if (cov && cov.validatedAfterEdit === false) redFlags.push("no-validation");
+    if (stuckLoops >= 1) redFlags.push("stuck-loops");
+    if (intRow && intRow.userTurns >= 50) redFlags.push("high-intervention");
+    if (ratioRow && ratioRow.ratio >= 5) redFlags.push("high-search-ratio");
+    if (latRow && latRow.latencyMs >= 20 * 60 * 1000) redFlags.push("slow-first-action");
+    // Dark-spend signature: lots of tokens, ≤ 5 LoC delivered.
+    if (s.tokens >= 1_000_000 && s.locDelta <= 5) redFlags.push("dark-spend");
+
+    const greenFlags: string[] = [];
+    if (s.commits >= 1) greenFlags.push("shipped-commit");
+    if (cov?.validatedAfterEdit === true) greenFlags.push("validated");
+
+    // Bucket assignment. "stuck" is reserved for the specific
+    // shape of an agent looping on a failing test — not any
+    // expensive-but-unproductive session, since the latter
+    // includes the "high search ratio, no commit" pattern that
+    // belongs in needs-better-setup. Dark-spend stays a red flag
+    // for visibility but doesn't determine the bucket.
+    let bucket: ProductivityBucket;
+    if (s.commits >= 1 && redFlags.length <= 2) {
+      bucket = "productive";
+    } else if (s.commits >= 1) {
+      bucket = "expensive-but-productive";
+    } else if (stuckLoops >= 1) {
+      bucket = "stuck";
+    } else {
+      bucket = "needs-better-setup";
+    }
+
+    rows.push({
+      sessionId: s.sessionId,
+      agent: s.agent,
+      project: s.project,
+      started: s.started,
+      ended: s.ended,
+      tokens: s.tokens,
+      commits: s.commits,
+      locDelta: s.locDelta,
+      userTurns: intRow?.userTurns ?? 0,
+      toolsPerTurn: intRow?.toolsPerTurn ?? null,
+      validatedAfterEdit: cov?.validatedAfterEdit ?? null,
+      stuckLoops,
+      searchToEditRatio: ratioRow?.ratio ?? null,
+      firstActionMs: latRow?.latencyMs ?? null,
+      redFlags,
+      greenFlags,
+      bucket,
+    });
+  }
+
+  // Sort: productive sessions first by commits desc, then
+  // expensive-but-productive, stuck, needs-better-setup. Within
+  // each bucket, fewer red flags first (the cleanest examples).
+  const bucketOrder: Record<ProductivityBucket, number> = {
+    "productive": 0,
+    "expensive-but-productive": 1,
+    "stuck": 2,
+    "needs-better-setup": 3,
+  };
+  rows.sort((a, b) => {
+    if (a.bucket !== b.bucket) return bucketOrder[a.bucket] - bucketOrder[b.bucket];
+    if (a.redFlags.length !== b.redFlags.length) return a.redFlags.length - b.redFlags.length;
+    return b.tokens - a.tokens;
+  });
+  return rows;
+}
+
 // ── Projects ───────────────────────────────────────────────────
 
 export interface ProjectRow {

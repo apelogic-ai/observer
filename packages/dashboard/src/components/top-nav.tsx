@@ -12,8 +12,9 @@ const NAV_ITEMS: { label: string; href: string }[] = [
   { label: "Permissions", href: "/permissions" },
   { label: "Skills",     href: "/skills" },
   { label: "Validation", href: "/validation" },
-  { label: "Autonomy",   href: "/autonomy" },
-  { label: "Efficiency", href: "/efficiency" },
+  { label: "Autonomy",     href: "/autonomy" },
+  { label: "Efficiency",   href: "/efficiency" },
+  { label: "Productivity", href: "/productivity" },
 ];
 
 /**
