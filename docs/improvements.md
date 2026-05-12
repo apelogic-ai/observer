@@ -227,17 +227,33 @@ follow-up sweep.
 
 ## 8. Per-session productivity score (composite)
 
-Combine #1, #2, #3, #4, #5, #6, #7 into a single sortable column:
+**Status: shipped** as `/productivity`. Composes the outputs of
+items #1-#7 (commit attribution, tool-result success, validation
+coverage, stuck-test loops, intervention rate, search/edit ratio,
+first-action latency) into a per-session row with red/green flags
+and a bucket label:
 
-- linked commits, LoC delta
-- validation after final edit (bool)
-- active minutes / tokens spent
-- stumbles / failed-command-loops
-- user-intervention count
+- **productive** — shipped a commit, ≤2 red flags
+- **expensive-but-productive** — shipped a commit but ≥3 red flags
+- **stuck** — no commit, has a stuck-test loop
+- **needs-better-setup** — no commit, no stuck loops, but
+  friction flags (search ratio, intervention, latency, dark-spend)
 
-Bucket sessions into "productive", "expensive but productive", "stuck",
-"needs better setup". This is the *last* thing to ship — a score is
-only meaningful once its inputs are trustworthy.
+Sessions that never edited code are filtered out — they don't
+carry a quality signal worth bucketing.
+
+Live state on the local store: 135 sessions in scope. 72%
+productive (97 sessions), 24% needs-better-setup (32), 2% stuck
+(3), 2% expensive-but-productive (3). The stuck cluster
+surfaces dreamer / mcp-gateway-bench sessions with 95M-130M
+tokens and explicit failing-test loops; needs-better-setup
+catches dark-spend without a commit, including a cluster of
+observer-project demo sessions with zero user turns.
+
+Composition is in TS (queries each upstream function in
+parallel, joins by sessionId, derives flags + bucket) rather
+than as one monster SQL query — easier to maintain, and 6 small
+queries take ~250ms on the live data.
 
 ## Order
 

@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import type {
   Stats, ActivityRow, HeatmapRow, TokenRow, ToolRow, ProjectRow, ModelRow,
-  SessionRow, SkillRow, SkillUsageRow, SkillSessionRow, ToolDetail, StumbleRow, DarkSpendRow, ValidationCoverageRow, ValidationLoopRow, InterventionRateRow, SearchToEditRow, FirstActionLatencyRow,
+  SessionRow, SkillRow, SkillUsageRow, SkillSessionRow, ToolDetail, StumbleRow, DarkSpendRow, ValidationCoverageRow, ValidationLoopRow, InterventionRateRow, SearchToEditRow, FirstActionLatencyRow, ProductivityScoreRow,
   SecurityFindingRow, SecurityTimelineRow, SecuritySessionRow,
   PermissionRow, ExistingSettings,
   GitStats, GitTimelineRow, GitCommitRow, GitSessionRow, CommitAttributionRow,
@@ -362,6 +362,20 @@ export function useFirstActionLatency(filters: DashboardFilters) {
     let cancelled = false;
     const params = buildParams({ days, project, agent });
     fetchJson<FirstActionLatencyRow[]>(`/api/efficiency/first-action${params}`)
+      .then((d) => { if (!cancelled) setRows(d); })
+      .catch(() => { if (!cancelled) setRows([]); });
+    return () => { cancelled = true; };
+  }, [days, project, agent]);
+  return rows;
+}
+
+export function useProductivityScore(filters: DashboardFilters) {
+  const [rows, setRows] = useState<ProductivityScoreRow[] | null>(null);
+  const { days, project, agent } = filters;
+  useEffect(() => {
+    let cancelled = false;
+    const params = buildParams({ days, project, agent });
+    fetchJson<ProductivityScoreRow[]>(`/api/productivity${params}`)
       .then((d) => { if (!cancelled) setRows(d); })
       .catch(() => { if (!cancelled) setRows([]); });
     return () => { cancelled = true; };
