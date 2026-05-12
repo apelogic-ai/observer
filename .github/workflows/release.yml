@@ -249,7 +249,7 @@ jobs:
       # certificate-identity / OIDC-issuer match — no long-lived
       # secret to leak (OBS-002, 2026-05 review).
       - name: Install cosign
-        uses: sigstore/cosign-installer@d7d6e113b16d7d6f3bbe9392ca45dbf6773c4b7c # v3.7.0
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
         with:
           cosign-release: "v2.4.1"
 
