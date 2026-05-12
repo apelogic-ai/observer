@@ -17,7 +17,9 @@
  * column so queries can use json_extract().
  */
 
-import { Database, type SQLQueryBindings } from "bun:sqlite";
+import { Database, type SQLQueryBindings as BunSQLBinding } from "bun:sqlite";
+type SQLQueryBindings = BunSQLBinding;
+export type { SQLQueryBindings };
 import { existsSync, readdirSync, readFileSync, watch, type FSWatcher } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -723,11 +725,24 @@ function startWatcher(): void {
 
 // ── Query helper ───────────────────────────────────────────────────
 
-export async function query<T = Record<string, unknown>>(sql: string): Promise<T[]> {
+/**
+ * Run a query. `params` are positional bind values matching `?`
+ * placeholders in the SQL; this is the only safe way to interpolate
+ * user-controlled input. Manual string concatenation (even with the
+ * old `esc()` single-quote escape) is a regression — OBS-023 from
+ * the 2026-05 review flagged that pattern as one missed call away
+ * from real SQL injection on any non-loopback bind.
+ */
+export async function query<T = Record<string, unknown>>(
+  sql: string,
+  params: SQLQueryBindings[] = [],
+): Promise<T[]> {
   if (!_db) throw new Error("Database not initialized — call initDb() first");
   if (_rebuilding) await _rebuilding;
-  return _db.prepare(sql).all() as T[];
+  const stmt = _db.prepare(sql);
+  return (params.length > 0 ? stmt.all(...params) : stmt.all()) as T[];
 }
+
 
 export function getDataDir(): string {
   return _dataDir;

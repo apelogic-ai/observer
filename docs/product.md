@@ -766,9 +766,15 @@ configured (don't deploy this way in production).
   registration endpoint** — registration is manual / out of band
   (e.g., MDM ships the keypair; the operator collects fingerprints
   via a side channel and reloads the ingestor).
-- Agents send `X-Observer-Signature` (base64) and
-  `X-Observer-Key-Fingerprint` headers. The ingestor looks up the
-  fingerprint and verifies the signature against the request body.
+- Agents send `X-Observer-Signature` (base64),
+  `X-Observer-Key-Fingerprint`, `X-Observer-Timestamp` (unix
+  seconds), and `X-Observer-Nonce` (random 16-byte hex) headers.
+  The signed payload is the canonical string
+  `${timestamp}.${nonce}.${body}`. The ingestor looks up the
+  fingerprint, rejects requests outside a ±5 minute window, rejects
+  duplicate nonces within a 10 minute cache, then verifies the
+  signature. This binds the signature to a single point in time
+  and a unique submission so a captured POST can't be replayed.
 
 For organizations integrating an IdP (Okta / Azure AD / Google), the
 recommended pattern is:
@@ -1094,6 +1100,8 @@ the operator chose a stricter posture.
 Authorization: Bearer <key>                          # API key path
 X-Observer-Signature: <base64>                       # Ed25519 path
 X-Observer-Key-Fingerprint: <sha256-hex>             # Ed25519 path
+X-Observer-Timestamp: <unix-seconds>                 # Ed25519 path — replay protection
+X-Observer-Nonce: <hex>                              # Ed25519 path — replay protection
 Content-Type: application/json
 ```
 

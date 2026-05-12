@@ -5,20 +5,17 @@
 set -euo pipefail
 
 dnf update -y
-dnf install -y docker
+
+# docker + docker-compose-plugin from the AL2023 distro package set.
+# The previous version curl'd both plugins from GitHub Releases with
+# `releases/latest` as the version and no checksum verification — a
+# GitHub-release replacement or TLS interception would land RCE on the
+# ingestor host at boot. AL2023 ships current versions of both plugins
+# in dnf, signed and integrity-checked by the package manager. Closes
+# OBS-012 from the 2026-05 review.
+dnf install -y docker docker-compose-plugin
 systemctl enable --now docker
 usermod -aG docker ec2-user
-
-# docker compose + buildx plugins. The buildx that ships in the AL2023
-# docker package is too old for compose-with-build (compose v2 requires
-# buildx ≥ 0.17). Install both as cli-plugins from GitHub releases so we
-# get a current pair.
-mkdir -p /usr/libexec/docker/cli-plugins
-curl -fsSL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-aarch64" \
-  -o /usr/libexec/docker/cli-plugins/docker-compose
-curl -fsSL "https://github.com/docker/buildx/releases/download/v0.18.0/buildx-v0.18.0.linux-arm64" \
-  -o /usr/libexec/docker/cli-plugins/docker-buildx
-chmod +x /usr/libexec/docker/cli-plugins/docker-compose /usr/libexec/docker/cli-plugins/docker-buildx
 
 # git is convenient for shipping the repo onto the host (alternative to scp).
 dnf install -y git

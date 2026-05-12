@@ -85,11 +85,17 @@ resource "aws_iam_role" "ingestor" {
 }
 
 data "aws_iam_policy_document" "bucket_rw" {
+  # Runtime write/read for the ingestor — DeleteObject intentionally
+  # excluded. The ingestor only writes; deletion is a separate,
+  # auditable workflow (GDPR removal via an operator-assumed role,
+  # S3 Lifecycle for retention runs under S3's own service
+  # principal). A code-execution bug or compromised dependency in
+  # the ingestor must NOT be able to erase another developer's
+  # partition. Closes OBS-010 from the 2026-05 review.
   statement {
     actions = [
       "s3:PutObject",
       "s3:GetObject",
-      "s3:DeleteObject",
       "s3:ListBucket",
     ]
     resources = [
@@ -183,6 +189,18 @@ resource "aws_instance" "ingestor" {
   iam_instance_profile   = aws_iam_instance_profile.ingestor.name
 
   user_data = file("${path.module}/user-data.sh")
+
+  # Require IMDSv2 (token-authenticated metadata calls) and refuse the
+  # legacy IMDSv1 GET-without-PUT flow. An SSRF or an in-instance
+  # software flaw can no longer enumerate IAM-role short-term creds
+  # via http://169.254.169.254/. hop_limit=1 keeps the metadata
+  # surface unreachable from containers running on this host.
+  # Closes OBS-024 from the 2026-05 review.
+  metadata_options {
+    http_tokens                 = "required"
+    http_endpoint               = "enabled"
+    http_put_response_hop_limit = 1
+  }
 
   root_block_device {
     volume_type = "gp3"

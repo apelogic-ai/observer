@@ -231,5 +231,10 @@ export function writeConfig(
     return;
   }
 
-  writeFileSync(configPath, content);
+  // Write owner-readable only. config.yaml can carry the literal API
+  // key (one of four storage modes) — on shared hosts the default
+  // 0644 would let any local user read it. Restricting to 0600
+  // closes OBS-011 from the 2026-05 review without making the file
+  // unreadable to the user that wrote it.
+  writeFileSync(configPath, content, { mode: 0o600 });
 }

@@ -2,6 +2,7 @@
  * HTTP shipper — POSTs batches to the centralized ingestor API.
  */
 
+import { randomBytes } from "node:crypto";
 import type { ShippedBatch } from "./shipper";
 import type { Keypair } from "./identity";
 import { signPayload, getPublicKeyFingerprint } from "./identity";
@@ -30,7 +31,18 @@ export function createHttpShipper(
       headers["Authorization"] = `Bearer ${config.apiKey}`;
     }
     if (config.keypair) {
-      headers["X-Observer-Signature"] = signPayload(body, config.keypair);
+      // Replay protection (OBS-005). Bind the signature to a
+      // timestamp and a fresh nonce so a captured POST can't be
+      // resubmitted by an attacker. The signed payload is the
+      // canonical string `${timestamp}.${nonce}.${body}` — the
+      // server reconstructs the same string and refuses the request
+      // outside ±5min or with a duplicate nonce.
+      const timestamp = String(Math.floor(Date.now() / 1000));
+      const nonce = randomBytes(16).toString("hex");
+      const canonical = `${timestamp}.${nonce}.${body}`;
+      headers["X-Observer-Timestamp"] = timestamp;
+      headers["X-Observer-Nonce"] = nonce;
+      headers["X-Observer-Signature"] = signPayload(canonical, config.keypair);
       headers["X-Observer-Key-Fingerprint"] = getPublicKeyFingerprint(
         config.keypair.publicKeyPem,
       );
