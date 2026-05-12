@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useMemo } from "react";
 import { useSearchToEdit, useFirstActionLatency } from "@/hooks/use-dashboard";
 import { useFilters } from "@/hooks/use-filters";
 import { PageHeader } from "@/components/page-header";
@@ -8,6 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { formatNumber } from "@/lib/format";
 import { AGENT_COLORS } from "@/lib/colors";
+import { rollupByProject, type ProjectRollup } from "@/lib/project-rollup";
 import type { SearchToEditRow, FirstActionLatencyRow } from "@/lib/queries";
 
 /**
@@ -54,6 +56,15 @@ export default function EfficiencyPage() {
   const ratio = useSearchToEdit(filters);
   const latency = useFirstActionLatency(filters);
 
+  const ratioByProject = useMemo(
+    () => (ratio ? rollupByProject(ratio, { metric: (r) => r.ratio }) : null),
+    [ratio],
+  );
+  const latencyByProject = useMemo(
+    () => (latency ? rollupByProject(latency, { metric: (r) => r.latencyMs }) : null),
+    [latency],
+  );
+
   return (
     <main className="flex-1 p-6 space-y-6 max-w-[1600px] mx-auto w-full">
       <PageHeader
@@ -81,6 +92,28 @@ export default function EfficiencyPage() {
             Sorted ratio-desc; sessions with zero edits are excluded.
           </p>
         </CardHeader>
+      </Card>
+
+      {ratioByProject && ratioByProject.length > 1 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>By project</CardTitle>
+            <p className="text-xs text-muted-foreground mt-1">
+              Median read-to-edit ratio per session in each project,
+              worst-first. A high median means every session in that
+              project tends to thrash — not just one outlier.
+            </p>
+          </CardHeader>
+          <CardContent>
+            <RatioProjectTable rows={ratioByProject} />
+          </CardContent>
+        </Card>
+      )}
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Sessions, ranked by ratio</CardTitle>
+        </CardHeader>
         <CardContent>
           {ratio === null ? (
             <div className="text-sm text-muted-foreground">Loading…</div>
@@ -107,6 +140,27 @@ export default function EfficiencyPage() {
             Sorted latency-desc.
           </p>
         </CardHeader>
+      </Card>
+
+      {latencyByProject && latencyByProject.length > 1 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>By project</CardTitle>
+            <p className="text-xs text-muted-foreground mt-1">
+              Median first-action latency per session in each project,
+              worst-first.
+            </p>
+          </CardHeader>
+          <CardContent>
+            <LatencyProjectTable rows={latencyByProject} />
+          </CardContent>
+        </Card>
+      )}
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Sessions, ranked by latency</CardTitle>
+        </CardHeader>
         <CardContent>
           {latency === null ? (
             <div className="text-sm text-muted-foreground">Loading…</div>
@@ -120,6 +174,78 @@ export default function EfficiencyPage() {
         </CardContent>
       </Card>
     </main>
+  );
+}
+
+function RatioProjectTable({ rows }: { rows: ProjectRollup<SearchToEditRow>[] }) {
+  return (
+    <div>
+      <table className="w-full text-sm">
+        <thead className="text-xs text-muted-foreground border-b border-border">
+          <tr>
+            <th className="text-left py-2 font-normal">Project</th>
+            <th className="text-right py-2 font-normal">Sessions</th>
+            <th className="text-right py-2 font-normal">Median ratio</th>
+            <th className="text-right py-2 font-normal">Worst session</th>
+            <th className="text-right py-2 font-normal">Worst ratio</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((p) => (
+            <tr key={p.project} className="border-b border-border/40">
+              <td className="py-2">{p.project}</td>
+              <td className="py-2 tabular-nums text-right">{p.sessions}</td>
+              <td className="py-2 tabular-nums text-right font-medium">{formatRatio(p.median)}</td>
+              <td className="py-2 text-right">
+                <Link
+                  href={`/session?id=${encodeURIComponent(p.worst.sessionId)}`}
+                  className="text-brand hover:underline font-mono text-xs"
+                >
+                  {p.worst.sessionId.slice(0, 12)}
+                </Link>
+              </td>
+              <td className="py-2 tabular-nums text-right text-muted-foreground">{formatRatio(p.worst.ratio)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function LatencyProjectTable({ rows }: { rows: ProjectRollup<FirstActionLatencyRow>[] }) {
+  return (
+    <div>
+      <table className="w-full text-sm">
+        <thead className="text-xs text-muted-foreground border-b border-border">
+          <tr>
+            <th className="text-left py-2 font-normal">Project</th>
+            <th className="text-right py-2 font-normal">Sessions</th>
+            <th className="text-right py-2 font-normal">Median latency</th>
+            <th className="text-right py-2 font-normal">Worst session</th>
+            <th className="text-right py-2 font-normal">Worst latency</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((p) => (
+            <tr key={p.project} className="border-b border-border/40">
+              <td className="py-2">{p.project}</td>
+              <td className="py-2 tabular-nums text-right">{p.sessions}</td>
+              <td className="py-2 tabular-nums text-right font-medium">{formatDuration(p.median)}</td>
+              <td className="py-2 text-right">
+                <Link
+                  href={`/session?id=${encodeURIComponent(p.worst.sessionId)}`}
+                  className="text-brand hover:underline font-mono text-xs"
+                >
+                  {p.worst.sessionId.slice(0, 12)}
+                </Link>
+              </td>
+              <td className="py-2 tabular-nums text-right text-muted-foreground">{formatDuration(p.worst.latencyMs)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
