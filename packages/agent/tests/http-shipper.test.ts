@@ -157,14 +157,22 @@ describe("createHttpShipper", () => {
 
     await ship(batch);
 
-    // Check signature header is present
+    // Check signature header is present, plus the OBS-005 replay
+    // headers (timestamp and nonce). The signed payload is the
+    // canonical `${timestamp}.${nonce}.${body}` string so a captured
+    // POST can't be replayed.
     const sig = received[0].headers["x-observer-signature"];
     const fp = received[0].headers["x-observer-key-fingerprint"];
+    const ts = received[0].headers["x-observer-timestamp"];
+    const nonce = received[0].headers["x-observer-nonce"];
     expect(sig).toBeTruthy();
     expect(fp).toBe(getPublicKeyFingerprint(keypair.publicKeyPem));
+    expect(ts).toMatch(/^\d+$/);
+    expect(nonce).toMatch(/^[0-9a-f]{32}$/);
 
-    // Verify the signature matches the body
-    const valid = verifyPayload(received[0].body, sig, keypair.publicKeyPem);
+    // Verify the signature matches the canonical payload.
+    const canonical = `${ts}.${nonce}.${received[0].body}`;
+    const valid = verifyPayload(canonical, sig, keypair.publicKeyPem);
     expect(valid).toBe(true);
   });
 

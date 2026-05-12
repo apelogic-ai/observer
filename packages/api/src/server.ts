@@ -41,6 +41,29 @@ export interface IngestorConfig {
 
 const DEFAULT_MAX_BODY_BYTES = 32 * 1024 * 1024;
 
+// Replay-protection knobs (OBS-005). Signed batches must arrive
+// within ±5min of server time and carry a nonce not seen in the
+// past 10min. The asymmetry — accept-window narrower than
+// nonce-cache window — guarantees that a captured POST can't be
+// replayed within the accept-window and the cache always covers
+// the full acceptance band even under clock skew at the agent.
+const REPLAY_WINDOW_SECONDS = 5 * 60;
+const NONCE_TTL_MS = 10 * 60 * 1000;
+// Hard upper bound on entries kept in the nonce cache. With a
+// realistic agent emitting one batch per second, the steady-state
+// is ~600 entries (10min × 60); the cap exists so a flood of
+// 1-RPS attackers can't OOM the process. Sweep runs when the cap
+// is reached; entries past their TTL are evicted.
+const NONCE_CACHE_MAX = 100_000;
+
+function sweepNonceCache(cache: Map<string, number>): void {
+  const now = Date.now();
+  for (const [nonce, expiresAt] of cache) {
+    if (expiresAt <= now) cache.delete(nonce);
+  }
+}
+
+
 /** Read the request body as a string, capped at `maxBytes`. Rejects with a
  *  "body too large" error once the cap is exceeded so a malicious POST can't
  *  exhaust process memory.
@@ -103,6 +126,12 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
   const apiKeyToDeveloper = new Map<string, string>(Object.entries(config.apiKeys ?? {}));
   const trustedKeys = config.trustedKeys ?? {};
   const maxBodyBytes = config.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+  // Per-server nonce cache: each createIngestor() gets a fresh map so
+  // tests can spin up isolated servers and so a restart drops history.
+  // The cost of a fresh map on restart is bounded: every captured POST
+  // expires REPLAY_WINDOW_SECONDS after its timestamp, so the post-
+  // restart vulnerability window is ≤5min for any in-flight replay.
+  const nonceCache = new Map<string, number>();
 
   const server = createServer(async (req, res) => {
     // Health check
@@ -137,6 +166,8 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
       const authHeader = req.headers["authorization"];
       const signature = req.headers["x-observer-signature"] as string | undefined;
       const fingerprint = req.headers["x-observer-key-fingerprint"] as string | undefined;
+      const timestampHeader = req.headers["x-observer-timestamp"] as string | undefined;
+      const nonceHeader = req.headers["x-observer-nonce"] as string | undefined;
 
       let authenticatedDeveloper: string | null = null;
 
@@ -147,17 +178,46 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
         if (dev) authenticatedDeveloper = dev;
       }
 
-      // Signature auth
+      // Signature auth + replay protection (OBS-005).
+      // The signed string is `${timestamp}.${nonce}.${body}`; the
+      // timestamp must be within ±5min of server time and the nonce
+      // must not have been seen in the past 10min. This binds the
+      // signature to a single point in time and a unique submission,
+      // so a captured POST can't be replayed against this or any
+      // ingestor that shares the trusted-keys list.
       if (authenticatedDeveloper === null && signature && fingerprint) {
         const entry = trustedKeys[fingerprint];
         if (!entry) {
           json(res, 401, { error: "Unknown key fingerprint" });
           return;
         }
-        if (!verifyEd25519(body, signature, entry.publicKeyPem)) {
+        if (!timestampHeader || !nonceHeader) {
+          json(res, 400, { error: "Missing X-Observer-Timestamp or X-Observer-Nonce header" });
+          return;
+        }
+        const ts = Number(timestampHeader);
+        if (!Number.isFinite(ts)) {
+          json(res, 400, { error: "Invalid X-Observer-Timestamp header" });
+          return;
+        }
+        const skew = Math.abs(Math.floor(Date.now() / 1000) - ts);
+        if (skew > REPLAY_WINDOW_SECONDS) {
+          json(res, 401, { error: "Request timestamp outside acceptable window" });
+          return;
+        }
+        if (nonceCache.has(nonceHeader)) {
+          json(res, 401, { error: "Nonce already used" });
+          return;
+        }
+        const canonical = `${timestampHeader}.${nonceHeader}.${body}`;
+        if (!verifyEd25519(canonical, signature, entry.publicKeyPem)) {
           json(res, 403, { error: "Invalid signature" });
           return;
         }
+        // Mark nonce as seen for the replay window. Cleanup happens
+        // opportunistically below to keep the cache bounded.
+        nonceCache.set(nonceHeader, Date.now() + NONCE_TTL_MS);
+        if (nonceCache.size > NONCE_CACHE_MAX) sweepNonceCache(nonceCache);
         authenticatedDeveloper = entry.developer;
       }
 

@@ -129,7 +129,9 @@ describe("Ingestor server", () => {
       entries: ['{"signed":true}'],
     };
     const body = JSON.stringify(batch);
-    const sig = signPayload(body, kp);
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const nonce = `nonce-${Math.random().toString(36).slice(2)}`;
+    const sig = signPayload(`${timestamp}.${nonce}.${body}`, kp);
     const fp = getPublicKeyFingerprint(kp.publicKeyPem);
 
     const res = await fetch(`${baseUrl}/api/ingest`, {
@@ -138,6 +140,8 @@ describe("Ingestor server", () => {
         "Content-Type": "application/json",
         "X-Observer-Signature": sig,
         "X-Observer-Key-Fingerprint": fp,
+        "X-Observer-Timestamp": timestamp,
+        "X-Observer-Nonce": nonce,
       },
       body,
     });
@@ -148,7 +152,9 @@ describe("Ingestor server", () => {
     const kp = loadKeypair(keyDir)!;
     const batch = { developer: "carol", machine: "m", agent: "claude_code", project: "p", sourceFile: "f", shippedAt: "t", entries: ["{}"] };
     const body = JSON.stringify(batch);
-    const sig = signPayload(body, kp);
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const nonce = `nonce-${Math.random().toString(36).slice(2)}`;
+    const sig = signPayload(`${timestamp}.${nonce}.${body}`, kp);
     const fp = getPublicKeyFingerprint(kp.publicKeyPem);
 
     // Tamper with the body
@@ -160,6 +166,8 @@ describe("Ingestor server", () => {
         "Content-Type": "application/json",
         "X-Observer-Signature": sig,
         "X-Observer-Key-Fingerprint": fp,
+        "X-Observer-Timestamp": timestamp,
+        "X-Observer-Nonce": nonce,
       },
       body: tampered,
     });
@@ -173,7 +181,9 @@ describe("Ingestor server", () => {
 
     const batch = { developer: "eve", machine: "m", agent: "codex", project: "p", sourceFile: "f", shippedAt: "t", entries: ["{}"] };
     const body = JSON.stringify(batch);
-    const sig = signPayload(body, unknownKp);
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const nonce = `nonce-${Math.random().toString(36).slice(2)}`;
+    const sig = signPayload(`${timestamp}.${nonce}.${body}`, unknownKp);
     const fp = getPublicKeyFingerprint(unknownKp.publicKeyPem);
 
     const res = await fetch(`${baseUrl}/api/ingest`, {
@@ -182,10 +192,86 @@ describe("Ingestor server", () => {
         "Content-Type": "application/json",
         "X-Observer-Signature": sig,
         "X-Observer-Key-Fingerprint": fp,
+        "X-Observer-Timestamp": timestamp,
+        "X-Observer-Nonce": nonce,
       },
       body,
     });
     expect(res.status).toBe(401);
+  });
+
+  // ── OBS-005 replay protection ────────────────────────────────
+  it("rejects signed batch with timestamp outside ±5min window", async () => {
+    const kp = loadKeypair(keyDir)!;
+    const batch = { developer: "carol", machine: "m", agent: "claude_code", project: "p", sourceFile: "f", shippedAt: "t", entries: ["{}"] };
+    const body = JSON.stringify(batch);
+    const staleTs = String(Math.floor(Date.now() / 1000) - 10 * 60); // 10 min ago
+    const nonce = `nonce-${Math.random().toString(36).slice(2)}`;
+    const sig = signPayload(`${staleTs}.${nonce}.${body}`, kp);
+    const fp = getPublicKeyFingerprint(kp.publicKeyPem);
+
+    const res = await fetch(`${baseUrl}/api/ingest`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Observer-Signature": sig,
+        "X-Observer-Key-Fingerprint": fp,
+        "X-Observer-Timestamp": staleTs,
+        "X-Observer-Nonce": nonce,
+      },
+      body,
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects a replayed signed batch (duplicate nonce within window)", async () => {
+    const kp = loadKeypair(keyDir)!;
+    // The Ed25519 keypair is bound to alice@acme.com in trustedKeys
+    // (set up in beforeEach). Use that developer so we pass tenant
+    // binding and exercise the replay-check path.
+    const batch = { developer: "alice@acme.com", machine: "m", agent: "claude_code", project: "replay-p", sourceFile: "f", shippedAt: "t", entries: ["{}"] };
+    const body = JSON.stringify(batch);
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const nonce = `nonce-${Math.random().toString(36).slice(2)}`;
+    const sig = signPayload(`${timestamp}.${nonce}.${body}`, kp);
+    const fp = getPublicKeyFingerprint(kp.publicKeyPem);
+
+    const headers = {
+      "Content-Type": "application/json",
+      "X-Observer-Signature": sig,
+      "X-Observer-Key-Fingerprint": fp,
+      "X-Observer-Timestamp": timestamp,
+      "X-Observer-Nonce": nonce,
+    };
+
+    const first = await fetch(`${baseUrl}/api/ingest`, { method: "POST", headers, body });
+    expect(first.status).toBe(200);
+
+    // Same nonce + same body + same timestamp = exact replay. Must reject.
+    const replay = await fetch(`${baseUrl}/api/ingest`, { method: "POST", headers, body });
+    expect(replay.status).toBe(401);
+  });
+
+  it("rejects signed batch missing timestamp/nonce headers", async () => {
+    const kp = loadKeypair(keyDir)!;
+    const batch = { developer: "carol", machine: "m", agent: "claude_code", project: "p", sourceFile: "f", shippedAt: "t", entries: ["{}"] };
+    const body = JSON.stringify(batch);
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const nonce = `nonce-${Math.random().toString(36).slice(2)}`;
+    const sig = signPayload(`${timestamp}.${nonce}.${body}`, kp);
+    const fp = getPublicKeyFingerprint(kp.publicKeyPem);
+
+    const res = await fetch(`${baseUrl}/api/ingest`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Observer-Signature": sig,
+        "X-Observer-Key-Fingerprint": fp,
+        // Deliberately omit X-Observer-Timestamp and X-Observer-Nonce.
+      },
+      body,
+    });
+    expect(res.status).toBe(400);
   });
 
   it("stores the batch in the lakehouse", async () => {
