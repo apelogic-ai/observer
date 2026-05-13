@@ -11,7 +11,7 @@ import { loadDashboardConfig, parseCliArgs, type CliOverrides } from "./config";
 import { getBuildInfo } from "./build-info";
 import { createStaticHandler } from "./static";
 import {
-  getStats, getActivity, getHeatmap, getTokens, getTools, getMotifs, getStumbles, getDarkSpend, getZeroCode, getValidationCoverage, getValidationLoops, getInterventionRate, getSearchToEditRatio, getFirstActionLatency, getProductivityScore,
+  getStats, getActivity, getHeatmap, getTokens, getTools, getMotifs, getStumbles, getDarkSpend, getZeroCode, getValidationCoverage, getValidationLoops, getInterventionRate, getSearchToEditRatio, getFirstActionLatency, getProductivityScore, getComparison,
   getSecurityFindings, getSecurityTimeline, getSecuritySessions, getPermissions,
   getProjects, getModels, getSessions, getProjectList, getModelList, getAgentList, getToolList,
   getToolDetail, getSkills, getSkillUsage, getSkillSessions,
@@ -70,6 +70,11 @@ const routes: Record<string, Handler> = {
   "/api/efficiency/search-to-edit": async (url) => getSearchToEditRatio(filters(url)),
   "/api/efficiency/first-action": async (url) => getFirstActionLatency(filters(url)),
   "/api/productivity": async (url) => getProductivityScore(filters(url)),
+  "/api/comparison": async (url) => {
+    const cutoff = url.searchParams.get("cutoff") ?? "2026-02-01";
+    const sameReposOnly = url.searchParams.get("sameReposOnly") === "1";
+    return getComparison({ cutoff, sameReposOnly });
+  },
   "/api/security/findings": async (url) => getSecurityFindings(filters(url), parsePositiveInt(url.searchParams.get("limit")) ?? 25),
   "/api/security/timeline": async (url) => getSecurityTimeline(filters(url)),
   "/api/security/sessions": async (url) => getSecuritySessions(filters(url), parsePositiveInt(url.searchParams.get("limit")) ?? 50),

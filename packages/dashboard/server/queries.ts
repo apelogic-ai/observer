@@ -2746,6 +2746,162 @@ function computeActivityProfile(
   return { active_ms: activeMs, activity };
 }
 
+// ── Pre/post comparison ────────────────────────────────────────
+//
+// Split git history at a user-provided cutoff date (intended to be
+// the user's first observer-collected commit, e.g. when they first
+// turned on the agent). Compute the same set of metrics on each
+// side. Post also splits human-authored vs agent-authored. Powers
+// the /comparison page — "how does my git footprint look before vs
+// after I adopted AI tooling?"
+//
+// Everything here derives from git_events; no schema changes.
+
+export interface ComparisonBucket {
+  commits: number;
+  activeDays: number;
+  commitsPerActiveDay: number;
+  medianLocDelta: number;
+  meanLocDelta: number;
+  medianFiles: number;
+  meanFiles: number;
+  /** % of commits whose files include any test-shaped path. */
+  testCommitPct: number;
+  /** % of commits with LoC delta > 500. */
+  bigCommitPct: number;
+  /** % of commits with LoC delta < 50. */
+  smallCommitPct: number;
+}
+
+export interface ComparisonResult {
+  cutoff: string;
+  /** YYYY-MM-DD of the user's first agent-authored commit, or null if
+   *  none. The UI uses this as the default cutoff so "before / after"
+   *  literally maps to "before / after I started using AI tooling". */
+  firstAgentCommitDate: string | null;
+  pre: ComparisonBucket;
+  post: ComparisonBucket;
+  postHuman: ComparisonBucket;
+  postAgent: ComparisonBucket;
+  /** Distinct project names that committed in each window — surfaced
+   *  so the UI can show "active in both windows" sets. */
+  preRepos: string[];
+  postRepos: string[];
+  bothWindowRepos: string[];
+}
+
+export interface ComparisonFilters {
+  /** YYYY-MM-DD. Commits with `timestamp < cutoff` land in `pre`. */
+  cutoff: string;
+  /** When true, restrict post to repos that also had pre activity.
+   *  Pre is always all repos (we want the broadest "before" baseline). */
+  sameReposOnly?: boolean;
+}
+
+/** Heuristic: a file path is "test-shaped" when it lives in a tests
+ *  directory or has a .test/.spec suffix. Matches what the ad-hoc
+ *  analysis used so the dashboard reads the same way. */
+const TEST_PATH_RE = /(^|\/)(__tests__|tests?|specs?|test|cypress|e2e)\/|(\.test|\.spec|\.t\.|\.e2e)\.[a-z]+$/i;
+
+function median(xs: number[]): number {
+  if (xs.length === 0) return 0;
+  const s = [...xs].sort((a, b) => a - b);
+  const m = Math.floor(s.length / 2);
+  return s.length % 2 ? s[m]! : (s[m - 1]! + s[m]!) / 2;
+}
+
+function summarise(rows: { ts: string; locDelta: number; files: string[] }[]): ComparisonBucket {
+  if (rows.length === 0) {
+    return {
+      commits: 0, activeDays: 0, commitsPerActiveDay: 0,
+      medianLocDelta: 0, meanLocDelta: 0,
+      medianFiles: 0, meanFiles: 0,
+      testCommitPct: 0, bigCommitPct: 0, smallCommitPct: 0,
+    };
+  }
+  const days = new Set(rows.map((r) => r.ts.slice(0, 10))).size;
+  const deltas = rows.map((r) => r.locDelta);
+  const filesCounts = rows.map((r) => r.files.length);
+  const withTests = rows.filter((r) => r.files.some((f) => TEST_PATH_RE.test(f))).length;
+  const big = rows.filter((r) => r.locDelta > 500).length;
+  const small = rows.filter((r) => r.locDelta < 50).length;
+  return {
+    commits: rows.length,
+    activeDays: days,
+    commitsPerActiveDay: rows.length / Math.max(1, days),
+    medianLocDelta: median(deltas),
+    meanLocDelta: deltas.reduce((s, x) => s + x, 0) / deltas.length,
+    medianFiles: median(filesCounts),
+    meanFiles: filesCounts.reduce((s, x) => s + x, 0) / filesCounts.length,
+    testCommitPct: (withTests / rows.length) * 100,
+    bigCommitPct: (big / rows.length) * 100,
+    smallCommitPct: (small / rows.length) * 100,
+  };
+}
+
+export async function getComparison(f: ComparisonFilters): Promise<ComparisonResult> {
+  // Pull everything once with a single scan; partition in TS rather
+  // than firing four near-identical SQL queries. git_events stores
+  // `files` as a JSON text column, so the row count here is small
+  // compared to trace rows; in-memory partition is fine and lets us
+  // share the test-path detection with the ad-hoc analysis.
+  type Row = {
+    timestamp: string;
+    project: string | null;
+    insertions: number | null;
+    deletions: number | null;
+    agentAuthored: number;
+    files: string | null;
+  };
+  const rows = await query<Row>(`
+    SELECT timestamp, project, insertions, deletions, agentAuthored, files
+    FROM git_events
+    WHERE eventType = 'commit' AND timestamp IS NOT NULL
+  `);
+
+  const cutoff = f.cutoff;
+  const parsed = rows.map((r) => {
+    let files: string[] = [];
+    if (r.files) {
+      try {
+        const v = JSON.parse(r.files) as unknown;
+        if (Array.isArray(v)) files = v.map(String);
+      } catch { /* malformed; treat as empty */ }
+    }
+    return {
+      ts: r.timestamp,
+      project: r.project ?? "",
+      locDelta: (r.insertions ?? 0) + (r.deletions ?? 0),
+      agent: Boolean(r.agentAuthored),
+      files,
+    };
+  });
+
+  const pre = parsed.filter((r) => r.ts < cutoff);
+  let post = parsed.filter((r) => r.ts >= cutoff);
+  const preRepos = [...new Set(pre.map((r) => r.project).filter(Boolean))];
+  const postReposAll = [...new Set(post.map((r) => r.project).filter(Boolean))];
+  const bothWindowRepos = preRepos.filter((p) => postReposAll.includes(p));
+  if (f.sameReposOnly) {
+    post = post.filter((r) => bothWindowRepos.includes(r.project));
+  }
+  const postHuman = post.filter((r) => !r.agent);
+  const postAgent = post.filter((r) => r.agent);
+
+  const firstAgent = parsed.filter((r) => r.agent).sort((a, b) => a.ts.localeCompare(b.ts))[0];
+  return {
+    cutoff,
+    firstAgentCommitDate: firstAgent ? firstAgent.ts.slice(0, 10) : null,
+    pre: summarise(pre),
+    post: summarise(post),
+    postHuman: summarise(postHuman),
+    postAgent: summarise(postAgent),
+    preRepos,
+    postRepos: postReposAll,
+    bothWindowRepos,
+  };
+}
+
 // ── Helpers ────────────────────────────────────────────────────
 
 function parseJsonArray(s: string | null): string[] {

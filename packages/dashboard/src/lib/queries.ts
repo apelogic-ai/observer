@@ -388,3 +388,30 @@ export interface SessionDetail {
   tool_summary: { tool_name: string; count: number }[];
   commits: GitCommitRow[];
 }
+
+// ── Pre/post comparison ──────────────────────────────────────────
+
+export interface ComparisonBucket {
+  commits: number;
+  activeDays: number;
+  commitsPerActiveDay: number;
+  medianLocDelta: number;
+  meanLocDelta: number;
+  medianFiles: number;
+  meanFiles: number;
+  testCommitPct: number;
+  bigCommitPct: number;
+  smallCommitPct: number;
+}
+
+export interface ComparisonResult {
+  cutoff: string;
+  firstAgentCommitDate: string | null;
+  pre: ComparisonBucket;
+  post: ComparisonBucket;
+  postHuman: ComparisonBucket;
+  postAgent: ComparisonBucket;
+  preRepos: string[];
+  postRepos: string[];
+  bothWindowRepos: string[];
+}
