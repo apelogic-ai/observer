@@ -281,6 +281,68 @@ function nextDay(date: string): string {
  *
  * Returns total number of git events collected.
  */
+export interface GitBackfillOptions {
+  /** ISO date (YYYY-MM-DD). Commits older than this are skipped. */
+  since: string;
+  /** Repos to backfill. Skip discovery — callers pass an explicit list
+   *  (typically: discoverActiveRepos result, possibly user-narrowed
+   *  via CLI flag). */
+  repos: RepoMeta[];
+  outputDir: string;
+  stateDir: string;
+  disclosure: DisclosureLevel;
+  developer: string;
+  machine: string;
+  /** Drop teammates' commits by default — matches the live scanner. */
+  onlySelf?: boolean;
+}
+
+/**
+ * One-shot historical backfill. Walks each repo from `since` up to
+ * the current forward cursor (or today if no cursor exists yet) and
+ * writes commits to the date-partitioned JSONL output. The forward
+ * cursor is intentionally not touched — backfill fills history
+ * BEHIND it; incremental keeps moving forward.
+ *
+ * No session attribution: pre-incremental commits predate any agent
+ * trace observer has on file, so there are no sessions to attribute
+ * them to. The agentAuthored flag still flips on co-author trailers
+ * or trailer regexes the collector recognises.
+ */
+export function backfillGitHistory(opts: GitBackfillOptions): number {
+  const cursors = new GitCursors(opts.stateDir);
+  const today = new Date().toISOString().slice(0, 10);
+  const onlySelf = opts.onlySelf !== false;
+  let total = 0;
+
+  for (const { project, localPath, repo } of opts.repos) {
+    const cursor = cursors.get(repo);
+    // Backfill upper bound: the day BEFORE the cursor (cursor's date
+    // is already covered by incremental and we don't want to
+    // overwrite). When no cursor exists, go all the way to today.
+    const until = cursor ? cursor : nextDay(today);
+    if (opts.since >= until) continue;
+
+    const events = collectCommits({
+      repoPath: localPath,
+      since: opts.since,
+      until,
+      project,
+      repo,
+      developer: opts.developer,
+      machine: opts.machine,
+    });
+    const kept = onlySelf ? filterByAuthor(events, opts.developer) : events;
+    if (kept.length === 0) continue;
+
+    total += writeGitEvents(kept, repo, {
+      outputDir: opts.outputDir,
+      disclosure: opts.disclosure,
+    });
+  }
+  return total;
+}
+
 export function scanGitEvents(opts: GitScanOptions): number {
   const repos = discoverActiveRepos(opts.outputDir, opts.extraRepos);
   if (repos.length === 0) return 0;

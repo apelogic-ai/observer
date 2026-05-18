@@ -18,7 +18,7 @@ import { discoverTraceSources, type TraceSource } from "./discover";
 import { Shipper, type ShippedBatch } from "./shipper";
 import { createHttpShipper } from "./http-shipper";
 import { createDiskShipper, shipCursorEntries } from "./disk-shipper";
-import { scanGitEvents } from "./git/scanner";
+import { scanGitEvents, backfillGitHistory, discoverActiveRepos } from "./git/scanner";
 import { generateKeypair, loadKeypair, getPublicKeyFingerprint } from "./identity";
 import { generateConfig, writeConfig, type InitAnswers } from "./init";
 import { installService, uninstallService, getServicePaths, type ServicePaths } from "./service";
@@ -322,6 +322,70 @@ function statusAction(opts: StatusOpts): void {
     console.log(`\nShipper: tracking ${tracked} file(s)`);
   } else {
     console.log("\nShipper: no state yet (run scan first)");
+  }
+}
+
+// --- Git history backfill ---
+
+interface BackfillGitOpts {
+  since: string;
+  stateDir: string;
+  localOutput?: string;
+  project?: string[];
+}
+
+async function backfillGitAction(opts: BackfillGitOpts): Promise<void> {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(opts.since)) {
+    console.error(`--since must be YYYY-MM-DD (got: ${opts.since})`);
+    process.exitCode = 2;
+    return;
+  }
+  const outputDir = opts.localOutput ?? join(opts.stateDir, "traces", "normalized");
+  const { loadConfig } = await import("./config");
+  const config = loadConfig(join(opts.stateDir, "config.yaml"));
+
+  const allRepos = discoverActiveRepos(
+    outputDir,
+    Object.keys(config.git.repos).length > 0 ? config.git.repos : undefined,
+  );
+  const repos = opts.project
+    ? allRepos.filter((r) => opts.project!.includes(r.project))
+    : allRepos;
+
+  if (repos.length === 0) {
+    console.log("No repos to backfill. Run `observer scan` at least once first so the agent has a project list, or use the agent's normal scan to register them.");
+    return;
+  }
+
+  console.log(`Backfilling ${repos.length} repo(s) from ${opts.since}:`);
+  for (const r of repos) console.log(`  ${r.project.padEnd(28)} ${r.repo}`);
+  console.log();
+
+  // Use a placeholder identity — the collector already filters by
+  // author email under the hood. Match what scanAction does.
+  const developer = (() => {
+    try { return execSync("git config --global user.email").toString().trim() || "unknown"; }
+    catch { return "unknown"; }
+  })();
+  const machine = (() => {
+    try { return execSync("hostname").toString().trim() || "unknown"; }
+    catch { return "unknown"; }
+  })();
+
+  const written = backfillGitHistory({
+    since: opts.since,
+    repos,
+    outputDir,
+    stateDir: opts.stateDir,
+    disclosure: "full",
+    developer,
+    machine,
+    onlySelf: config.git.onlySelf,
+  });
+
+  console.log(`\nBackfill complete — wrote ${written} commit event(s).`);
+  if (written > 0) {
+    console.log(`Now: open the dashboard's /comparison page (or refresh it) to see pre/post metrics.`);
   }
 }
 
@@ -1164,6 +1228,15 @@ program
   .command("init")
   .description("Interactive setup wizard — detect agents, configure scope, generate keypair")
   .action(initAction);
+
+program
+  .command("backfill-git")
+  .description("Pull git history older than observer's incremental cursor (one-shot)")
+  .requiredOption("--since <date>", "ISO date (YYYY-MM-DD) — earliest commit to ingest")
+  .option("--state-dir <path>", "State directory", DEFAULT_STATE_DIR)
+  .option("--local-output <path>", "Normalized traces dir (default: ~/.observer/traces/normalized)")
+  .option("--project <name...>", "Limit to specific projects (default: all observer has trace data for)")
+  .action(backfillGitAction);
 
 program
   .command("daemon")

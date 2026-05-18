@@ -15,6 +15,7 @@ const NAV_ITEMS: { label: string; href: string }[] = [
   { label: "Autonomy",     href: "/autonomy" },
   { label: "Efficiency",   href: "/efficiency" },
   { label: "Productivity", href: "/productivity" },
+  { label: "Before / after", href: "/comparison" },
 ];
 
 /**

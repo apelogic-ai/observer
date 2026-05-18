@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import type {
   Stats, ActivityRow, HeatmapRow, TokenRow, ToolRow, ProjectRow, ModelRow,
-  SessionRow, SkillRow, SkillUsageRow, SkillSessionRow, ToolDetail, StumbleRow, DarkSpendRow, ValidationCoverageRow, ValidationLoopRow, InterventionRateRow, SearchToEditRow, FirstActionLatencyRow, ProductivityScoreRow,
+  SessionRow, SkillRow, SkillUsageRow, SkillSessionRow, ToolDetail, StumbleRow, DarkSpendRow, ValidationCoverageRow, ValidationLoopRow, InterventionRateRow, SearchToEditRow, FirstActionLatencyRow, ProductivityScoreRow, ComparisonResult,
   SecurityFindingRow, SecurityTimelineRow, SecuritySessionRow,
   PermissionRow, ExistingSettings,
   GitStats, GitTimelineRow, GitCommitRow, GitSessionRow, CommitAttributionRow,
@@ -367,6 +367,19 @@ export function useFirstActionLatency(filters: DashboardFilters) {
     return () => { cancelled = true; };
   }, [days, project, agent]);
   return rows;
+}
+
+export function useComparison(cutoff: string, sameReposOnly: boolean) {
+  const [data, setData] = useState<ComparisonResult | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const qs = new URLSearchParams({ cutoff, sameReposOnly: sameReposOnly ? "1" : "0" }).toString();
+    fetchJson<ComparisonResult>(`/api/comparison?${qs}`)
+      .then((d) => { if (!cancelled) setData(d); })
+      .catch(() => { if (!cancelled) setData(null); });
+    return () => { cancelled = true; };
+  }, [cutoff, sameReposOnly]);
+  return data;
 }
 
 export function useProductivityScore(filters: DashboardFilters) {
