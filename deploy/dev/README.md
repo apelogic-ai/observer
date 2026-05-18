@@ -88,10 +88,10 @@ No SSH, no .pem file. Open a session via SSM:
 aws ssm start-session --target <instance_id>
 ```
 
-You land as the `ssm-user`. Drop to `ec2-user` for the workflow:
+You land as the `ssm-user`. Drop to `ubuntu` for the workflow:
 
 ```bash
-sudo -u ec2-user -i
+sudo -u ubuntu -i
 ```
 
 ### 5. Clone the repo on the host

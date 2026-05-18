@@ -1,0 +1,8 @@
+- name: Deploy observer-api on the ingestor host
+  hosts: ingestor
+  gather_facts: true
+  become: true
+  vars_files:
+    - group_vars/secrets.yml
+  roles:
+    - observer-api

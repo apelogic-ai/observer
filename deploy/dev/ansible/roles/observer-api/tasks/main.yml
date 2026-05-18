@@ -1,0 +1,99 @@
+# Pre-flight: any unfilled placeholder is a deploy-time bug, not a
+# runtime one. Fail before we render a broken .env and restart the
+# stack with it. Runs locally so we never even open the SSM session.
+- name: Sanity-check required variables (no CHANGEME placeholders)
+  ansible.builtin.assert:
+    that:
+      - "'CHANGEME' not in (instance_id | string)"
+      - "'CHANGEME' not in (ssm_transfer_bucket | string)"
+      - "'CHANGEME' not in (domain | string)"
+      - "'CHANGEME' not in (observer_s3_bucket | string)"
+      - observer_api_keys | length > 0
+      - observer_api_keys | select('search', 'replace_me') | list | length == 0
+    fail_msg: >-
+      group_vars/all.yml or secrets.yml still has placeholder values
+      (CHANGEME / replace_me). Fill them in before running.
+    success_msg: Required variables look filled in.
+  run_once: true
+  delegate_to: localhost
+  become: false
+
+- name: Ensure required packages are present
+  ansible.builtin.apt:
+    name:
+      # `acl` is required for `become_user` to hand tmp files between
+      # uids without making them world-readable. Ubuntu cloud images
+      # often skip it.
+      - acl
+      - git
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-compose-plugin
+    state: present
+    update_cache: yes
+    cache_valid_time: 3600
+
+- name: Ensure docker service is running
+  ansible.builtin.systemd:
+    name: docker
+    state: started
+    enabled: yes
+
+- name: Ensure ubuntu user is in the docker group
+  ansible.builtin.user:
+    name: ubuntu
+    groups: docker
+    append: yes
+
+- name: Clone or update observer repository
+  ansible.builtin.git:
+    repo: "{{ observer_repo_url }}"
+    dest: "{{ observer_install_path }}"
+    version: "{{ observer_repo_ref }}"
+    # `force: no` makes ansible fail loudly when the on-host repo has
+    # local modifications, instead of silently discarding them. If
+    # someone has been hand-editing on the box, we want to know.
+    force: no
+  become_user: ubuntu
+
+- name: Render compose .env
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ observer_install_path }}/deploy/dev/compose/.env"
+    owner: ubuntu
+    group: ubuntu
+    # 0600: the file contains API keys. Anyone who can read this can
+    # impersonate any tenant.
+    mode: "0600"
+    # Keep the previous .env as a timestamped backup. If a fresh render
+    # ever breaks the stack (placeholder, bad value), rollback is a
+    # one-line `cp`.
+    backup: yes
+  notify: Restart observer-api
+
+- name: Build images and bring the stack up
+  community.docker.docker_compose_v2:
+    project_src: "{{ observer_install_path }}/deploy/dev/compose"
+    state: present
+    build: always
+  become_user: ubuntu
+
+# Run the restart handler now (rather than at end-of-play) so the
+# health check below validates the post-restart state, not the
+# pre-restart state.
+- name: Flush handlers before health check
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for /health to respond
+  # observer-api isn't published on the host; only Caddy is. Hit the
+  # domain end-to-end so we exercise the same path callers use.
+  ansible.builtin.uri:
+    url: "https://{{ domain }}/health"
+    status_code: 200
+  register: health
+  until: health.status == 200
+  retries: 30
+  delay: 2
+  delegate_to: localhost
+  become: false

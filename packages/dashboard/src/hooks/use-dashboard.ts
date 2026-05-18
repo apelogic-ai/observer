@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import type {
   Stats, ActivityRow, HeatmapRow, TokenRow, ToolRow, ProjectRow, ModelRow,
-  SessionRow, SkillRow, SkillUsageRow, SkillSessionRow, ToolDetail, StumbleRow, DarkSpendRow, ValidationCoverageRow, ValidationLoopRow, InterventionRateRow, SearchToEditRow, FirstActionLatencyRow, ProductivityScoreRow, ComparisonResult,
+  SessionRow, SkillRow, SkillUsageRow, SkillSessionRow, ToolDetail, StumbleRow, DarkSpendRow, ValidationCoverageRow, ValidationLoopRow, InterventionRateRow, SearchToEditRow, FirstActionLatencyRow, ProductivityScoreRow, ComparisonResult, ComparisonTimeline,
   SecurityFindingRow, SecurityTimelineRow, SecuritySessionRow,
   PermissionRow, ExistingSettings,
   GitStats, GitTimelineRow, GitCommitRow, GitSessionRow, CommitAttributionRow,
@@ -367,6 +367,23 @@ export function useFirstActionLatency(filters: DashboardFilters) {
     return () => { cancelled = true; };
   }, [days, project, agent]);
   return rows;
+}
+
+export function useComparisonTimeline(filters: DashboardFilters) {
+  const [data, setData] = useState<ComparisonTimeline | null>(null);
+  const { project, agent } = filters;
+  useEffect(() => {
+    let cancelled = false;
+    // Timeline ignores `days` and `granularity` — it's a whole-history
+    // scan, not a windowed one. project/agent are the only filters that
+    // change the underlying commit set.
+    const params = buildParams({ days: null, project: project ?? null, agent: agent ?? null });
+    fetchJson<ComparisonTimeline>(`/api/comparison/timeline${params}`)
+      .then((d) => { if (!cancelled) setData(d); })
+      .catch(() => { if (!cancelled) setData(null); });
+    return () => { cancelled = true; };
+  }, [project, agent]);
+  return data;
 }
 
 export function useComparison(cutoff: string, sameReposOnly: boolean) {
