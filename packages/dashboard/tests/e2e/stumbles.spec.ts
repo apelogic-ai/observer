@@ -58,11 +58,14 @@ test("stumbles page tool=*mcp filter narrows to MCP rows", async ({ page }) => {
 
 test("top nav highlights the active page with brand orange", async ({ page }) => {
   await page.goto("/stumbles?days=30");
-  const stumblesLink = page.getByRole("link", { name: "Stumbles" });
+  const analyzeButton = page.getByRole("button", { name: /Analyze/i });
   // Active link gets the brand-color underline + text. Tailwind compiles
   // text-brand to color: var(--color-brand) which resolves to #EF8626.
-  await expect(stumblesLink).toBeVisible();
-  const color = await stumblesLink.evaluate((el) => getComputedStyle(el).color);
+  await expect(analyzeButton).toBeVisible();
+  const color = await analyzeButton.evaluate((el) => getComputedStyle(el).color);
   // RGB equivalent of #EF8626.
   expect(color.replace(/\s+/g, "")).toBe("rgb(239,134,38)");
+
+  await analyzeButton.click();
+  await expect(page.getByRole("menuitem", { name: "Stumbles" })).toBeVisible();
 });
