@@ -56,6 +56,12 @@ function commonContract(name: string, makeStorage: () => Promise<Storage>) {
       await storage.put("k.txt", "second");
       expect(await storage.get("k.txt")).toBe("second");
     });
+
+    it("putIfAbsent only writes the first body", async () => {
+      expect(await storage.putIfAbsent("cas/k.txt", "first")).toBe(true);
+      expect(await storage.putIfAbsent("cas/k.txt", "second")).toBe(false);
+      expect(await storage.get("cas/k.txt")).toBe("first");
+    });
   });
 }
 
@@ -81,7 +87,13 @@ class FakeS3Client {
   // mimic AWS SDK's `send` dispatch
   async send(cmd: unknown): Promise<unknown> {
     if (cmd instanceof PutObjectCommand) {
-      const { Key, Body } = cmd.input as { Key: string; Body: string };
+      const { Key, Body, IfNoneMatch } = cmd.input as { Key: string; Body: string; IfNoneMatch?: string };
+      if (IfNoneMatch === "*" && this.store.has(Key)) {
+        const err = new Error("PreconditionFailed") as Error & { name: string; $metadata: { httpStatusCode: number } };
+        err.name = "PreconditionFailed";
+        err.$metadata = { httpStatusCode: 412 };
+        throw err;
+      }
       this.store.set(Key, Body);
       return {};
     }

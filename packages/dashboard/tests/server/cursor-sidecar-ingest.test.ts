@@ -21,7 +21,7 @@ import { initDb, query } from "../../server/db";
  */
 
 beforeAll(async () => {
-  process.env.OBSERVER_SKIP_FOREIGN_FILTER = "1";
+  process.env.OBSERVER_TEST_ALLOW_FOREIGN_FILTER_BYPASS = "1";
   const dataDir = mkdtempSync(join(tmpdir(), "observer-cursor-sidecar-"));
   const day = "2026-04-01";
   mkdirSync(join(dataDir, day, "cursor"), { recursive: true });

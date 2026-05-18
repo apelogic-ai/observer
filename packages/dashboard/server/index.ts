@@ -10,6 +10,7 @@ import { closeLog, getLogSettings, initLog, log, memSnapshot } from "./log";
 import { loadDashboardConfig, parseCliArgs, type CliOverrides } from "./config";
 import { getBuildInfo } from "./build-info";
 import { createStaticHandler } from "./static";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import {
   getStats, getActivity, getHeatmap, getTokens, getTools, getMotifs, getStumbles, getDarkSpend, getZeroCode, getValidationCoverage, getValidationLoops, getInterventionRate, getSearchToEditRatio, getFirstActionLatency, getProductivityScore, getComparison, getComparisonTimeline,
   getSecurityFindings, getSecurityTimeline, getSecuritySessions, getPermissions,
@@ -185,6 +186,18 @@ export interface StartedServer {
   /** Bun server handle. Has `.stop()` and `.port`. */
   server: ReturnType<typeof Bun.serve>;
   port: number;
+  /** Ephemeral bearer token required for /api/* when non-loopback bind is explicitly enabled. */
+  dashboardToken?: string;
+}
+
+function hasBearerToken(req: Request, token: string | undefined): boolean {
+  if (!token) return true;
+  const prefix = "Bearer ";
+  const header = req.headers.get("Authorization") ?? "";
+  if (!header.startsWith(prefix)) return false;
+  const supplied = Buffer.from(header.slice(prefix.length), "utf-8");
+  const expected = Buffer.from(token, "utf-8");
+  return supplied.length === expected.length && timingSafeEqual(supplied, expected);
 }
 
 export async function start(overrides: Partial<CliOverrides> = {}): Promise<StartedServer> {
@@ -221,10 +234,17 @@ export async function start(overrides: Partial<CliOverrides> = {}): Promise<Star
     process.exit(2);
   }
 
+  const dashboardToken = !isLoopback && cli.unsafeLanNoAuth
+    ? randomBytes(32).toString("hex")
+    : undefined;
+
   console.log(`Observer Dashboard`);
   console.log(`  Data:   ${getDataDir()}`);
   console.log(`  Static: ${cfg.staticDir}`);
-  console.log(`  URL:    http://${displayHost}:${cfg.port}${isLoopback ? "" : "  (LAN-exposed; no auth — explicitly enabled via --unsafe-lan-no-auth)"}`);
+  console.log(`  URL:    http://${displayHost}:${cfg.port}${isLoopback ? "" : "  (LAN-exposed; bearer token required for API)"}`);
+  if (dashboardToken) {
+    console.log(`  Token:  ${dashboardToken}`);
+  }
   console.log(`  Config: ${cfg.configPath}`);
   console.log(`  Logs:   ${cfg.log.level === "silent" ? "off" : cfg.log.file} (level=${cfg.log.level}${cfg.log.stderr ? ", stderr=on" : ""})`);
 
@@ -253,6 +273,15 @@ export async function start(overrides: Partial<CliOverrides> = {}): Promise<Star
 
       const handler = routes[url.pathname];
       const t0 = performance.now();
+
+      if (url.pathname.startsWith("/api/") && !hasBearerToken(req, dashboardToken)) {
+        log("http.auth", {
+          path: url.pathname,
+          ms: Math.round(performance.now() - t0),
+          status: 401,
+        });
+        return Response.json({ error: "unauthorized" }, { status: 401 });
+      }
 
       // /api/* → JSON handlers; everything else → static assets.
       if (!handler) {
@@ -317,7 +346,7 @@ export async function start(overrides: Partial<CliOverrides> = {}): Promise<Star
   // server.port is typed as number | undefined because Bun.serve in
   // unix-socket mode has no port; with a numeric port (or 0) it's
   // always defined.
-  return { server, port: server.port ?? cfg.port };
+  return { server, port: server.port ?? cfg.port, dashboardToken };
 }
 
 // Script mode: running `bun server/index.ts` directly.

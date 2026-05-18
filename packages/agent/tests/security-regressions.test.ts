@@ -100,6 +100,13 @@ describe("OBS-008: dashboard refuses non-loopback bind without explicit ack", ()
     expect(src).toMatch(/unsafeLanNoAuth/);
     expect(src).toMatch(/Refusing to bind/);
   });
+
+  it("unsafe LAN mode mints and checks a bearer token", () => {
+    const src = read("packages/dashboard/server/index.ts");
+    expect(src).toMatch(/dashboardToken/);
+    expect(src).toMatch(/Authorization/);
+    expect(src).toMatch(/Bearer/);
+  });
 });
 
 describe("OBS-009: every GitHub Action is pinned to a 40-char SHA", () => {
@@ -123,6 +130,17 @@ describe("OBS-010: ingestor's runtime IAM role excludes s3:DeleteObject", () => 
     const doc = src.split(/data\s+"aws_iam_policy_document"\s+"bucket_rw"/)[1] ?? "";
     const actions = doc.split(/^\s*resources/m)[0] ?? "";
     expect(actions).not.toMatch(/s3:DeleteObject/);
+  });
+});
+
+describe("OBS-024: EC2 ingestor instances require IMDSv2", () => {
+  it("Terraform ingestor instance requires token-authenticated metadata", () => {
+    const src = read("deploy/dev/terraform/main.tf");
+    const ingestor = src.split(/resource\s+"aws_instance"\s+"ingestor"/)[1] ?? "";
+    const metadata = ingestor.match(/metadata_options\s*\{[\s\S]*?\}/)?.[0] ?? "";
+    expect(metadata).toContain('http_tokens                 = "required"');
+    expect(metadata).toContain('http_endpoint               = "enabled"');
+    expect(metadata).toMatch(/http_put_response_hop_limit\s*=\s*[12]/);
   });
 });
 
@@ -178,6 +196,35 @@ describe("OBS-023: dashboard queries use bind parameters, not manual escaping", 
     // ambiguously-named esc() that used to swallow user input is not.
     expect(src).not.toMatch(/\bfunction\s+esc\s*\(/);
   });
+
+  it("permissions-existing.ts does not manually escape the project filter", () => {
+    const src = read("packages/dashboard/server/permissions-existing.ts");
+    expect(src).not.toMatch(/replace\(\s*\/'\/g/);
+    expect(src).not.toMatch(/WHERE project = '\$\{safe\}'/);
+    expect(src).toMatch(/WHERE project = \?/);
+  });
+});
+
+describe("OBS-015: privacy-filter bypass is test-gated", () => {
+  it("db.ts does not honor OBSERVER_SKIP_FOREIGN_FILTER by itself", () => {
+    const src = read("packages/dashboard/server/db.ts");
+    expect(src).toMatch(/OBSERVER_TEST_ALLOW_FOREIGN_FILTER_BYPASS/);
+    expect(src).not.toMatch(/if \(process\.env\.OBSERVER_SKIP_FOREIGN_FILTER\) return null/);
+  });
+});
+
+describe("OBS-016/017: service logs and systemd units are hardened", () => {
+  it("service.ts rotates oversized daemon logs", () => {
+    const src = read("packages/agent/src/service.ts");
+    expect(src).toMatch(/rotateLogFile/);
+    expect(src).toMatch(/maxBytes/);
+  });
+
+  it("service.ts quotes systemd ExecStart values instead of raw interpolation", () => {
+    const src = read("packages/agent/src/service.ts");
+    expect(src).toMatch(/systemdQuote/);
+    expect(src).not.toMatch(/ExecStart=\$\{config\.binaryPath\} \$\{args\}/);
+  });
 });
 
 describe("OBS-002: release artifacts are signed with sigstore cosign", () => {
@@ -208,21 +255,25 @@ describe("OBS-002: release artifacts are signed with sigstore cosign", () => {
   });
 });
 
-describe("OBS-002 (consumer side): install.sh and updater verify signatures when cosign is available", () => {
-  it("install.sh checks for cosign and runs cosign verify-blob", () => {
+describe("OBS-002 (consumer side): install.sh and updater require cosign signatures", () => {
+  it("install.sh requires cosign and runs cosign verify-blob", () => {
     const src = read("install.sh");
     expect(src).toMatch(/cosign verify-blob/);
+    expect(src).toMatch(/cosign is not on PATH/);
   });
 
-  it("install.sh honours OBSERVER_REQUIRE_SIGNATURE for strict mode", () => {
+  it("install.sh has no SHA-only fallback or opt-in strict mode", () => {
     const src = read("install.sh");
-    expect(src).toMatch(/OBSERVER_REQUIRE_SIGNATURE/);
+    expect(src).not.toMatch(/OBSERVER_REQUIRE_SIGNATURE/);
+    expect(src).not.toMatch(/Falling back to \.sha256 verification/);
   });
 
-  it("packages/agent/src/cli.ts updater verifies the bundle with cosign when available", () => {
+  it("packages/agent/src/cli.ts updater requires cosign and verifies the bundle", () => {
     const src = read("packages/agent/src/cli.ts");
     expect(src).toMatch(/cosign/);
-    expect(src).toMatch(/OBSERVER_REQUIRE_SIGNATURE/);
+    expect(src).toMatch(/Cosign verification failed/);
+    expect(src).not.toMatch(/OBSERVER_REQUIRE_SIGNATURE/);
+    expect(src).not.toMatch(/SHA-256 only/);
   });
 });
 

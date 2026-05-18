@@ -36,7 +36,7 @@ const T_SESSION_END = `${TODAY}T01:30:00Z`;
 
 describe("backfill: cross-project agent-name fallback", () => {
   it("links via agentName + time window when no project-matching session covers the commit", async () => {
-    process.env.OBSERVER_SKIP_FOREIGN_FILTER = "1";
+    process.env.OBSERVER_TEST_ALLOW_FOREIGN_FILTER_BYPASS = "1";
     const dataDir = mkdtempSync(join(tmpdir(), "observer-attr-fallback-"));
     // claude_code session in alpha covering T_COMMIT.
     writeJsonl(join(dataDir, TODAY, "claude_code", "s_cross.jsonl"), [
@@ -65,7 +65,7 @@ describe("backfill: cross-project agent-name fallback", () => {
 
 describe("backfill: ambiguous fallback stays orphan", () => {
   it("does NOT link when multiple sessions of the same agent cover the window", async () => {
-    process.env.OBSERVER_SKIP_FOREIGN_FILTER = "1";
+    process.env.OBSERVER_TEST_ALLOW_FOREIGN_FILTER_BYPASS = "1";
     const dataDir = mkdtempSync(join(tmpdir(), "observer-attr-ambig-"));
     // Two concurrent claude_code sessions, different projects.
     writeJsonl(join(dataDir, TODAY, "claude_code", "s_a.jsonl"), [
@@ -109,7 +109,7 @@ describe("backfill: tight activity window, not session bounds", () => {
     // idle. The fallback must use proximity to actual tool_calls,
     // not the outer [start, end] envelope, otherwise long sessions
     // shadow the real culprit and we get ambiguous (or wrong) links.
-    process.env.OBSERVER_SKIP_FOREIGN_FILTER = "1";
+    process.env.OBSERVER_TEST_ALLOW_FOREIGN_FILTER_BYPASS = "1";
     const dataDir = mkdtempSync(join(tmpdir(), "observer-attr-tightwin-"));
     // Long-running session with activity FAR from the commit (2h+).
     // Bounds = [TODAY 00:30, TODAY 23:30] — would cover T_COMMIT.
@@ -157,7 +157,7 @@ describe("backfill: window covers realistic commit-to-activity gap", () => {
     // because Claude Code sessions are often "open and idle" — the
     // commit fires while the human is finishing up before the agent
     // becomes active again.
-    process.env.OBSERVER_SKIP_FOREIGN_FILTER = "1";
+    process.env.OBSERVER_TEST_ALLOW_FOREIGN_FILTER_BYPASS = "1";
     const dataDir = mkdtempSync(join(tmpdir(), "observer-attr-pre-activity-"));
     writeJsonl(join(dataDir, TODAY, "claude_code", "s_after.jsonl"), [
       { id: "after1", timestamp: `${TODAY}T01:35:00Z`, agent: "claude_code",
@@ -199,7 +199,7 @@ describe("backfill: human commits stay human", () => {
     // were ALREADY agent-authored (Co-Authored-By trailer or
     // explicit agentAuthored=true at scan time). Human commits stay
     // human regardless of session overlap.
-    process.env.OBSERVER_SKIP_FOREIGN_FILTER = "1";
+    process.env.OBSERVER_TEST_ALLOW_FOREIGN_FILTER_BYPASS = "1";
     const dataDir = mkdtempSync(join(tmpdir(), "observer-attr-human-"));
     // Active claude_code session in alpha, T_COMMIT inside its window.
     writeJsonl(join(dataDir, TODAY, "claude_code", "s_active.jsonl"), [
@@ -231,7 +231,7 @@ describe("backfill: human commits stay human", () => {
 
 describe("backfill: no cross-agent linking", () => {
   it("does NOT link a claude_code commit to a codex session even when only codex is active", async () => {
-    process.env.OBSERVER_SKIP_FOREIGN_FILTER = "1";
+    process.env.OBSERVER_TEST_ALLOW_FOREIGN_FILTER_BYPASS = "1";
     const dataDir = mkdtempSync(join(tmpdir(), "observer-attr-noagent-"));
     writeJsonl(join(dataDir, TODAY, "codex", "s_codex.jsonl"), [
       { id: "c1", timestamp: T_SESSION_START, agent: "codex",

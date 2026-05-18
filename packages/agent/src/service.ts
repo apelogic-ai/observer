@@ -8,7 +8,7 @@
  * Linux: systemd user service (~/.config/systemd/user/observer-<name>.service)
  */
 
-import { mkdirSync, writeFileSync, existsSync, unlinkSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, unlinkSync, statSync, renameSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { execFileSync } from "node:child_process";
 
@@ -30,6 +30,16 @@ export interface ServicePaths {
   unitPath?: string;
   platform: string;
 }
+
+export interface RotateLogOptions {
+  /** Rotate once the active log is larger than this many bytes. */
+  maxBytes?: number;
+  /** Number of rotated files to keep: observer.log.1 ... observer.log.N. */
+  keep?: number;
+}
+
+const DEFAULT_LOG_MAX_BYTES = 10 * 1024 * 1024;
+const DEFAULT_LOG_KEEP = 5;
 
 function resolveName(config: ServiceConfig): string {
   return config.name ?? "agent";
@@ -88,19 +98,38 @@ ${argXml}
 }
 
 export function generateSystemdUnit(config: ServiceConfig): string {
-  const args = resolveArgs(config).join(" ");
+  const command = [config.binaryPath, ...resolveArgs(config)]
+    .map(systemdQuote)
+    .join(" ");
   return `[Unit]
 Description=${resolveDescription(config)}
 After=network.target
 
 [Service]
-ExecStart=${config.binaryPath} ${args}
+ExecStart=${command}
 Restart=on-failure
 RestartSec=60
-Environment=HOME=${config.homeDir}
+Environment=${systemdQuote(`HOME=${config.homeDir}`)}
 
 [Install]
 WantedBy=default.target`;
+}
+
+export function rotateLogFile(logPath: string, opts: RotateLogOptions = {}): boolean {
+  if (!existsSync(logPath)) return false;
+  const maxBytes = opts.maxBytes ?? DEFAULT_LOG_MAX_BYTES;
+  const keep = Math.max(1, opts.keep ?? DEFAULT_LOG_KEEP);
+  const stat = statSync(logPath);
+  if (!stat.isFile() || stat.size <= maxBytes) return false;
+
+  const oldest = `${logPath}.${keep}`;
+  if (existsSync(oldest)) unlinkSync(oldest);
+  for (let i = keep - 1; i >= 1; i--) {
+    const src = `${logPath}.${i}`;
+    if (existsSync(src)) renameSync(src, `${logPath}.${i + 1}`);
+  }
+  renameSync(logPath, `${logPath}.1`);
+  return true;
 }
 
 export function getServicePaths(
@@ -136,6 +165,7 @@ export function installService(config: ServiceConfig): {
     const plist = generateLaunchdPlist(config);
     mkdirSync(dirname(paths.plistPath), { recursive: true });
     mkdirSync(dirname(config.logPath), { recursive: true });
+    rotateLogFile(config.logPath);
     writeFileSync(paths.plistPath, plist);
 
     try {
@@ -165,6 +195,7 @@ export function installService(config: ServiceConfig): {
     const unitFile = systemdUnitName(name);
     mkdirSync(dirname(paths.unitPath), { recursive: true });
     mkdirSync(dirname(config.logPath), { recursive: true });
+    rotateLogFile(config.logPath);
     writeFileSync(paths.unitPath, unit);
 
     try {
@@ -241,6 +272,13 @@ function escapeXml(s: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&apos;");
+}
+
+function systemdQuote(s: string): string {
+  return `"${s
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, "\\\"")
+    .replace(/%/g, "%%")}"`;
 }
 
 function cap(s: string): string {

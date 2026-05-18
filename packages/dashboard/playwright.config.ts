@@ -74,7 +74,7 @@ export default defineConfig({
       // Bypass the dashboard's foreign-commit filter for tests — the
       // fixture authors don't match the developer's real config.yaml,
       // so without this every fixture commit gets dropped at ingest.
-      OBSERVER_SKIP_FOREIGN_FILTER: "1",
+      OBSERVER_TEST_ALLOW_FOREIGN_FILTER_BYPASS: "1",
     },
   },
 });

@@ -7,12 +7,6 @@
 # Environment variables:
 #   OBSERVER_VERSION              — specific version (default: latest)
 #   OBSERVER_DIR                  — install directory (default: ~/.local/bin)
-#   OBSERVER_REQUIRE_SIGNATURE=1  — refuse to install unless a cosign
-#                                   signature verification succeeds.
-#                                   Without it, the script verifies
-#                                   the cosign bundle when cosign is
-#                                   on PATH and otherwise falls back
-#                                   to the .sha256 check.
 #
 # Note: the upstream repo is hardcoded. A single line in a shell rc
 # or CI env could otherwise flip the install to fetch from an
@@ -137,52 +131,37 @@ main() {
     error "Download failed. Check https://github.com/${REPO}/releases for available versions."
   fi
 
-  # Verification strategy (OBS-002, 2026-05 review):
-  # 1. If cosign is on PATH, fetch the .bundle and verify against the
-  #    workflow's OIDC identity. Cosign's keyless signatures bind the
-  #    artifact to the GitHub Actions run that produced it, so an
-  #    attacker who replaces a release asset can't forge a matching
-  #    signature without also compromising apelogic-ai's GitHub OIDC.
-  # 2. If cosign isn't available, fall back to the .sha256 check.
-  #    The .sha256 alone doesn't protect against an attacker who can
-  #    replace BOTH binary and checksum (the original OBS-002 finding),
-  #    so we print a warning. Set OBSERVER_REQUIRE_SIGNATURE=1 to
-  #    refuse the fallback.
-  local verified="false"
-  if command -v cosign &>/dev/null; then
-    dim "Cosign found — verifying signature..."
-    local tmp_bundle
-    tmp_bundle=$(mktemp)
-    if ! curl -fsSL "$bundle_url" -o "$tmp_bundle" 2>/dev/null; then
-      rm -f "$tmp_file" "$tmp_bundle"
-      error "Could not download cosign bundle from ${bundle_url}. Refusing to install an unverified binary."
-    fi
-    if cosign verify-blob \
-        --bundle "$tmp_bundle" \
-        --certificate-identity-regexp "^https://github\.com/${REPO}/" \
-        --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-        "$tmp_file" >/dev/null 2>&1; then
-      verified="true"
-      dim "Cosign signature verified"
-    else
-      rm -f "$tmp_file" "$tmp_bundle"
-      error "Cosign verification failed. Refusing to install."
-    fi
-    rm -f "$tmp_bundle"
-  elif [ "${OBSERVER_REQUIRE_SIGNATURE:-}" = "1" ]; then
+  # Verification strategy (OBS-002, 2026-05 review): require a sigstore
+  # bundle and verify it against the workflow's OIDC identity before
+  # installing. The .sha256 check below remains a cheap integrity guard,
+  # but it is not accepted as a substitute for signature verification.
+  if ! command -v cosign &>/dev/null; then
     rm -f "$tmp_file"
-    error "OBSERVER_REQUIRE_SIGNATURE=1 set, but cosign is not on PATH. Install cosign (https://docs.sigstore.dev/cosign/installation) and retry."
-  else
-    echo ""
-    echo "  Note: cosign not found on PATH. Falling back to .sha256 verification."
-    echo "  Install cosign to get sigstore signature verification, or set"
-    echo "  OBSERVER_REQUIRE_SIGNATURE=1 to refuse this fallback."
-    echo ""
+    error "cosign is not on PATH. Install cosign (https://docs.sigstore.dev/cosign/installation) and retry."
   fi
 
+  dim "Cosign found — verifying signature..."
+  local tmp_bundle
+  tmp_bundle=$(mktemp)
+  if ! curl -fsSL "$bundle_url" -o "$tmp_bundle" 2>/dev/null; then
+    rm -f "$tmp_file" "$tmp_bundle"
+    error "Could not download cosign bundle from ${bundle_url}. Refusing to install an unverified binary."
+  fi
+  if cosign verify-blob \
+      --bundle "$tmp_bundle" \
+      --certificate-identity-regexp "^https://github\.com/${REPO}/" \
+      --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+      "$tmp_file" >/dev/null 2>&1; then
+    dim "Cosign signature verified"
+  else
+    rm -f "$tmp_file" "$tmp_bundle"
+    error "Cosign verification failed. Refusing to install."
+  fi
+  rm -f "$tmp_bundle"
+
   # Checksum check. Always runs — it's a cheap second layer when
-  # cosign succeeded, and the only layer when cosign isn't present.
-  # Fail closed if the .sha256 download itself fails (OBS-001).
+  # cosign succeeds. Fail closed if the .sha256 download itself fails
+  # (OBS-001).
   local tmp_checksum
   tmp_checksum=$(mktemp)
   if ! curl -fsSL "$checksum_url" -o "$tmp_checksum" 2>/dev/null; then
@@ -200,11 +179,7 @@ main() {
     rm -f "$tmp_file" "$tmp_checksum"
     error "Checksum mismatch! Expected $expected, got $actual"
   fi
-  if [ "$verified" = "true" ]; then
-    dim "Checksum verified (signature already verified)"
-  else
-    dim "Checksum verified"
-  fi
+  dim "Checksum verified (signature already verified)"
   rm -f "$tmp_checksum"
 
   # Install (dest declared at top for early-exit version check)

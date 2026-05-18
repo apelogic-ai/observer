@@ -82,3 +82,49 @@ describe("dashboard CORS posture", () => {
     expect(res.headers.get("Access-Control-Allow-Origin")).toBeNull();
   });
 });
+
+describe("dashboard unsafe LAN token auth", () => {
+  let lanStarted: { server: { stop: () => Promise<void> | void }; port: number; dashboardToken?: string };
+
+  beforeAll(async () => {
+    const { start } = await import("../../server/index");
+    const staticDir = mkdtempSync(join(tmpdir(), "observer-lan-static-"));
+    writeFileSync(join(staticDir, "index.html"), "<html></html>");
+
+    const oldArgv = process.argv;
+    process.argv = [
+      "bun", "server",
+      "--port", "0",
+      "--data-dir", dataDir,
+      "--static-dir", staticDir,
+      "--bind", "0.0.0.0",
+      "--unsafe-lan-no-auth",
+      "--log-level", "silent",
+    ];
+    try {
+      lanStarted = await start();
+    } finally {
+      process.argv = oldArgv;
+    }
+  });
+
+  afterAll(async () => {
+    if (lanStarted?.server?.stop) await lanStarted.server.stop();
+  });
+
+  it("mints an ephemeral token for non-loopback unsafe LAN mode", () => {
+    expect(lanStarted.dashboardToken).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("rejects LAN API requests without the bearer token", async () => {
+    const res = await fetch(`http://127.0.0.1:${lanStarted.port}/api/stats`);
+    expect(res.status).toBe(401);
+  });
+
+  it("accepts LAN API requests with the bearer token", async () => {
+    const res = await fetch(`http://127.0.0.1:${lanStarted.port}/api/stats`, {
+      headers: { Authorization: `Bearer ${lanStarted.dashboardToken}` },
+    });
+    expect(res.ok).toBe(true);
+  });
+});

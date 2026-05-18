@@ -16,7 +16,7 @@ const T0 = new Date(Date.now() - 3 * 3600_000).toISOString();
 let DATA_DIR: string;
 
 beforeAll(async () => {
-  process.env.OBSERVER_SKIP_FOREIGN_FILTER = "1";
+  process.env.OBSERVER_TEST_ALLOW_FOREIGN_FILTER_BYPASS = "1";
   DATA_DIR = mkdtempSync(join(tmpdir(), "observer-motifs-"));
 
   // Session s1: 4× Bash grep (same shape "grep"), 1× Bash ls (singleton).

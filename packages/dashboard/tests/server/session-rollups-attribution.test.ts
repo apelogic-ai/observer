@@ -28,7 +28,7 @@ const T0 = `${TODAY}T09:00:00Z`;
 const T1 = `${TODAY}T11:00:00Z`;
 
 beforeAll(async () => {
-  process.env.OBSERVER_SKIP_FOREIGN_FILTER = "1";
+  process.env.OBSERVER_TEST_ALLOW_FOREIGN_FILTER_BYPASS = "1";
   const dataDir = mkdtempSync(join(tmpdir(), "observer-rollup-attr-"));
   writeJsonl(join(dataDir, TODAY, "claude_code", "z.jsonl"), [
     { id: "z1", timestamp: T0, agent: "claude_code", sessionId: "sess-z",
