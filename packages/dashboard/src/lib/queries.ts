@@ -415,3 +415,19 @@ export interface ComparisonResult {
   postRepos: string[];
   bothWindowRepos: string[];
 }
+
+export interface ComparisonCommit {
+  ts: string;
+  project: string;
+  locDelta: number;
+  nFiles: number;
+  hasTest: boolean;
+  agent: boolean;
+}
+
+export interface ComparisonTimeline {
+  commits: ComparisonCommit[];
+  earliest: string;
+  latest: string;
+  firstAgentCommitDate: string | null;
+}

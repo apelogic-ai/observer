@@ -11,7 +11,7 @@ import { loadDashboardConfig, parseCliArgs, type CliOverrides } from "./config";
 import { getBuildInfo } from "./build-info";
 import { createStaticHandler } from "./static";
 import {
-  getStats, getActivity, getHeatmap, getTokens, getTools, getMotifs, getStumbles, getDarkSpend, getZeroCode, getValidationCoverage, getValidationLoops, getInterventionRate, getSearchToEditRatio, getFirstActionLatency, getProductivityScore, getComparison,
+  getStats, getActivity, getHeatmap, getTokens, getTools, getMotifs, getStumbles, getDarkSpend, getZeroCode, getValidationCoverage, getValidationLoops, getInterventionRate, getSearchToEditRatio, getFirstActionLatency, getProductivityScore, getComparison, getComparisonTimeline,
   getSecurityFindings, getSecurityTimeline, getSecuritySessions, getPermissions,
   getProjects, getModels, getSessions, getProjectList, getModelList, getAgentList, getToolList,
   getToolDetail, getSkills, getSkillUsage, getSkillSessions,
@@ -75,6 +75,7 @@ const routes: Record<string, Handler> = {
     const sameReposOnly = url.searchParams.get("sameReposOnly") === "1";
     return getComparison({ cutoff, sameReposOnly });
   },
+  "/api/comparison/timeline": async (url) => getComparisonTimeline(filters(url)),
   "/api/security/findings": async (url) => getSecurityFindings(filters(url), parsePositiveInt(url.searchParams.get("limit")) ?? 25),
   "/api/security/timeline": async (url) => getSecurityTimeline(filters(url)),
   "/api/security/sessions": async (url) => getSecuritySessions(filters(url), parsePositiveInt(url.searchParams.get("limit")) ?? 50),

@@ -94,14 +94,6 @@ function bind(value: SQLQueryBindings): SQLFragment {
   return { sql: "?", params: [value] };
 }
 
-/** Build an IN-list of bind placeholders for an array of scalars. */
-function bindList(values: readonly SQLQueryBindings[]): SQLFragment {
-  return {
-    sql: values.length === 0 ? "(NULL)" : `(${values.map(() => "?").join(",")})`,
-    params: [...values],
-  };
-}
-
 function where(f: Filters, extra?: (string | SQLFragment)[]): SQLFragment {
   const conds: string[] = [];
   const params: SQLQueryBindings[] = [];
@@ -2836,6 +2828,94 @@ function summarise(rows: { ts: string; locDelta: number; files: string[] }[]): C
     testCommitPct: (withTests / rows.length) * 100,
     bigCommitPct: (big / rows.length) * 100,
     smallCommitPct: (small / rows.length) * 100,
+  };
+}
+
+export interface ComparisonCommit {
+  ts: string;
+  project: string;
+  locDelta: number;
+  nFiles: number;
+  hasTest: boolean;
+  agent: boolean;
+}
+
+export interface ComparisonTimeline {
+  /** One slim row per commit in git_events. ~80 bytes/row so the
+   *  whole history can ride to the client and an interactive
+   *  cutoff slider can recompute buckets locally without round-
+   *  tripping for every drag. */
+  commits: ComparisonCommit[];
+  /** Earliest / latest commit timestamps — drives the slider range. */
+  earliest: string;
+  latest: string;
+  /** First agent-authored commit on file (or null). The UI plants a
+   *  fixed visual marker here so the user can see where their AI-
+   *  tooling era began even when they drag the cutoff elsewhere. */
+  firstAgentCommitDate: string | null;
+}
+
+export async function getComparisonTimeline(f: Filters = {}): Promise<ComparisonTimeline> {
+  type Row = {
+    timestamp: string;
+    project: string | null;
+    insertions: number | null;
+    deletions: number | null;
+    agentAuthored: number;
+    agentName: string | null;
+    files: string | null;
+  };
+  // Filter semantics:
+  //   - project: drop commits from other projects entirely.
+  //   - agent: keep all HUMAN commits (so the pre-period baseline
+  //            isn't blown away) but restrict agent-authored commits
+  //            to the chosen agent name. Matches the page's framing:
+  //            "before/after I started using <agent>".
+  const conds: string[] = ["eventType = 'commit'", "timestamp IS NOT NULL"];
+  const params: SQLQueryBindings[] = [];
+  if (f.project) {
+    conds.push("project = ?");
+    params.push(f.project);
+  }
+  if (f.agent) {
+    conds.push("(agentAuthored = 0 OR agentName = ?)");
+    params.push(f.agent);
+  }
+  const rows = await query<Row>(`
+    SELECT timestamp, project, insertions, deletions, agentAuthored, agentName, files
+    FROM git_events
+    WHERE ${conds.join(" AND ")}
+    ORDER BY timestamp ASC
+  `, params);
+  if (rows.length === 0) {
+    return { commits: [], earliest: "", latest: "", firstAgentCommitDate: null };
+  }
+  let firstAgentDate: string | null = null;
+  const commits: ComparisonCommit[] = rows.map((r) => {
+    let files: string[] = [];
+    if (r.files) {
+      try {
+        const v = JSON.parse(r.files) as unknown;
+        if (Array.isArray(v)) files = v.map(String);
+      } catch { /* malformed; treat as empty */ }
+    }
+    const hasTest = files.some((f) => TEST_PATH_RE.test(f));
+    const agent = Boolean(r.agentAuthored);
+    if (agent && firstAgentDate === null) firstAgentDate = r.timestamp.slice(0, 10);
+    return {
+      ts: r.timestamp,
+      project: r.project ?? "",
+      locDelta: (r.insertions ?? 0) + (r.deletions ?? 0),
+      nFiles: files.length,
+      hasTest,
+      agent,
+    };
+  });
+  return {
+    commits,
+    earliest: rows[0]!.timestamp,
+    latest: rows[rows.length - 1]!.timestamp,
+    firstAgentCommitDate: firstAgentDate,
   };
 }
 

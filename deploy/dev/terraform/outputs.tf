@@ -37,7 +37,7 @@ output "next_steps" {
          aws ssm start-session --target ${aws_instance.ingestor.id}
 
       3. Inside the host, clone the repo and configure the stack:
-         sudo -u ec2-user bash
+         sudo -u ubuntu bash
          cd ~
          git clone https://github.com/apelogic-ai/observer.git
          cd observer/deploy/dev/compose

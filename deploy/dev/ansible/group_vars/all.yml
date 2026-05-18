@@ -1,0 +1,24 @@
+# Per-environment, non-secret values. Fill in from `terraform output`.
+# Secrets (API keys) live in secrets.yml — not checked in.
+
+# AWS targeting. instance_id and aws_region come from terraform output.
+aws_region: eu-west-2
+instance_id: i-CHANGEME
+
+# Bucket the aws_ssm connection plugin uses to shuttle files between the
+# operator and the host. Re-using the lakehouse bucket is fine: the EC2
+# instance role already has RW on it, and the operator's IAM identity
+# typically has account-wide S3 access. Set to a separate bucket if you
+# need stricter blast-radius separation.
+ssm_transfer_bucket: observer-CHANGEME
+
+# Stack configuration.
+domain: CHANGEME.nip.io
+observer_s3_bucket: observer-CHANGEME
+observer_s3_region: "{{ aws_region }}"
+caddy_max_body: 48MB
+
+# Where to fetch the application source from on the host.
+observer_repo_url: https://github.com/apelogic-ai/observer.git
+observer_repo_ref: master
+observer_install_path: /home/ubuntu/observer

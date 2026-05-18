@@ -1,0 +1,7 @@
+- name: Restart observer-api
+  community.docker.docker_compose_v2:
+    project_src: "{{ observer_install_path }}/deploy/dev/compose"
+    state: restarted
+    services:
+      - observer-api
+  become_user: ubuntu

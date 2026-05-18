@@ -24,3 +24,8 @@ Thumbs.db
 
 # Observer state (local testing)
 .observer/
+
+# Per-operator deploy copies (live state, profile-specific tfvars).
+# Only deploy/dev/ is canonical and tracked; sibling dirs are local.
+/deploy/*/
+!/deploy/dev/

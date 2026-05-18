@@ -1,0 +1,15 @@
+# Single-host inventory targeting the ingestor EC2 instance via SSM.
+# No SSH key, no port 22 — connection runs through AWS Systems Manager.
+# Requires session-manager-plugin and boto3 installed locally; see README.
+#
+# Variables are pulled from group_vars/all.yml and group_vars/secrets.yml.
+all:
+  hosts:
+    ingestor:
+      ansible_connection: community.aws.aws_ssm
+      ansible_host: "{{ instance_id }}"
+      ansible_aws_ssm_region: "{{ aws_region }}"
+      ansible_aws_ssm_bucket_name: "{{ ssm_transfer_bucket }}"
+      # SSM lands as `ssm-user` by default. Don't pin ansible_user — let
+      # the session land natively and use `become` for privilege escalation.
+      ansible_python_interpreter: /usr/bin/python3

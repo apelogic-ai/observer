@@ -167,13 +167,13 @@ resource "aws_security_group" "ingestor" {
   }
 }
 
-# Latest Amazon Linux 2023 ARM64 AMI.
-data "aws_ami" "al2023_arm64" {
+# Latest Ubuntu 24.04 LTS (Noble) ARM64 AMI from Canonical.
+data "aws_ami" "ubuntu_arm64" {
   most_recent = true
-  owners      = ["amazon"]
+  owners      = ["099720109477"] # Canonical
   filter {
     name   = "name"
-    values = ["al2023-ami-*-arm64"]
+    values = ["ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-arm64-server-*"]
   }
   filter {
     name   = "architecture"
@@ -182,7 +182,7 @@ data "aws_ami" "al2023_arm64" {
 }
 
 resource "aws_instance" "ingestor" {
-  ami                    = data.aws_ami.al2023_arm64.id
+  ami                    = data.aws_ami.ubuntu_arm64.id
   instance_type          = var.instance_type
   subnet_id              = data.aws_subnets.default.ids[0]
   vpc_security_group_ids = [aws_security_group.ingestor.id]
@@ -193,13 +193,19 @@ resource "aws_instance" "ingestor" {
   # Require IMDSv2 (token-authenticated metadata calls) and refuse the
   # legacy IMDSv1 GET-without-PUT flow. An SSRF or an in-instance
   # software flaw can no longer enumerate IAM-role short-term creds
-  # via http://169.254.169.254/. hop_limit=1 keeps the metadata
-  # surface unreachable from containers running on this host.
-  # Closes OBS-024 from the 2026-05 review.
+  # via http://169.254.169.254/ without first PUTting for a token.
+  #
+  # hop_limit=2 is required because the observer-api container runs on
+  # the docker bridge network and the bridge counts as one hop — at
+  # hop_limit=1 the SDK in the container can't fetch instance-role
+  # credentials and we'd have to inject static AWS keys via .env, which
+  # is strictly worse than what OBS-024 was trying to prevent. The
+  # observer-api workload IS the legitimate consumer of these creds;
+  # there are no untrusted containers on this host.
   metadata_options {
     http_tokens                 = "required"
     http_endpoint               = "enabled"
-    http_put_response_hop_limit = 1
+    http_put_response_hop_limit = 2
   }
 
   root_block_device {

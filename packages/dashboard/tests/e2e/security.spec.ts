@@ -56,15 +56,15 @@ test("date param scopes findings/sessions to a single calendar day", async ({ re
 
 test("security page renders the leaderboard + timeline", async ({ page }) => {
   await page.goto("/security?days=30");
-  await expect(page.getByRole("heading", { name: /leaks/i }).first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: /security/i }).first()).toBeVisible();
   // Leaderboard table shows up
   await expect(page.locator("table").filter({ hasText: "aws_access_key" }).first()).toBeVisible();
   await expect(page.locator("table").filter({ hasText: "github_token" }).first()).toBeVisible();
 });
 
-test("top nav shows Leaks link", async ({ page }) => {
+test("top nav shows Security link", async ({ page }) => {
   await page.goto("/security?days=30");
-  const link = page.getByRole("link", { name: "Leaks" });
+  const link = page.getByRole("link", { name: "Security" });
   await expect(link).toBeVisible();
 });
 

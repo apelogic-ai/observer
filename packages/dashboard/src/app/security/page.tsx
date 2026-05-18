@@ -50,7 +50,7 @@ export default function SecurityPage() {
   return (
     <main className="flex-1 p-6 space-y-6 max-w-[1600px] mx-auto w-full">
       <PageHeader
-        title="Leaks"
+        title="Security"
         breadcrumbs={[{ label: "Overview", href: `/${buildQs()}` }]}
         filters={filters}
         onDaysChange={setDays}
