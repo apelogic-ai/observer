@@ -1,17 +1,19 @@
 /**
  * Storage abstraction. Two implementations: local filesystem and S3.
  *
- * Designed around four primitives:
+ * Designed around five primitives:
  *   - put(key, body)       — write an object
+ *   - putIfAbsent(key, body) — write an object only if it does not exist
  *   - get(key)             — read an object (null if missing)
  *   - head(key)            — does an object exist?
  *   - list(prefix)         — iterate all keys under a prefix
  *
- * Conspicuously absent: no append, no rename, no atomic compare-and-swap.
+ * Conspicuously absent: no append, no rename, no general compare-and-swap.
  * This is deliberate. S3 has no append; emulating it requires GET-PUT
  * cycles that race under concurrent writers. The store layer above this
  * encodes its dedup state as one marker object per batchId rather than
- * a single appendable file, so the abstraction stays minimal.
+ * a single appendable file. `putIfAbsent` is the narrow atomic primitive
+ * needed for replay nonce markers across multiple ingestors.
  *
  * Keys use forward slashes regardless of platform. LocalStorage maps
  * each key to a path under its root directory.
@@ -26,6 +28,7 @@ import { join, dirname } from "node:path";
 
 export interface Storage {
   put(key: string, body: string): Promise<void>;
+  putIfAbsent(key: string, body: string): Promise<boolean>;
   get(key: string): Promise<string | null>;
   head(key: string): Promise<boolean>;
   list(prefix: string): AsyncIterable<string>;
@@ -49,6 +52,18 @@ export class LocalStorage implements Storage {
     const file = this.path(key);
     mkdirSync(dirname(file), { recursive: true });
     writeFileSync(file, body);
+  }
+
+  async putIfAbsent(key: string, body: string): Promise<boolean> {
+    const file = this.path(key);
+    mkdirSync(dirname(file), { recursive: true });
+    try {
+      writeFileSync(file, body, { flag: "wx" });
+      return true;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "EEXIST") return false;
+      throw e;
+    }
   }
 
   async get(key: string): Promise<string | null> {
@@ -128,6 +143,22 @@ export class S3Storage implements Storage {
       Key: key,
       Body: body,
     }));
+  }
+
+  async putIfAbsent(key: string, body: string): Promise<boolean> {
+    try {
+      await this.client.send(new PutObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+        Body: body,
+        IfNoneMatch: "*",
+      }));
+      return true;
+    } catch (e) {
+      const err = e as { name?: string; $metadata?: { httpStatusCode?: number } };
+      if (err.name === "PreconditionFailed" || err.$metadata?.httpStatusCode === 412) return false;
+      throw e;
+    }
   }
 
   async get(key: string): Promise<string | null> {

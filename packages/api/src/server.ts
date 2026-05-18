@@ -9,9 +9,9 @@
  */
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
-import { createPublicKey, verify as cryptoVerify } from "node:crypto";
+import { createHash, createPublicKey, verify as cryptoVerify } from "node:crypto";
 import { Store } from "./store";
-import type { Storage } from "./storage";
+import { LocalStorage, type Storage } from "./storage";
 
 export interface IngestorConfig {
   port: number;
@@ -115,11 +115,22 @@ function verifyEd25519(payload: string, signature: string, publicKeyPem: string)
   }
 }
 
+function hashPrefix(value: string, length = 12): string {
+  return createHash("sha256").update(value).digest("hex").slice(0, length);
+}
+
+function nonceKey(fingerprint: string, nonce: string): string {
+  const keyId = hashPrefix(fingerprint, 16);
+  const nonceId = hashPrefix(nonce, 32);
+  return `nonces/${keyId}/${nonceId}`;
+}
+
 export function createIngestor(config: IngestorConfig): Promise<Server> {
   if (!config.storage && !config.dataDir) {
     throw new Error("createIngestor requires either `storage` or `dataDir`");
   }
-  const store = new Store(config.storage ?? config.dataDir!);
+  const storage = config.storage ?? new LocalStorage(config.dataDir!);
+  const store = new Store(storage);
   // Tenant binding: each credential resolves to exactly one developer.
   // Reject batches whose `developer` field doesn't match the resolved
   // tenant (OBS-004, 2026-05 review).
@@ -134,6 +145,26 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
   const nonceCache = new Map<string, number>();
 
   const server = createServer(async (req, res) => {
+    const startedAt = Date.now();
+    const requestPath = req.url?.split("?")[0] ?? "";
+    const logContext: {
+      developerHashPrefix?: string;
+      agent?: string;
+      batchId?: string;
+    } = {};
+    res.on("finish", () => {
+      if (requestPath !== "/api/ingest") return;
+      console.log(JSON.stringify({
+        event: "ingest_request",
+        timestamp: new Date().toISOString(),
+        method: req.method,
+        path: requestPath,
+        status: res.statusCode,
+        durationMs: Date.now() - startedAt,
+        ...logContext,
+      }));
+    });
+
     // Health check
     if (req.method === "GET" && req.url === "/health") {
       json(res, 200, { status: "ok" });
@@ -188,7 +219,7 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
       if (authenticatedDeveloper === null && signature && fingerprint) {
         const entry = trustedKeys[fingerprint];
         if (!entry) {
-          json(res, 401, { error: "Unknown key fingerprint" });
+          json(res, 401, { error: "Authentication failed" });
           return;
         }
         if (!timestampHeader || !nonceHeader) {
@@ -211,7 +242,17 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
         }
         const canonical = `${timestampHeader}.${nonceHeader}.${body}`;
         if (!verifyEd25519(canonical, signature, entry.publicKeyPem)) {
-          json(res, 403, { error: "Invalid signature" });
+          json(res, 401, { error: "Authentication failed" });
+          return;
+        }
+        const marked = await storage.putIfAbsent(nonceKey(fingerprint, nonceHeader), JSON.stringify({
+          fingerprintHashPrefix: hashPrefix(fingerprint, 16),
+          nonceHashPrefix: hashPrefix(nonceHeader, 16),
+          timestamp: timestampHeader,
+          expiresAt: new Date(Date.now() + NONCE_TTL_MS).toISOString(),
+        }));
+        if (!marked) {
+          json(res, 401, { error: "Nonce already used" });
           return;
         }
         // Mark nonce as seen for the replay window. Cleanup happens
@@ -243,6 +284,9 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
 
       const batchId = typeof batch.batchId === "string" ? batch.batchId : undefined;
       const developer = String(batch.developer ?? "unknown");
+      logContext.developerHashPrefix = hashPrefix(developer);
+      logContext.agent = String(batch.agent ?? "unknown");
+      if (batchId) logContext.batchId = batchId;
 
       // Tenant binding: the credential resolves to a developer, and the
       // batch's `developer` must match. Without this, any authenticated
@@ -256,11 +300,11 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
 
       // Dedup: if we've already received this batchId, return 200 (idempotent)
       if (batchId && (await store.isDuplicate(batchId, developer))) {
-        json(res, 200, { status: "ok", duplicate: true, entryCount: 0 });
+        json(res, 200, { accepted: true });
         return;
       }
 
-      const result = await store.saveBatch({
+      await store.saveBatch({
         batchId,
         developer,
         machine: String(batch.machine ?? "unknown"),
@@ -272,7 +316,7 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
         entries: entries.map(String),
       });
 
-      json(res, 200, { status: "ok", entryCount: result.entryCount });
+      json(res, 200, { accepted: true });
       return;
     }
 

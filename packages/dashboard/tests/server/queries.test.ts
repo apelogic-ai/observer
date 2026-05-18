@@ -30,7 +30,7 @@ beforeAll(async () => {
   // Bypass the dashboard's foreign-commit filter for these tests — they
   // use synthetic authors (Alice, Bob, etc.) that wouldn't match a real
   // developer email in config.yaml.
-  process.env.OBSERVER_SKIP_FOREIGN_FILTER = "1";
+  process.env.OBSERVER_TEST_ALLOW_FOREIGN_FILTER_BYPASS = "1";
   DATA_DIR = mkdtempSync(join(tmpdir(), "observer-queries-"));
 
   // Today's claude_code traces — two sessions in project alpha, one in beta.

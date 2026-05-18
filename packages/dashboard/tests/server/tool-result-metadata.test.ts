@@ -21,7 +21,7 @@ function writeJsonl(path: string, rows: Array<Record<string, unknown>>): void {
 const TODAY = new Date().toISOString().slice(0, 10);
 
 beforeAll(async () => {
-  process.env.OBSERVER_SKIP_FOREIGN_FILTER = "1";
+  process.env.OBSERVER_TEST_ALLOW_FOREIGN_FILTER_BYPASS = "1";
   const dataDir = mkdtempSync(join(tmpdir(), "observer-toolresult-meta-"));
   writeJsonl(join(dataDir, TODAY, "codex", "s.jsonl"), [
     // codex shell tool with structured exit_code + wall time.
