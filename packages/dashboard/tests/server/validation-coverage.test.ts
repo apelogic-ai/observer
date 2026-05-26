@@ -35,7 +35,7 @@ const T = (h: number, m = 0) => `${TODAY}T${String(h).padStart(2, "0")}:${String
 let DATA_DIR: string;
 
 beforeAll(async () => {
-  process.env.OBSERVER_SKIP_FOREIGN_FILTER = "1";
+  process.env.OBSERVER_TEST_ALLOW_FOREIGN_FILTER_BYPASS = "1";
   DATA_DIR = mkdtempSync(join(tmpdir(), "observer-validation-"));
 
   // Session A: edited, then validated (the good case).

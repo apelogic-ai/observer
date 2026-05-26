@@ -61,7 +61,7 @@ function commitRow(opts: {
 }
 
 beforeAll(async () => {
-  process.env.OBSERVER_SKIP_FOREIGN_FILTER = "1";
+  process.env.OBSERVER_TEST_ALLOW_FOREIGN_FILTER_BYPASS = "1";
   const dataDir = mkdtempSync(join(tmpdir(), "observer-comparison-"));
 
   // PRE-period: 3 commits on alpha, 2 calendar days, very few tests.

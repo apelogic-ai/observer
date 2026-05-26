@@ -26,6 +26,19 @@ function makeTmpDir(): string {
   return mkdtempSync(join(tmpdir(), "observer-api-"));
 }
 
+function validBatch(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    developer: "alice@acme.com",
+    machine: "alice-mac",
+    agent: "claude_code",
+    project: "test-proj",
+    sourceFile: "/tmp/session.jsonl",
+    shippedAt: "2026-04-08T17:00:00Z",
+    entries: ['{"type":"user"}'],
+    ...overrides,
+  };
+}
+
 describe("Ingestor server", () => {
   let dataDir: string;
   let server: Server;
@@ -75,21 +88,62 @@ describe("Ingestor server", () => {
   }
 
   it("accepts a valid batch with API key auth", async () => {
-    const batch = {
-      developer: "alice@acme.com",
-      machine: "alice-mac",
-      agent: "claude_code",
-      project: "test-proj",
-      sourceFile: "/tmp/session.jsonl",
-      shippedAt: "2026-04-08T17:00:00Z",
-      entries: ['{"type":"user"}'],
-    };
+    const batch = validBatch();
 
     const res = await post("/api/ingest", batch, {
       Authorization: "Bearer key_test_valid",
     });
     expect(res.status).toBe(200);
-    expect((res.body as Record<string, unknown>).status).toBe("ok");
+    expect(res.body).toEqual({ accepted: true });
+  });
+
+  it("returns the same opaque body for first-time and duplicate batches", async () => {
+    const batch = validBatch({
+      batchId: `dedup-${Math.random().toString(36).slice(2)}`,
+      project: "dedup-response-test",
+    });
+
+    const headers = { Authorization: "Bearer key_test_valid" };
+    const first = await post("/api/ingest", batch, headers);
+    const duplicate = await post("/api/ingest", batch, headers);
+
+    expect(first.status).toBe(200);
+    expect(duplicate.status).toBe(200);
+    expect(first.body).toEqual({ accepted: true });
+    expect(duplicate.body).toEqual({ accepted: true });
+  });
+
+  it("writes a structured request log for ingest attempts", async () => {
+    const lines: string[] = [];
+    const originalLog = console.log;
+    console.log = (line?: unknown, ...rest: unknown[]) => {
+      lines.push(String(line));
+      if (rest.length > 0) lines.push(rest.map(String).join(" "));
+    };
+    try {
+      const res = await post("/api/ingest", validBatch({ project: "request-log-test" }), {
+        Authorization: "Bearer key_test_valid",
+      });
+      expect(res.status).toBe(200);
+    } finally {
+      console.log = originalLog;
+    }
+
+    const event = lines
+      .map((line) => {
+        try { return JSON.parse(line) as Record<string, unknown>; } catch { return null; }
+      })
+      .find((entry) => entry?.event === "ingest_request");
+    expect(event).toMatchObject({
+      event: "ingest_request",
+      method: "POST",
+      path: "/api/ingest",
+      status: 200,
+      developerHashPrefix: expect.any(String),
+      agent: "claude_code",
+    });
+    expect(event?.developer).toBeUndefined();
+    expect(event?.durationMs).toEqual(expect.any(Number));
   });
 
   it("rejects request without auth", async () => {
@@ -171,7 +225,48 @@ describe("Ingestor server", () => {
       },
       body: tampered,
     });
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(401);
+  });
+
+  it("collapses unknown fingerprint and invalid signature to the same status", async () => {
+    const kp = loadKeypair(keyDir)!;
+    const batch = validBatch({ project: "auth-collapse-test" });
+    const body = JSON.stringify(batch);
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const validFp = getPublicKeyFingerprint(kp.publicKeyPem);
+    const invalidSig = signPayload(`${timestamp}.invalid-${Math.random().toString(36).slice(2)}.${body}`, kp);
+
+    const invalidSignature = await fetch(`${baseUrl}/api/ingest`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Observer-Signature": invalidSig,
+        "X-Observer-Key-Fingerprint": validFp,
+        "X-Observer-Timestamp": timestamp,
+        "X-Observer-Nonce": `nonce-${Math.random().toString(36).slice(2)}`,
+      },
+      body,
+    });
+
+    const unknownKeyDir = makeTmpDir();
+    generateKeypair(unknownKeyDir);
+    const unknownKp = loadKeypair(unknownKeyDir)!;
+    const unknownNonce = `nonce-${Math.random().toString(36).slice(2)}`;
+    const unknownSig = signPayload(`${timestamp}.${unknownNonce}.${body}`, unknownKp);
+    const unknownFingerprint = await fetch(`${baseUrl}/api/ingest`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Observer-Signature": unknownSig,
+        "X-Observer-Key-Fingerprint": getPublicKeyFingerprint(unknownKp.publicKeyPem),
+        "X-Observer-Timestamp": timestamp,
+        "X-Observer-Nonce": unknownNonce,
+      },
+      body,
+    });
+
+    expect(invalidSignature.status).toBe(401);
+    expect(unknownFingerprint.status).toBe(401);
   });
 
   it("rejects unknown key fingerprint", async () => {
@@ -307,6 +402,60 @@ describe("Ingestor server", () => {
   });
 });
 
+describe("Ingestor server — distributed replay protection", () => {
+  const FIRST_PORT = 19882;
+  const SECOND_PORT = 19883;
+  let first: Server;
+  let second: Server;
+  let keyDir: string;
+
+  beforeAll(async () => {
+    const dataDir = makeTmpDir();
+    keyDir = makeTmpDir();
+    generateKeypair(keyDir);
+    const kp = loadKeypair(keyDir)!;
+    const fp = getPublicKeyFingerprint(kp.publicKeyPem);
+    const trustedKeys = { [fp]: { developer: "alice@acme.com", publicKeyPem: kp.publicKeyPem } };
+
+    first = await createIngestor({ port: FIRST_PORT, dataDir, trustedKeys });
+    second = await createIngestor({ port: SECOND_PORT, dataDir, trustedKeys });
+  });
+
+  afterAll(() => {
+    first?.close();
+    second?.close();
+  });
+
+  it("rejects the same signed nonce across ingestors sharing storage", async () => {
+    const kp = loadKeypair(keyDir)!;
+    const batch = validBatch({ project: "distributed-replay-test" });
+    const body = JSON.stringify(batch);
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const nonce = `nonce-${Math.random().toString(36).slice(2)}`;
+    const headers = {
+      "Content-Type": "application/json",
+      "X-Observer-Signature": signPayload(`${timestamp}.${nonce}.${body}`, kp),
+      "X-Observer-Key-Fingerprint": getPublicKeyFingerprint(kp.publicKeyPem),
+      "X-Observer-Timestamp": timestamp,
+      "X-Observer-Nonce": nonce,
+    };
+
+    const accepted = await fetch(`http://localhost:${FIRST_PORT}/api/ingest`, {
+      method: "POST",
+      headers,
+      body,
+    });
+    const replay = await fetch(`http://localhost:${SECOND_PORT}/api/ingest`, {
+      method: "POST",
+      headers,
+      body,
+    });
+
+    expect(accepted.status).toBe(200);
+    expect(replay.status).toBe(401);
+  });
+});
+
 describe("Ingestor server — large bodies", () => {
   // The prod stall traced to a single 8.27 MiB Codex `compacted` event —
   // a real, expected payload shape, not a malicious upload. Once we raise
@@ -355,8 +504,8 @@ describe("Ingestor server — large bodies", () => {
       body,
     });
     expect(res.status).toBe(200);
-    const json = (await res.json()) as { entryCount: number };
-    expect(json.entryCount).toBe(1);
+    const json = await res.json();
+    expect(json).toEqual({ accepted: true });
   });
 });
 

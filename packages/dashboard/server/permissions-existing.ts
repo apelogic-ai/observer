@@ -119,15 +119,12 @@ async function resolveRepoLocal(project: string): Promise<string | null> {
   // possible) collapses to whichever the agent saw last; the alternative
   // would be returning all and forcing the UI to choose, which we'll
   // do later if anyone actually hits that case.
-  // The project's query() helper doesn't bind parameters — it builds
-  // SQL strings with single-quote escaping (see queries.ts `esc`).
-  // Inline the same escape here.
-  const safe = project.replace(/'/g, "''");
   const rows = await query<{ repoLocal: string | null }>(
     `SELECT repoLocal FROM git_events
-     WHERE project = '${safe}' AND repoLocal IS NOT NULL
+     WHERE project = ? AND repoLocal IS NOT NULL
      ORDER BY timestamp DESC
      LIMIT 1`,
+    [project],
   );
   return rows[0]?.repoLocal ?? null;
 }

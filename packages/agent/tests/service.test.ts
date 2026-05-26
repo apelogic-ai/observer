@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeEach } from "bun:test";
-import { mkdtempSync, existsSync, readFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   generateLaunchdPlist,
   generateSystemdUnit,
   getServicePaths,
+  rotateLogFile,
   type ServiceConfig,
 } from "../src/service";
 
@@ -62,12 +63,49 @@ describe("generateSystemdUnit", () => {
     const unit = generateSystemdUnit(makeConfig({
       binaryPath: "/usr/local/bin/observer",
     }));
-    expect(unit).toContain("ExecStart=/usr/local/bin/observer daemon");
+    expect(unit).toContain('ExecStart="/usr/local/bin/observer" "daemon"');
   });
 
   it("sets restart policy", () => {
     const unit = generateSystemdUnit(makeConfig());
     expect(unit).toContain("Restart=on-failure");
+  });
+
+  it("quotes and escapes ExecStart and HOME values for systemd", () => {
+    const unit = generateSystemdUnit(makeConfig({
+      binaryPath: "/opt/Observer Bin/observer",
+      homeDir: "/home/test user/%profiles",
+      args: ["daemon", "--state-dir", "/home/test user/.observer", "quote\"arg"],
+    }));
+
+    expect(unit).toContain('ExecStart="/opt/Observer Bin/observer" "daemon" "--state-dir" "/home/test user/.observer" "quote\\"arg"');
+    expect(unit).toContain('Environment="HOME=/home/test user/%%profiles"');
+  });
+});
+
+describe("rotateLogFile", () => {
+  it("rotates oversized logs and preserves the current path for a fresh file", () => {
+    const dir = makeTmpDir();
+    const logPath = join(dir, "observer.log");
+    writeFileSync(logPath, "x".repeat(32));
+
+    const rotated = rotateLogFile(logPath, { maxBytes: 16, keep: 2 });
+
+    expect(rotated).toBe(true);
+    expect(existsSync(logPath)).toBe(false);
+    expect(readFileSync(`${logPath}.1`, "utf-8")).toBe("x".repeat(32));
+  });
+
+  it("does not rotate logs below the size cap", () => {
+    const dir = makeTmpDir();
+    const logPath = join(dir, "observer.log");
+    writeFileSync(logPath, "small");
+
+    const rotated = rotateLogFile(logPath, { maxBytes: 16, keep: 2 });
+
+    expect(rotated).toBe(false);
+    expect(readFileSync(logPath, "utf-8")).toBe("small");
+    expect(existsSync(`${logPath}.1`)).toBe(false);
   });
 });
 

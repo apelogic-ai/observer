@@ -372,10 +372,10 @@ function ingestCursorSidecars(db: Database, paths: string[]): number {
 }
 
 /** Read the developer email/name from the agent's config.yaml, if present.
- *  Tests set `OBSERVER_SKIP_FOREIGN_FILTER=1` to short-circuit the filter
- *  so fixture commits with synthetic authors don't get dropped. */
+ *  Tests set `OBSERVER_TEST_ALLOW_FOREIGN_FILTER_BYPASS=1` to short-circuit
+ *  the filter so fixture commits with synthetic authors don't get dropped. */
 function readDeveloperFromAgentConfig(): string | null {
-  if (process.env.OBSERVER_SKIP_FOREIGN_FILTER) return null;
+  if (process.env.OBSERVER_TEST_ALLOW_FOREIGN_FILTER_BYPASS === "1") return null;
   const cfgPath = join(homedir(), ".observer", "config.yaml");
   if (!existsSync(cfgPath)) return null;
   try {

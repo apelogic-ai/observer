@@ -33,7 +33,7 @@ function writeJsonl(path: string, rows: Array<Record<string, unknown>>): void {
 }
 
 beforeAll(async () => {
-  process.env.OBSERVER_SKIP_FOREIGN_FILTER = "1";
+  process.env.OBSERVER_TEST_ALLOW_FOREIGN_FILTER_BYPASS = "1";
   DATA_DIR = mkdtempSync(join(tmpdir(), "observer-perm-existing-"));
   ACME_REPO = mkdtempSync(join(tmpdir(), "observer-acme-"));
   BARE_REPO = mkdtempSync(join(tmpdir(), "observer-bare-"));

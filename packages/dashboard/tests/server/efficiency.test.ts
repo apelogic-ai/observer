@@ -34,7 +34,7 @@ const T = (h: number, m = 0, s = 0) =>
   `${TODAY}T${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}Z`;
 
 beforeAll(async () => {
-  process.env.OBSERVER_SKIP_FOREIGN_FILTER = "1";
+  process.env.OBSERVER_TEST_ALLOW_FOREIGN_FILTER_BYPASS = "1";
   const dataDir = mkdtempSync(join(tmpdir(), "observer-efficiency-"));
 
   // Session A — heavy navigation: 8 reads (Read, grep, find), 2 edits.

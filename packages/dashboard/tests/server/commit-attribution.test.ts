@@ -27,7 +27,7 @@ const T_OLD = `${TODAY}T01:00:00Z`;
 let DATA_DIR: string;
 
 beforeAll(async () => {
-  process.env.OBSERVER_SKIP_FOREIGN_FILTER = "1";
+  process.env.OBSERVER_TEST_ALLOW_FOREIGN_FILTER_BYPASS = "1";
   DATA_DIR = mkdtempSync(join(tmpdir(), "observer-attribution-"));
 
   // One claude_code session in alpha — covers the linked agent commit.
