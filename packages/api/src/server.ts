@@ -38,6 +38,11 @@ export interface IngestorConfig {
    *  which routinely cross 8 MiB on long sessions. Override via the
    *  OBSERVER_MAX_BODY_BYTES env var if you need to go higher. */
   maxBodyBytes?: number;
+  /** Per-principal rate limit (§5). When set, each authenticated developer
+   *  may make at most `maxRequests` ingest calls per fixed `windowMs` window;
+   *  excess calls get 429 with a Retry-After header. Undefined disables it
+   *  (the production entrypoint sets a default via OBSERVER_RATE_LIMIT_RPM). */
+  rateLimit?: { windowMs: number; maxRequests: number };
 }
 
 const DEFAULT_MAX_BODY_BYTES = 32 * 1024 * 1024;
@@ -138,6 +143,11 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
   const apiKeyToDeveloper = new Map<string, string>(Object.entries(config.apiKeys ?? {}));
   const trustedKeys = config.trustedKeys ?? {};
   const maxBodyBytes = config.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+  // Per-principal fixed-window rate limiter (§5). Keyed by the authenticated
+  // developer, so the map is bounded by the number of credentials, not by
+  // request volume. Disabled when config.rateLimit is undefined.
+  const rateLimit = config.rateLimit;
+  const rateWindows = new Map<string, { count: number; resetAt: number }>();
   // Per-server nonce cache: each createIngestor() gets a fresh map so
   // tests can spin up isolated servers and so a restart drops history.
   // The cost of a fresh map on restart is bounded: every captured POST
@@ -266,6 +276,24 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
       if (authenticatedDeveloper === null) {
         json(res, 401, { error: "Authentication required" });
         return;
+      }
+
+      // --- Per-principal rate limit (checked after auth so unauthenticated
+      // traffic can't churn the window map) ---
+      if (rateLimit) {
+        const now = Date.now();
+        let win = rateWindows.get(authenticatedDeveloper);
+        if (!win || now >= win.resetAt) {
+          win = { count: 0, resetAt: now + rateLimit.windowMs };
+          rateWindows.set(authenticatedDeveloper, win);
+        }
+        win.count++;
+        if (win.count > rateLimit.maxRequests) {
+          const retryAfter = Math.max(1, Math.ceil((win.resetAt - now) / 1000));
+          res.writeHead(429, { "Content-Type": "application/json", "Retry-After": String(retryAfter) });
+          res.end(JSON.stringify({ error: "rate limit exceeded" }));
+          return;
+        }
       }
 
       // --- Parse and store ---
