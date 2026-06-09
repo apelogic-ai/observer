@@ -112,6 +112,21 @@ function json(res: ServerResponse, status: number, data: unknown): void {
   res.end(JSON.stringify(data));
 }
 
+/** Emit a security audit event (§3 logging / §5). Distinct from the
+ *  per-request access log: tagged `audit:true` so the SIEM can route these
+ *  to long (1-year) retention. Identities are hashed by the caller — never
+ *  log raw developer ids, keys, or fingerprints. Client-facing responses
+ *  stay collapsed (OBS-007); the real reason is recorded only here. */
+function audit(category: string, fields: Record<string, unknown> = {}): void {
+  console.log(JSON.stringify({
+    event: "audit",
+    audit: true,
+    timestamp: new Date().toISOString(),
+    category,
+    ...fields,
+  }));
+}
+
 function verifyEd25519(payload: string, signature: string, publicKeyPem: string): boolean {
   try {
     const publicKey = createPublicKey(publicKeyPem);
@@ -212,12 +227,13 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
       const nonceHeader = req.headers["x-observer-nonce"] as string | undefined;
 
       let authenticatedDeveloper: string | null = null;
+      let authMethod = "";
 
       // API key auth
       if (authHeader?.startsWith("Bearer ")) {
         const key = authHeader.slice(7);
         const dev = apiKeyToDeveloper.get(key);
-        if (dev) authenticatedDeveloper = dev;
+        if (dev) { authenticatedDeveloper = dev; authMethod = "apikey"; }
       }
 
       // Signature auth + replay protection (OBS-005).
@@ -228,31 +244,38 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
       // so a captured POST can't be replayed against this or any
       // ingestor that shares the trusted-keys list.
       if (authenticatedDeveloper === null && signature && fingerprint) {
+        const fpHash = hashPrefix(fingerprint, 16);
         const entry = trustedKeys[fingerprint];
         if (!entry) {
+          audit("auth_failure", { reason: "unknown_fingerprint", method: "signature", fingerprintHashPrefix: fpHash });
           json(res, 401, { error: "Authentication failed" });
           return;
         }
         if (!timestampHeader || !nonceHeader) {
+          audit("auth_failure", { reason: "missing_replay_headers", method: "signature", fingerprintHashPrefix: fpHash });
           json(res, 400, { error: "Missing X-Observer-Timestamp or X-Observer-Nonce header" });
           return;
         }
         const ts = Number(timestampHeader);
         if (!Number.isFinite(ts)) {
+          audit("auth_failure", { reason: "invalid_timestamp", method: "signature", fingerprintHashPrefix: fpHash });
           json(res, 400, { error: "Invalid X-Observer-Timestamp header" });
           return;
         }
         const skew = Math.abs(Math.floor(Date.now() / 1000) - ts);
         if (skew > REPLAY_WINDOW_SECONDS) {
+          audit("auth_failure", { reason: "timestamp_out_of_window", method: "signature", fingerprintHashPrefix: fpHash });
           json(res, 401, { error: "Request timestamp outside acceptable window" });
           return;
         }
         if (nonceCache.has(nonceHeader)) {
+          audit("auth_failure", { reason: "nonce_replay", method: "signature", fingerprintHashPrefix: fpHash });
           json(res, 401, { error: "Nonce already used" });
           return;
         }
         const canonical = `${timestampHeader}.${nonceHeader}.${body}`;
         if (!verifyEd25519(canonical, signature, entry.publicKeyPem)) {
+          audit("auth_failure", { reason: "invalid_signature", method: "signature", fingerprintHashPrefix: fpHash });
           json(res, 401, { error: "Authentication failed" });
           return;
         }
@@ -263,6 +286,7 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
           expiresAt: new Date(Date.now() + NONCE_TTL_MS).toISOString(),
         }));
         if (!marked) {
+          audit("auth_failure", { reason: "nonce_replay", method: "signature", fingerprintHashPrefix: fpHash });
           json(res, 401, { error: "Nonce already used" });
           return;
         }
@@ -271,12 +295,15 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
         nonceCache.set(nonceHeader, Date.now() + NONCE_TTL_MS);
         if (nonceCache.size > NONCE_CACHE_MAX) sweepNonceCache(nonceCache);
         authenticatedDeveloper = entry.developer;
+        authMethod = "signature";
       }
 
       if (authenticatedDeveloper === null) {
+        audit("auth_failure", { reason: "no_credentials" });
         json(res, 401, { error: "Authentication required" });
         return;
       }
+      audit("auth_success", { method: authMethod, developerHashPrefix: hashPrefix(authenticatedDeveloper) });
 
       // --- Per-principal rate limit (checked after auth so unauthenticated
       // traffic can't churn the window map) ---
@@ -290,6 +317,7 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
         win.count++;
         if (win.count > rateLimit.maxRequests) {
           const retryAfter = Math.max(1, Math.ceil((win.resetAt - now) / 1000));
+          audit("rate_limited", { developerHashPrefix: hashPrefix(authenticatedDeveloper) });
           res.writeHead(429, { "Content-Type": "application/json", "Retry-After": String(retryAfter) });
           res.end(JSON.stringify({ error: "rate limit exceeded" }));
           return;
@@ -323,6 +351,11 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
       // the legitimate batches to be silently dropped as duplicates
       // (OBS-004, 2026-05 review).
       if (developer !== authenticatedDeveloper) {
+        audit("authz_failure", {
+          reason: "developer_mismatch",
+          authenticatedHashPrefix: hashPrefix(authenticatedDeveloper),
+          claimedHashPrefix: hashPrefix(developer),
+        });
         json(res, 403, { error: "developer mismatch: batch's developer field does not match the authenticated identity" });
         return;
       }
