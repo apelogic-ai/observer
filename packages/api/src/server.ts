@@ -12,6 +12,7 @@ import { createServer, type Server, type IncomingMessage, type ServerResponse } 
 import { createHash, createPublicKey, verify as cryptoVerify } from "node:crypto";
 import { Store } from "./store";
 import { LocalStorage, type Storage } from "./storage";
+import { redactSecrets } from "./redact";
 
 export interface IngestorConfig {
   port: number;
@@ -313,7 +314,10 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
         sourceFile: String(batch.sourceFile ?? ""),
         shippedAt: String(batch.shippedAt ?? ""),
         receivedAt: new Date().toISOString(),
-        entries: entries.map(String),
+        // Defence-in-depth: scrub any secret the client failed to redact
+        // before it lands in the lakehouse (§5 AI controls). The agent
+        // redacts on its side too — this backstops older/misbehaving clients.
+        entries: entries.map((e) => redactSecrets(String(e))),
       });
 
       json(res, 200, { accepted: true });
