@@ -1,0 +1,13 @@
+{{- if .Values.podDisruptionBudget.enabled -}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "observer-ingestor.fullname" . }}
+  labels:
+    {{- include "observer-ingestor.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "observer-ingestor.selectorLabels" . | nindent 6 }}
+{{- end }}

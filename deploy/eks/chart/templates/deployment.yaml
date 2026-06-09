@@ -1,0 +1,105 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "observer-ingestor.fullname" . }}
+  labels:
+    {{- include "observer-ingestor.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "observer-ingestor.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "observer-ingestor.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "observer-ingestor.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: ingestor
+          image: {{ include "observer-ingestor.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.targetPort }}
+              protocol: TCP
+          env:
+            - name: NODE_ENV
+              value: production
+            # readOnlyRootFilesystem is on — keep any runtime scratch in /tmp.
+            - name: HOME
+              value: /tmp
+            - name: OBSERVER_STORAGE
+              value: {{ .Values.config.storage | quote }}
+            {{- if eq .Values.config.storage "s3" }}
+            - name: OBSERVER_S3_BUCKET
+              value: {{ required "config.s3Bucket is required when storage=s3" .Values.config.s3Bucket | quote }}
+            {{- with .Values.config.s3Region }}
+            - name: OBSERVER_S3_REGION
+              value: {{ . | quote }}
+            - name: AWS_REGION
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.s3Endpoint }}
+            - name: OBSERVER_S3_ENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.config.maxBodyBytes }}
+            - name: OBSERVER_MAX_BODY_BYTES
+              value: {{ . | quote }}
+            {{- end }}
+            # OBSERVER_API_KEYS is injected from a Secret — never from values.
+            - name: OBSERVER_API_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "observer-ingestor.secretName" . }}
+                  key: {{ .Values.secret.key }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

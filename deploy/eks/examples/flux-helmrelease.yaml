@@ -1,0 +1,72 @@
+# EXAMPLE — Flux consumer wiring. This file belongs in YOUR private config
+# repo, not in this public chart repo. Replace every <placeholder>. Nothing
+# here is shipped or maintained upstream.
+#
+# Flux watches your config repo and reconciles the chart pulled from the OCI
+# registry. Secret values come from the External Secrets Operator, never git.
+---
+apiVersion: source.toolkit.fluxcd.io/v1beta2
+kind: OCIRepository
+metadata:
+  name: observer-ingestor
+  namespace: flux-system
+spec:
+  interval: 30m
+  url: oci://<your-oci-registry>/charts/observer-ingestor
+  ref:
+    tag: "0.1.0"            # pin the chart version
+  # Verify the chart's cosign signature (recommended):
+  # verify:
+  #   provider: cosign
+  #   matchOIDCIdentity:
+  #     - issuer: "^https://token.actions.githubusercontent.com$"
+  #       subject: "^https://github.com/<org>/observer/.+$"
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: observer-ingestor
+  namespace: observer
+spec:
+  interval: 30m
+  chartRef:
+    kind: OCIRepository
+    name: observer-ingestor
+    namespace: flux-system
+  install:
+    createNamespace: true
+  values:
+    image:
+      repository: <your-registry>/observer-ingestor
+      digest: sha256:<image-digest>     # pin by digest
+    config:
+      storage: s3
+      s3Bucket: <lakehouse-bucket>
+      s3Region: <region>
+    serviceAccount:
+      annotations:
+        eks.amazonaws.com/role-arn: <irsa-role-arn>
+    externalSecret:
+      enabled: true
+      secretStoreRef:
+        name: <cluster-secret-store>
+        kind: ClusterSecretStore
+      remoteKey: <secrets-manager-path-to-OBSERVER_API_KEYS>
+    ingress:
+      enabled: true
+      className: <ingress-class>
+      annotations: {}        # ALB / identity-aware-proxy / WAF annotations
+      hosts:
+        - host: <ingest-hostname>
+          paths:
+            - path: /
+              pathType: Prefix
+    networkPolicy:
+      enabled: true
+      ingressFrom:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: <ingress-namespace>
+      egress:
+        allowHttpsCidrs:
+          - <vpc-or-aws-endpoint-cidr>

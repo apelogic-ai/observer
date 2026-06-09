@@ -1,0 +1,92 @@
+name: Chart
+
+# Lints/renders the Helm chart on every PR that touches it, and on a
+# `chart-v*` tag packages it, pushes it to an OCI registry, and cosign-signs
+# the pushed artifact. Consumers pin the chart version and verify the
+# signature from their own GitOps repo (Flux or Argo CD).
+
+on:
+  pull_request:
+    paths:
+      - "deploy/eks/chart/**"
+      - ".github/workflows/chart.yml"
+  push:
+    tags:
+      - "chart-v*"
+
+jobs:
+  lint:
+    name: Lint & render
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5.0.0
+        with:
+          version: v3.17.1
+
+      - name: Lint (with CI test values)
+        run: helm lint deploy/eks/chart -f deploy/eks/chart/ci/test-values.yaml
+
+      # Fail-closed guard: the chart must REFUSE to render with empty defaults
+      # (no image, no secret source). If this ever renders, a required-value
+      # guard regressed and the chart could ship insecure.
+      - name: Fail-closed guard
+        run: |
+          if helm template t deploy/eks/chart >/dev/null 2>&1; then
+            echo "::error::chart rendered with empty defaults — fail-closed guard regressed"
+            exit 1
+          fi
+          echo "OK: chart refuses to render without required values"
+
+      - name: Render with CI test values
+        run: helm template t deploy/eks/chart -f deploy/eks/chart/ci/test-values.yaml >/dev/null
+
+  publish:
+    name: Package, push & sign (OCI)
+    if: startsWith(github.ref, 'refs/tags/chart-v')
+    needs: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # packages: write to push to GHCR; id-token: write for keyless cosign.
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    env:
+      # Defaults to GHCR for this repo. A fork/operator overrides the target
+      # by setting the CHART_OCI_REPO repository variable (no file edits).
+      OCI_REPO: ${{ vars.CHART_OCI_REPO || format('oci://ghcr.io/{0}/charts', github.repository_owner) }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5.0.0
+        with:
+          version: v3.17.1
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.4.1"
+
+      # Only the default GHCR target needs login here; a custom CHART_OCI_REPO
+      # is expected to be authenticated by the operator's own runner setup.
+      - name: Registry login (GHCR default)
+        if: ${{ !vars.CHART_OCI_REPO }}
+        run: helm registry login ghcr.io -u ${{ github.actor }} --password ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Package
+        run: helm package deploy/eks/chart --destination dist
+
+      - name: Push
+        id: push
+        run: |
+          tgz=$(ls dist/observer-ingestor-*.tgz)
+          out=$(helm push "$tgz" "$OCI_REPO" 2>&1)
+          echo "$out"
+          digest=$(echo "$out" | awk '/Digest:/ {print $2}')
+          if [ -z "$digest" ]; then echo "::error::no digest from helm push"; exit 1; fi
+          echo "ref=${OCI_REPO#oci://}/observer-ingestor" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Sign (cosign keyless)
+        env:
+          COSIGN_YES: "true"
+        run: cosign sign "${{ steps.push.outputs.ref }}@${{ steps.push.outputs.digest }}"

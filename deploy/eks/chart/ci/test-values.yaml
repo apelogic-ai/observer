@@ -1,0 +1,35 @@
+# Dummy values used only by CI (`helm lint`/`helm template`) to satisfy the
+# chart's fail-closed required fields. NOT a real configuration — all values
+# are placeholders. Real config lives in the consumer's private overlay.
+image:
+  repository: example.registry.invalid/observer-ingestor
+  tag: "0.1.23"
+config:
+  storage: s3
+  s3Bucket: example-lakehouse
+  s3Region: eu-central-1
+secret:
+  existingSecret: observer-ingestor-keys
+serviceAccount:
+  create: true
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::000000000000:role/example-ingestor
+ingress:
+  enabled: true
+  className: example-ingress
+  hosts:
+    - host: ingest.example.invalid
+      paths:
+        - path: /
+          pathType: Prefix
+networkPolicy:
+  enabled: true
+  ingressFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: example-ingress
+  egress:
+    allowHttpsCidrs:
+      - 10.0.0.0/16
+autoscaling:
+  enabled: true

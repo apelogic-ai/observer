@@ -1,0 +1,127 @@
+# Observer ingestor — chart values.
+#
+# This chart is SECURE-BY-DEFAULT and FAIL-CLOSED. The empty values below are
+# *required*: the chart will refuse to render (via `required`) until the
+# deployer supplies them from their own private config repo. Nothing here is
+# environment-specific — all operator/site details live in the consumer's
+# values overlay, never in this public chart.
+
+# ── Image (REQUIRED) ───────────────────────────────────────────────
+# Pin an image from a trusted registry. Prefer pinning by digest. Leaving
+# repository empty fails `helm template`/`helm lint` on purpose.
+image:
+  repository: ""        # e.g. <your-registry>/observer-ingestor
+  tag: ""               # used only when digest is empty
+  digest: ""            # e.g. sha256:... (preferred — immutable)
+  pullPolicy: IfNotPresent
+imagePullSecrets: []     # e.g. [{ name: registry-creds }]
+
+replicaCount: 2
+
+# ── Non-secret application config ──────────────────────────────────
+config:
+  storage: s3           # "s3" or "fs"
+  s3Bucket: ""          # REQUIRED when storage=s3 (the lakehouse bucket)
+  s3Region: ""          # also exported as AWS_REGION for the SDK
+  s3Endpoint: ""        # optional: minio / R2 / localstack override
+  maxBodyBytes: ""      # optional: override the 32 MiB request-body cap
+
+# ── Secret source for OBSERVER_API_KEYS (REQUIRED) ─────────────────
+# OBSERVER_API_KEYS MUST come from a Kubernetes Secret, never from values.
+# Either reference a pre-existing Secret (existingSecret) or let the chart
+# create one from an external store (externalSecret, below).
+secret:
+  existingSecret: ""    # name of a Secret containing the key below
+  key: OBSERVER_API_KEYS
+
+# External Secrets Operator integration — pulls OBSERVER_API_KEYS from an
+# external store (e.g. AWS Secrets Manager) into a Secret the pod mounts.
+# The secret value never touches git. Requires the ESO CRDs in-cluster.
+externalSecret:
+  enabled: false
+  apiVersion: external-secrets.io/v1   # match your ESO CRD version
+  secretStoreRef:
+    name: ""            # ClusterSecretStore / SecretStore name
+    kind: ClusterSecretStore
+  refreshInterval: 1h
+  remoteKey: ""         # path/name in the external store
+  remoteProperty: ""    # optional: property within the remote secret
+
+# ── Service account (use IRSA for AWS access) ──────────────────────
+serviceAccount:
+  create: true
+  name: ""
+  # Set the IRSA role ARN here in your overlay so the pod gets scoped,
+  # short-lived AWS creds (S3/STS) — no static keys:
+  #   eks.amazonaws.com/role-arn: <irsa-role-arn>
+  annotations: {}
+
+service:
+  type: ClusterIP       # never expose directly; front with an Ingress/proxy
+  port: 80
+  targetPort: 19900     # the ingestor's listen port
+
+# ── Ingress (disabled by default) ──────────────────────────────────
+# Enable and supply the operator's ingress class + annotations (ALB /
+# identity-aware proxy / WAF). The dashboard path should sit behind an
+# identity-aware proxy (SSO); the ingest API behind an IP-allowlisted,
+# WAF-protected ingress.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts: []             # [{ host: ..., paths: [{ path: /, pathType: Prefix }] }]
+  tls: []               # [{ secretName: ..., hosts: [...] }]
+
+# ── Pod hardening (secure defaults) ────────────────────────────────
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000       # the image ships a non-root `bun` user (uid 1000)
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  capabilities:
+    drop: ["ALL"]
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+# ── Network policy (default-deny + egress allowlist) ───────────────
+# Egress allow-listing is mandatory for this workload: it should reach only
+# AWS APIs (S3/STS) and DNS. Supply the CIDRs for your VPC endpoints / AWS
+# service ranges in your overlay.
+networkPolicy:
+  enabled: true
+  ingressFrom: []       # namespace/pod selectors allowed to reach the API; [] = deny-all ingress
+  egress:
+    dnsEnabled: true
+    allowHttpsCidrs: []  # CIDRs reachable on :443 (e.g. S3/STS VPC-endpoint ranges)
+    extra: []            # raw NetworkPolicyEgressRule entries for anything else
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+
+podAnnotations: {}
+nameOverride: ""
+fullnameOverride: ""
+nodeSelector: {}
+tolerations: []
+affinity: {}
