@@ -1,0 +1,132 @@
+name: Image
+
+# Builds the ingestor container image. On a PR it builds, vulnerability-scans
+# (Trivy, fail on HIGH/CRITICAL), and produces an SBOM — gating merge. On a
+# v* release tag it builds multi-arch, pushes to the registry, cosign-signs by
+# digest, scans, and uploads a CycloneDX SBOM. The published, signed image is
+# what the Helm chart (deploy/eks) references.
+
+on:
+  pull_request:
+    paths:
+      - "packages/api/**"
+      - "package.json"
+      - "bun.lock"
+      - ".github/workflows/image.yml"
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build-scan:
+    name: Build & scan (PR)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      - name: Build (amd64, load locally — no push)
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          file: packages/api/Dockerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: observer-ingestor:pr
+
+      - name: Trivy scan (fail on HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: observer-ingestor:pr
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
+
+      - name: Generate SBOM (CycloneDX)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: observer-ingestor:pr
+          format: cyclonedx-json
+          output-file: sbom.cdx.json
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: image-sbom
+          path: sbom.cdx.json
+          retention-days: 14
+
+  publish:
+    name: Build, push, sign, scan, SBOM
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # packages: write to push to GHCR; id-token: write for keyless cosign.
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    env:
+      # Defaults to GHCR for this repo. A fork/operator targets their own
+      # registry by setting the IMAGE_REPO repository variable (no file edits).
+      IMAGE: ${{ vars.IMAGE_REPO || format('ghcr.io/{0}/observer-ingestor', github.repository_owner) }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3 # v4.1.0
+      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.4.1"
+
+      - name: Registry login (GHCR default)
+        if: ${{ !vars.IMAGE_REPO }}
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine version
+        id: v
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build & push (multi-arch)
+        id: build
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          file: packages/api/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.v.outputs.version }}
+            ${{ env.IMAGE }}:latest
+
+      - name: Sign image (cosign keyless, by digest)
+        env:
+          COSIGN_YES: "true"
+        run: cosign sign "${{ env.IMAGE }}@${{ steps.build.outputs.digest }}"
+
+      - name: Trivy scan pushed image (fail on HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true
+
+      - name: Generate SBOM (CycloneDX)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          format: cyclonedx-json
+          output-file: sbom.cdx.json
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: image-sbom-${{ steps.v.outputs.version }}
+          path: sbom.cdx.json
+          retention-days: 90

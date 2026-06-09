@@ -41,8 +41,8 @@ Legend — **Us** = Observer change; **Op** = platform operator; **Shared**.
 | Control | Current state | Gap | Owner |
 | --- | --- | --- | --- |
 | GitOps deploy (Flux/Argo) | Helm chart published as OCI artifact (`deploy/eks/chart`) | Done for the ingestor; dashboard hosting is a follow-up | Us |
-| Image from trusted registry | API has a non-root `Dockerfile`; no image pipeline yet | Build multi-arch image → push to the operator's registry → cosign-sign → scan | Us + Op (registry creds) |
-| Signed & verified artifacts | Binaries cosign-signed; chart signing wired in CI | Sign the **container image**; enable verification policy where supported | Us |
+| Image from trusted registry | Multi-arch image built, pushed, scanned (Trivy), SBOM'd in CI (`.github/workflows/image.yml`) | Point `IMAGE_REPO` at the operator's registry; provide creds | Us + Op (registry creds) |
+| Signed & verified artifacts | Binaries, chart, and **container image** all cosign-signed (keyless) | Enable verification policy (Flux/Kyverno) where supported | Us |
 | Ingress via WAF + identity-aware proxy | Chart exposes `Ingress` (annotations operator-supplied) | Operator fronts it; we pass annotations | Op / Us (manifest) |
 | Ingest API IP-allowlisted | Separate ingress path supported | Operator attaches the allowlisted, WAF'd ALB | Op / Us |
 
@@ -75,7 +75,7 @@ compensating controls.
 | Control | Current state | Gap | Owner |
 | --- | --- | --- | --- |
 | Centralized collection → SIEM or cloud logs | API logs JSON to stdout; dashboard to a local rotating file | Ship container stdout to the central SIEM / cloud logs (operator runs the collector; we emit clean JSON) | Op / Us (format) |
-| Auth/authz/admin/audit events | Has request logs; missing dedicated authn/authz/audit events | Add the missing event types | Us |
+| Auth/authz/admin/audit events | Request access log + dedicated audit events for authn success/failure, authz failure, and rate-limit blocks (hashed identities, `audit:true`) | Add data-access/MCP-tool-call audit events | Us |
 | Retention: 3mo general / 1yr audit | Local rotation only | Set retention in the central store; declare which logs are "audit" | Op + Us |
 
 ### Secrets management
@@ -102,10 +102,10 @@ compensating controls.
 | Control | Current state | Gap | Owner |
 | --- | --- | --- | --- |
 | AI-security review before rollout | Not done | **Gating** — schedule with the operator's AI-security function | Us + Op |
-| Guardrails enforced in code | Agent-side redaction | Add **server-side** redaction at ingest (defence in depth) | Us |
+| Guardrails enforced in code | Agent-side redaction **+ server-side redaction at ingest** (defence in depth) | Keep pattern set in sync with the agent scanner | Us |
 | Least-privilege tool/data access | API auth tenant-bound | Carry into IRSA + RBAC | Us |
-| Full audit of data access / tool calls / prompts; GDPR retention | Request logs only | Add per-trace-read + MCP-tool-call audit events; define GDPR retention/erasure | Us |
-| Rate limits, per-principal budget caps, anomaly detection | None | Per-API-key limits + ingest volume caps + token/tool-call anomaly alerts | Us |
+| Full audit of data access / tool calls / prompts; GDPR retention | Auth/authz/rate audit events present | Add per-trace-read + MCP-tool-call audit events; define GDPR retention/erasure | Us |
+| Rate limits, per-principal budget caps, anomaly detection | **Per-principal rate limiting** at ingest (120/min default) | Add token/tool-call budget caps + anomaly alerting | Us |
 | Egress allow-listing | Chart egress allowlist | Done at the chart layer; keep tight | Us |
 | Untrusted MCP input sanitized | MCP server present | Sanitize/validate external MCP input before storage/LLM | Us |
 
@@ -127,12 +127,13 @@ git. See `deploy/eks/README.md` for the override contract and consumer examples.
 
 1. **Process/gating (now):** assign owners; register in inventory; request
    security + AI-security reviews; confirm branch protection.
-2. **Deploy artifacts (this PR + follow-ups):** OCI Helm chart ✓; image
-   build→push→sign→scan; IRSA; External Secrets; NetworkPolicies; least-priv
-   RBAC.
-3. **Product changes:** SSO/identity-header validation; audit logging; rate
-   limits + budget caps + anomaly detection; server-side redaction; S3
-   object-lock + retention; GDPR erasure.
+2. **Deploy artifacts:** OCI Helm chart ✓; image build→push→sign→scan→SBOM ✓;
+   IRSA/External Secrets/NetworkPolicies/RBAC expressed in the chart ✓ (operator
+   supplies values).
+3. **Product changes:** server-side redaction ✓; per-principal rate limiting ✓;
+   auth/authz audit logging ✓. Remaining: SSO/identity-header validation;
+   token/tool-call budget caps + anomaly detection; data-access/MCP audit
+   events; S3 object-lock + retention; GDPR erasure.
 4. **CI/SDLC:** SAST, dependency scan, secret scan, SBOM, SLSA provenance, DAST.
 5. **Logging/monitoring:** SIEM/cloud-log forwarding + retention; register scan
    targets.

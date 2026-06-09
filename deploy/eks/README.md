@@ -93,11 +93,18 @@ helm template t deploy/eks/chart -f deploy/eks/chart/ci/test-values.yaml | less
 A throwaway `kind`/`k3d` cluster (or a dev EKS in your own account) is enough
 to smoke-test a real install before touching any operator environment.
 
+## Image
+
+The signed image this chart references is built and published by
+`.github/workflows/image.yml`: PRs build + Trivy-scan (fail on HIGH/CRITICAL) +
+SBOM; a `v*` tag builds multi-arch, pushes to the registry
+(`ghcr.io/<owner>/observer-ingestor` by default, or the `IMAGE_REPO` repo
+variable), cosign-signs by digest, and uploads a CycloneDX SBOM. Pin
+`image.digest` in your overlay to that published digest.
+
 ## Scope / not yet here
 
 - **Ingestor API only.** Central dashboard hosting needs its own container
   image and is a follow-up.
-- **Image build/sign/scan/SBOM pipeline** and the **product changes** (SSO
-  header validation, audit logging, rate limits/budget caps) tracked in
-  `docs/enterprise-deployment.md` are separate work items; this PR delivers the
-  chart and its publishing path.
+- **Dashboard SSO/identity-header validation** and other product changes
+  tracked in `docs/enterprise-deployment.md` are separate work items.
