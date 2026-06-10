@@ -24,10 +24,18 @@ COPY packages/api/package.json     packages/api/package.json
 COPY packages/agent/package.json   packages/agent/package.json
 COPY packages/dashboard/package.json packages/dashboard/package.json
 
-RUN bun install --frozen-lockfile
+# --production omits devDependencies (vitest, typescript, @types/*) — they are
+# test/build tooling and must never ship in the runtime image, where image
+# scanning would (rightly) flag their CVEs.
+RUN bun install --frozen-lockfile --production
 
 # ── Stage 2: runtime ──────────────────────────────────────────────
 FROM oven/bun:1.2.21-alpine AS runtime
+
+# Patch OS packages from the base image so image scanning doesn't flag
+# already-fixed CVEs (e.g. musl/zlib/openssl advisories). Runs as root before
+# we drop to the bun user.
+RUN apk --no-cache upgrade
 
 WORKDIR /app
 
