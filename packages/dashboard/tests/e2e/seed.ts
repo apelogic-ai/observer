@@ -70,8 +70,18 @@ async function seed() {
   if (existsSync(FIXTURE_ROOT)) rmSync(FIXTURE_ROOT, { recursive: true });
   mkdirSync(FIXTURE_ROOT, { recursive: true });
 
-  const D1 = "2026-04-25";
-  const D2 = "2026-04-26";
+  // Fixture dates are RELATIVE to now so the data always lands inside the
+  // dashboard's default query windows (e.g. ?days=30). Hardcoded dates rot:
+  // once "today" drifts past the window every token/aggregate assertion reads
+  // an empty dataset and the whole e2e suite goes red — which is exactly what
+  // happened when these were pinned to 2026-04-25/26. D1 is the earlier day.
+  const ymd = (daysAgo: number): string => {
+    const d = new Date();
+    d.setUTCDate(d.getUTCDate() - daysAgo);
+    return d.toISOString().slice(0, 10);
+  };
+  const D1 = ymd(4);
+  const D2 = ymd(3);
 
   // --- claude_code: two sessions on D1, one on D2 (alpha + beta projects) ---
   // Three Bash grep calls in this session feed the motif leaderboard

@@ -12,6 +12,7 @@ import { createServer, type Server, type IncomingMessage, type ServerResponse } 
 import { createHash, createPublicKey, verify as cryptoVerify } from "node:crypto";
 import { Store } from "./store";
 import { LocalStorage, type Storage } from "./storage";
+import { redactSecrets } from "./redact";
 
 export interface IngestorConfig {
   port: number;
@@ -37,6 +38,11 @@ export interface IngestorConfig {
    *  which routinely cross 8 MiB on long sessions. Override via the
    *  OBSERVER_MAX_BODY_BYTES env var if you need to go higher. */
   maxBodyBytes?: number;
+  /** Per-principal rate limit (§5). When set, each authenticated developer
+   *  may make at most `maxRequests` ingest calls per fixed `windowMs` window;
+   *  excess calls get 429 with a Retry-After header. Undefined disables it
+   *  (the production entrypoint sets a default via OBSERVER_RATE_LIMIT_RPM). */
+  rateLimit?: { windowMs: number; maxRequests: number };
 }
 
 const DEFAULT_MAX_BODY_BYTES = 32 * 1024 * 1024;
@@ -106,6 +112,21 @@ function json(res: ServerResponse, status: number, data: unknown): void {
   res.end(JSON.stringify(data));
 }
 
+/** Emit a security audit event (§3 logging / §5). Distinct from the
+ *  per-request access log: tagged `audit:true` so the SIEM can route these
+ *  to long (1-year) retention. Identities are hashed by the caller — never
+ *  log raw developer ids, keys, or fingerprints. Client-facing responses
+ *  stay collapsed (OBS-007); the real reason is recorded only here. */
+function audit(category: string, fields: Record<string, unknown> = {}): void {
+  console.log(JSON.stringify({
+    event: "audit",
+    audit: true,
+    timestamp: new Date().toISOString(),
+    category,
+    ...fields,
+  }));
+}
+
 function verifyEd25519(payload: string, signature: string, publicKeyPem: string): boolean {
   try {
     const publicKey = createPublicKey(publicKeyPem);
@@ -137,6 +158,11 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
   const apiKeyToDeveloper = new Map<string, string>(Object.entries(config.apiKeys ?? {}));
   const trustedKeys = config.trustedKeys ?? {};
   const maxBodyBytes = config.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+  // Per-principal fixed-window rate limiter (§5). Keyed by the authenticated
+  // developer, so the map is bounded by the number of credentials, not by
+  // request volume. Disabled when config.rateLimit is undefined.
+  const rateLimit = config.rateLimit;
+  const rateWindows = new Map<string, { count: number; resetAt: number }>();
   // Per-server nonce cache: each createIngestor() gets a fresh map so
   // tests can spin up isolated servers and so a restart drops history.
   // The cost of a fresh map on restart is bounded: every captured POST
@@ -201,12 +227,13 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
       const nonceHeader = req.headers["x-observer-nonce"] as string | undefined;
 
       let authenticatedDeveloper: string | null = null;
+      let authMethod = "";
 
       // API key auth
       if (authHeader?.startsWith("Bearer ")) {
         const key = authHeader.slice(7);
         const dev = apiKeyToDeveloper.get(key);
-        if (dev) authenticatedDeveloper = dev;
+        if (dev) { authenticatedDeveloper = dev; authMethod = "apikey"; }
       }
 
       // Signature auth + replay protection (OBS-005).
@@ -217,31 +244,38 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
       // so a captured POST can't be replayed against this or any
       // ingestor that shares the trusted-keys list.
       if (authenticatedDeveloper === null && signature && fingerprint) {
+        const fpHash = hashPrefix(fingerprint, 16);
         const entry = trustedKeys[fingerprint];
         if (!entry) {
+          audit("auth_failure", { reason: "unknown_fingerprint", method: "signature", fingerprintHashPrefix: fpHash });
           json(res, 401, { error: "Authentication failed" });
           return;
         }
         if (!timestampHeader || !nonceHeader) {
+          audit("auth_failure", { reason: "missing_replay_headers", method: "signature", fingerprintHashPrefix: fpHash });
           json(res, 400, { error: "Missing X-Observer-Timestamp or X-Observer-Nonce header" });
           return;
         }
         const ts = Number(timestampHeader);
         if (!Number.isFinite(ts)) {
+          audit("auth_failure", { reason: "invalid_timestamp", method: "signature", fingerprintHashPrefix: fpHash });
           json(res, 400, { error: "Invalid X-Observer-Timestamp header" });
           return;
         }
         const skew = Math.abs(Math.floor(Date.now() / 1000) - ts);
         if (skew > REPLAY_WINDOW_SECONDS) {
+          audit("auth_failure", { reason: "timestamp_out_of_window", method: "signature", fingerprintHashPrefix: fpHash });
           json(res, 401, { error: "Request timestamp outside acceptable window" });
           return;
         }
         if (nonceCache.has(nonceHeader)) {
+          audit("auth_failure", { reason: "nonce_replay", method: "signature", fingerprintHashPrefix: fpHash });
           json(res, 401, { error: "Nonce already used" });
           return;
         }
         const canonical = `${timestampHeader}.${nonceHeader}.${body}`;
         if (!verifyEd25519(canonical, signature, entry.publicKeyPem)) {
+          audit("auth_failure", { reason: "invalid_signature", method: "signature", fingerprintHashPrefix: fpHash });
           json(res, 401, { error: "Authentication failed" });
           return;
         }
@@ -252,6 +286,7 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
           expiresAt: new Date(Date.now() + NONCE_TTL_MS).toISOString(),
         }));
         if (!marked) {
+          audit("auth_failure", { reason: "nonce_replay", method: "signature", fingerprintHashPrefix: fpHash });
           json(res, 401, { error: "Nonce already used" });
           return;
         }
@@ -260,11 +295,33 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
         nonceCache.set(nonceHeader, Date.now() + NONCE_TTL_MS);
         if (nonceCache.size > NONCE_CACHE_MAX) sweepNonceCache(nonceCache);
         authenticatedDeveloper = entry.developer;
+        authMethod = "signature";
       }
 
       if (authenticatedDeveloper === null) {
+        audit("auth_failure", { reason: "no_credentials" });
         json(res, 401, { error: "Authentication required" });
         return;
+      }
+      audit("auth_success", { method: authMethod, developerHashPrefix: hashPrefix(authenticatedDeveloper) });
+
+      // --- Per-principal rate limit (checked after auth so unauthenticated
+      // traffic can't churn the window map) ---
+      if (rateLimit) {
+        const now = Date.now();
+        let win = rateWindows.get(authenticatedDeveloper);
+        if (!win || now >= win.resetAt) {
+          win = { count: 0, resetAt: now + rateLimit.windowMs };
+          rateWindows.set(authenticatedDeveloper, win);
+        }
+        win.count++;
+        if (win.count > rateLimit.maxRequests) {
+          const retryAfter = Math.max(1, Math.ceil((win.resetAt - now) / 1000));
+          audit("rate_limited", { developerHashPrefix: hashPrefix(authenticatedDeveloper) });
+          res.writeHead(429, { "Content-Type": "application/json", "Retry-After": String(retryAfter) });
+          res.end(JSON.stringify({ error: "rate limit exceeded" }));
+          return;
+        }
       }
 
       // --- Parse and store ---
@@ -294,6 +351,11 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
       // the legitimate batches to be silently dropped as duplicates
       // (OBS-004, 2026-05 review).
       if (developer !== authenticatedDeveloper) {
+        audit("authz_failure", {
+          reason: "developer_mismatch",
+          authenticatedHashPrefix: hashPrefix(authenticatedDeveloper),
+          claimedHashPrefix: hashPrefix(developer),
+        });
         json(res, 403, { error: "developer mismatch: batch's developer field does not match the authenticated identity" });
         return;
       }
@@ -313,7 +375,10 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
         sourceFile: String(batch.sourceFile ?? ""),
         shippedAt: String(batch.shippedAt ?? ""),
         receivedAt: new Date().toISOString(),
-        entries: entries.map(String),
+        // Defence-in-depth: scrub any secret the client failed to redact
+        // before it lands in the lakehouse (§5 AI controls). The agent
+        // redacts on its side too — this backstops older/misbehaving clients.
+        entries: entries.map((e) => redactSecrets(String(e))),
       });
 
       json(res, 200, { accepted: true });

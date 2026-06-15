@@ -1,0 +1,23 @@
+apiVersion: v2
+name: observer-ingestor
+description: >-
+  Observer ingestor (telemetry API) for Kubernetes — a hardened, GitOps-ready
+  Helm chart. Published as a versioned OCI artifact; consumed from a private
+  config repo via Flux or Argo CD. Secure-by-default and fail-closed: required
+  values (image, storage, secret source) must be supplied by the deployer.
+type: application
+# Chart version — bump on every chart change; this is what consumers pin.
+version: 0.1.0
+# Application version this chart was validated against.
+appVersion: "0.1.23"
+kubeVersion: ">=1.27.0-0"
+home: https://github.com/apelogic-ai/observer
+sources:
+  - https://github.com/apelogic-ai/observer
+keywords:
+  - observer
+  - telemetry
+  - ingestor
+  - eks
+maintainers:
+  - name: Observer maintainers

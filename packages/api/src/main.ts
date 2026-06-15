@@ -97,6 +97,21 @@ if (rawMaxBody) {
   maxBodyBytes = parsed;
 }
 
+// Per-principal rate limit (§5). Default 120 requests/developer/minute;
+// set OBSERVER_RATE_LIMIT_RPM=0 to disable.
+const rawRpm = process.env.OBSERVER_RATE_LIMIT_RPM;
+let rateLimit: { windowMs: number; maxRequests: number } | undefined;
+if (rawRpm === "0") {
+  rateLimit = undefined;
+} else {
+  const rpm = rawRpm ? parseInt(rawRpm, 10) : 120;
+  if (!Number.isFinite(rpm) || rpm < 0) {
+    console.error(`Refusing to start: OBSERVER_RATE_LIMIT_RPM="${rawRpm}" is not a non-negative integer.`);
+    process.exit(1);
+  }
+  rateLimit = rpm > 0 ? { windowMs: 60_000, maxRequests: rpm } : undefined;
+}
+
 console.log(`Observer API starting...`);
 console.log(`  Port:    ${port}`);
 console.log(`  Storage: ${storageDescription}`);
@@ -110,6 +125,7 @@ createIngestor({
   port, dataDir, storage,
   apiKeys: Object.fromEntries(apiKeys),
   maxBodyBytes,
+  rateLimit,
 }).then(() => {
   console.log(`Listening on http://localhost:${port}`);
   console.log(`  POST /api/ingest  — receive batches`);

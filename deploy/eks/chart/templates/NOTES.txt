@@ -1,0 +1,9 @@
+observer-ingestor {{ .Chart.Version }} (app {{ .Chart.AppVersion }}) deployed as {{ include "observer-ingestor.fullname" . }}.
+
+Service: {{ include "observer-ingestor.fullname" . }}:{{ .Values.service.port }} → :{{ .Values.service.targetPort }} (/health, /api/ingest)
+{{ if .Values.ingress.enabled }}Ingress: enabled (front with an identity-aware proxy / WAF; allowlist the API).{{ else }}Ingress: disabled — reachable in-cluster only. Front it with the platform's proxy.{{ end }}
+Secret:  OBSERVER_API_KEYS from {{ if .Values.externalSecret.enabled }}ExternalSecret → {{ .Values.externalSecret.secretStoreRef.name }}{{ else }}existing Secret "{{ .Values.secret.existingSecret }}"{{ end }}
+AWS:     {{ if .Values.serviceAccount.annotations }}IRSA via serviceAccount annotations{{ else }}WARNING: no IRSA annotation set — the pod has no scoped AWS creds{{ end }}
+
+Verify rollout:
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "observer-ingestor.fullname" . }}

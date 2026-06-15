@@ -1,0 +1,56 @@
+# EXAMPLE — Argo CD consumer wiring. Belongs in YOUR private config repo.
+# Replace every <placeholder>. The chart is GitOps-tool-agnostic: this is the
+# Argo CD equivalent of examples/flux-helmrelease.yaml — pick whichever your
+# platform runs; the published chart is identical for both.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: observer-ingestor
+  namespace: argocd
+spec:
+  project: default
+  source:
+    # OCI registry hosting the chart (no oci:// prefix in repoURL).
+    repoURL: <your-oci-registry>/charts
+    chart: observer-ingestor
+    targetRevision: "0.1.0"      # pin the chart version
+    helm:
+      valuesObject:
+        image:
+          repository: <your-registry>/observer-ingestor
+          digest: sha256:<image-digest>
+        config:
+          storage: s3
+          s3Bucket: <lakehouse-bucket>
+          s3Region: <region>
+        serviceAccount:
+          annotations:
+            eks.amazonaws.com/role-arn: <irsa-role-arn>
+        externalSecret:
+          enabled: true
+          secretStoreRef:
+            name: <cluster-secret-store>
+            kind: ClusterSecretStore
+          remoteKey: <secrets-manager-path-to-OBSERVER_API_KEYS>
+        ingress:
+          enabled: true
+          className: <ingress-class>
+          hosts:
+            - host: <ingest-hostname>
+              paths:
+                - path: /
+                  pathType: Prefix
+        networkPolicy:
+          enabled: true
+          egress:
+            allowHttpsCidrs:
+              - <vpc-or-aws-endpoint-cidr>
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: observer
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
