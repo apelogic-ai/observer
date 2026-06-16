@@ -59,6 +59,10 @@ API are configured on the operator's ingress (pass annotations via
 
 ## Consume it
 
+**New to this? Follow [`CONSUMER.md`](./CONSUMER.md)** — the step-by-step
+onboarding runbook (AWS prerequisites with IAM policy JSON, ESO + secret setup,
+the apply sequence for Flux/Argo, and verification).
+
 See `examples/`:
 
 - `flux-helmrelease.yaml` — `OCIRepository` + `HelmRelease` (with optional
