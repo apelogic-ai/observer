@@ -1808,41 +1808,45 @@ export interface ToolDetail {
 }
 
 export async function getToolDetail(tool: string, f: Filters = {}): Promise<ToolDetail> {
+  // Bind the tool name as a `?` param (never concatenate it) and route the
+  // whole WHERE clause through the queryWhere tagged template, which merges
+  // the fragment's placeholders + params positionally. Keeps user input out
+  // of the SQL text entirely — see OBS-023 and the queryWhere doc comment.
   const toolFrag: SQLFragment = { sql: "toolName = ?", params: [tool] };
-  const w = where(f, [toolFrag]);
+  const filter = where(f, [toolFrag]);
 
   const [totalRows, commands, files, timeline, byAgent, projects, models] = await Promise.all([
-    query<{ total: number }>(`SELECT COUNT(*) AS total FROM traces ${w.sql}`, w.params),
-    query<ToolDetailRow>(`
+    queryWhere<{ total: number }>`SELECT COUNT(*) AS total FROM traces ${filter}`,
+    queryWhere<ToolDetailRow>`
       SELECT command AS value, COUNT(*) AS count
-      FROM traces ${w.sql} AND command IS NOT NULL
+      FROM traces ${filter} AND command IS NOT NULL
       GROUP BY command ORDER BY count DESC LIMIT 15
-    `, w.params),
-    query<ToolDetailRow>(`
+    `,
+    queryWhere<ToolDetailRow>`
       SELECT filePath AS value, COUNT(*) AS count
-      FROM traces ${w.sql} AND filePath IS NOT NULL
+      FROM traces ${filter} AND filePath IS NOT NULL
       GROUP BY filePath ORDER BY count DESC LIMIT 15
-    `, w.params),
-    query<{ date: string; count: number }>(`
+    `,
+    queryWhere<{ date: string; count: number }>`
       SELECT ${dateTrunc(f)} AS date, COUNT(*) AS count
-      FROM traces ${w.sql}
+      FROM traces ${filter}
       GROUP BY date ORDER BY date
-    `, w.params),
-    query<{ agent: string; count: number }>(`
+    `,
+    queryWhere<{ agent: string; count: number }>`
       SELECT agent, COUNT(*) AS count
-      FROM traces ${w.sql}
+      FROM traces ${filter}
       GROUP BY agent ORDER BY count DESC
-    `, w.params),
-    query<{ project: string; count: number }>(`
+    `,
+    queryWhere<{ project: string; count: number }>`
       SELECT project, COUNT(*) AS count
-      FROM traces ${w.sql} AND project IS NOT NULL
+      FROM traces ${filter} AND project IS NOT NULL
       GROUP BY project ORDER BY count DESC
-    `, w.params),
-    query<{ model: string; count: number }>(`
+    `,
+    queryWhere<{ model: string; count: number }>`
       SELECT model, COUNT(*) AS count
-      FROM traces ${w.sql} AND model IS NOT NULL
+      FROM traces ${filter} AND model IS NOT NULL
       GROUP BY model ORDER BY count DESC
-    `, w.params),
+    `,
   ]);
 
   return {
