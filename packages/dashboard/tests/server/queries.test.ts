@@ -219,6 +219,32 @@ describe("getToolDetail", () => {
     expect(d.byAgent.find((a) => a.agent === "codex")?.count).toBe(1);
     expect(d.projects.length).toBeGreaterThan(0);
   });
+
+  // Regression for the Aikido SAST finding on the string-concatenated
+  // `${w.sql}` queries (queries.ts:getToolDetail). Every user-controlled
+  // value must reach SQLite as a bound `?` parameter, never spliced into
+  // the SQL text. A classic injection payload must therefore be matched
+  // as a literal tool name (zero rows) rather than altering the query.
+  it("treats injection payloads in the tool name as a literal, not SQL", async () => {
+    const payload = "Read' OR '1'='1";
+    const d = await getToolDetail(payload, { days: 7 });
+    expect(d.tool).toBe(payload);
+    expect(d.total).toBe(0); // literal match against a non-existent tool
+    expect(d.byAgent).toEqual([]);
+    expect(d.commands).toEqual([]);
+  });
+
+  it("binds malicious filter values rather than interpolating them", async () => {
+    const d = await getToolDetail("Read", {
+      days: 7,
+      project: "alpha'; DROP TABLE traces;--",
+      agent: "codex' OR '1'='1",
+    });
+    // No injection: the bogus project/agent match nothing, so the tool
+    // is real but every filtered aggregate collapses to empty.
+    expect(d.tool).toBe("Read");
+    expect(d.total).toBe(0);
+  });
 });
 
 // ── Git ─────────────────────────────────────────────────────────────
