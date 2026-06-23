@@ -123,6 +123,45 @@ This split lets operators pull our security fixes by bumping a pinned chart
 version, with no merge conflicts and no leakage of their topology into public
 git. See `deploy/eks/README.md` for the override contract and consumer examples.
 
+## Client bundle distribution (MDM / Iru)
+
+The EKS chart deploys the **server** (ingestor). The **client** — the per-laptop
+agent that collects, redacts, signs, and ships traces — is distributed to a
+managed fleet via MDM, today [Iru](https://www.iru.com/) (formerly Kandji). Same
+topology doctrine, one tier down: generic mechanism is public, operator
+specifics are private, credentials live in the MDM/secret manager.
+
+- **Public repo:** the binary; `deploy/client/` packaging scaffold (macOS pkg
+  builder, LaunchAgent, postinstall, `config.example.yaml`); and the
+  `client.yml` CI that compiles → signs/notarizes → SBOMs → publishes to Iru.
+- **Private operator repo:** the real `config.yaml` (ingestor URL, org/project
+  filters, retention); Iru Blueprint / Assignment-Map definitions and ring group
+  names; the promotion workflow.
+- **Iru / secret manager:** the signed `.pkg` + Custom-App assignments;
+  enrollment tokens / device certs; any bearer key.
+
+**Secrets — ship none.** The agent generates a per-install Ed25519 keypair on
+first run; the private key never leaves the device (keychain-backed, Secure
+Enclave on Apple Silicon) and signs every batch. The ingestor trusts the
+registered **public key**, so the fleet distributes no shared secret and
+revocation is per-device (`config.example.yaml` uses `auth: none`). The only
+bootstrap is enrollment (registering each public key) — deliver any token
+out-of-band, never baked into the bundle. An MDM config profile is readable
+on-device, so a static shared API key in a profile is an anti-pattern.
+
+**Config delivery.** The agent searches `OBSERVER_CONFIG` → per-user
+`config.yaml` → system path (`/Library/Application Support/Observer`,
+`/etc/observer`, `%PROGRAMDATA%\Observer`) → defaults. MDM either drops a managed
+default at the system path or pins it authoritatively via `OBSERVER_CONFIG` in
+the LaunchAgent env; per-user state (keypair, cursors) stays under `~/.observer`.
+
+**Gated rollout.** `client.yml` auto-publishes a `client-v*` build to a **Canary**
+Iru Blueprint (an Assignment-Map rule scoped to a small identity group);
+promotion to the **Broad** Blueprint runs behind a GitHub **Environment** with
+required reviewers (the human gate), which calls the Iru API to extend the
+Assignment Map after a soak. See `deploy/client/README.md` for the full
+contract, required CI secrets/vars, and the local build recipe.
+
 ## Phased plan
 
 1. **Process/gating (now):** assign owners; register in inventory; request
@@ -137,6 +176,10 @@ git. See `deploy/eks/README.md` for the override contract and consumer examples.
 4. **CI/SDLC:** SAST, dependency scan, secret scan, SBOM, SLSA provenance, DAST.
 5. **Logging/monitoring:** SIEM/cloud-log forwarding + retention; register scan
    targets.
+6. **Client distribution (MDM):** agent config search path ✓; macOS pkg
+   scaffold + `client.yml` build→sign→notarize→SBOM ✓. Remaining: wire the Iru
+   Custom-App publish + Assignment-Map rings; per-device Ed25519 enrollment flow
+   at the ingestor; Windows/Linux packaging.
 
 Each engineering item follows the repo's TDD + branch→PR workflow
 (`AGENTS.md`).
