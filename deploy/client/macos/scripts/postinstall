@@ -1,0 +1,28 @@
+#!/bin/bash
+# Observer client pkg postinstall (MDM template).
+#
+# Runs as root after the payload is laid down. Bootstraps the LaunchAgent
+# into the active console user's GUI session so the agent starts without a
+# logout/login. Idempotent: safe to re-run on upgrade. Keep operator
+# specifics OUT of this script — managed config arrives separately.
+set -euo pipefail
+
+PLIST="/Library/LaunchAgents/com.observer.agent.plist"
+BINARY="/usr/local/observer/observer"
+
+chmod 0755 "$BINARY" || true
+chmod 0644 "$PLIST"  || true
+
+# Resolve the logged-in console user (empty at the loginwindow → skip; the
+# LaunchAgent loads at next login via RunAtLoad).
+console_user="$(/usr/bin/stat -f%Su /dev/console 2>/dev/null || true)"
+if [ -z "$console_user" ] || [ "$console_user" = "root" ]; then
+  exit 0
+fi
+
+uid="$(/usr/bin/id -u "$console_user")"
+# Reload cleanly: bootout if already present, then bootstrap into the GUI domain.
+/bin/launchctl bootout "gui/$uid" "$PLIST" 2>/dev/null || true
+/bin/launchctl bootstrap "gui/$uid" "$PLIST" 2>/dev/null || true
+
+exit 0

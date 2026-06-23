@@ -26,8 +26,10 @@ Thumbs.db
 .observer/
 
 # Per-operator deploy copies (live state, profile-specific tfvars).
-# deploy/dev/ (reference VM stack) and deploy/eks/ (canonical OCI Helm chart)
-# are tracked; other sibling dirs are local per-operator copies.
+# deploy/dev/ (reference VM stack), deploy/eks/ (canonical OCI Helm chart),
+# and deploy/client/ (canonical MDM packaging scaffold) are tracked; other
+# sibling dirs are local per-operator copies.
 /deploy/*/
 !/deploy/dev/
 !/deploy/eks/
+!/deploy/client/

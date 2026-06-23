@@ -1,0 +1,150 @@
+name: Client bundle
+
+# Builds the Observer client bundle (the per-laptop agent) for MDM
+# distribution. On a PR it compiles the binary and assembles the macOS .pkg
+# UNSIGNED — a structure/smoke gate. On a `client-v*` tag it compiles, signs +
+# notarizes the .pkg (Developer ID), generates an SBOM, and — when the operator
+# opts in (vars.IRU_PUBLISH) — uploads it to Iru as a Custom App version.
+#
+# No operator specifics live here: Team ID, signing creds, notary key, and the
+# Iru token all come from repo secrets/vars. Forks without those secrets still
+# get a green PR gate and an unsigned artifact (see the guards below).
+
+on:
+  pull_request:
+    paths:
+      - "packages/agent/**"
+      - "packages/dashboard/**"
+      - "deploy/client/**"
+      - ".github/workflows/client.yml"
+  push:
+    tags:
+      - "client-v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build & package (PR gate)
+    if: github.event_name != 'push'
+    runs-on: macos-14
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      - run: bun install
+
+      - name: Build dashboard (embedded in the binary)
+        run: cd packages/dashboard && bun run build
+
+      - name: Compile binary
+        run: cd packages/agent && bun build --compile src/cli.ts --outfile dist/observer
+
+      - name: Smoke test
+        run: packages/agent/dist/observer --help
+
+      - name: Assemble unsigned pkg
+        run: BINARY=packages/agent/dist/observer VERSION=0.0.0-pr deploy/client/macos/build-pkg.sh
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: observer-macos-pkg-unsigned
+          path: dist/*.pkg
+          retention-days: 14
+
+  publish:
+    name: Sign, notarize & publish to Iru
+    if: startsWith(github.ref, 'refs/tags/client-v')
+    runs-on: macos-14
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    env:
+      # Signing is enabled only when the cert secret is present, so forks
+      # without Apple creds still produce an (unsigned) artifact rather than
+      # hard-failing — mirrors image.yml's GHCR-login guard.
+      SIGN_ENABLED: ${{ secrets.APPLE_INSTALLER_CERT_P12 != '' }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+      - run: bun install
+
+      - name: Build dashboard (embedded in the binary)
+        run: cd packages/dashboard && bun run build
+
+      - name: Compile binary
+        run: cd packages/agent && bun build --compile src/cli.ts --outfile dist/observer
+
+      - name: Determine version
+        id: v
+        run: echo "version=${GITHUB_REF#refs/tags/client-v}" >> "$GITHUB_OUTPUT"
+
+      - name: Import signing cert + notary profile
+        if: env.SIGN_ENABLED == 'true'
+        env:
+          APPLE_INSTALLER_CERT_P12: ${{ secrets.APPLE_INSTALLER_CERT_P12 }}
+          APPLE_INSTALLER_CERT_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERT_PASSWORD }}
+          APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER }}
+        run: |
+          set -euo pipefail
+          kc="$RUNNER_TEMP/observer.keychain-db"
+          security create-keychain -p "" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "" "$kc"
+          echo "$APPLE_INSTALLER_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -P "$APPLE_INSTALLER_CERT_PASSWORD" \
+            -k "$kc" -T /usr/bin/productsign
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          security set-key-partition-list -S apple-tool:,apple: -k "" "$kc" >/dev/null
+          echo "$APPLE_NOTARY_KEY" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+          xcrun notarytool store-credentials observer-notary \
+            --key "$RUNNER_TEMP/notary.p8" \
+            --key-id "$APPLE_NOTARY_KEY_ID" \
+            --issuer "$APPLE_NOTARY_ISSUER"
+
+      - name: Build pkg
+        env:
+          INSTALLER_IDENTITY: ${{ vars.APPLE_INSTALLER_IDENTITY }}
+        run: |
+          set -euo pipefail
+          v="${{ steps.v.outputs.version }}"
+          if [ "$SIGN_ENABLED" = "true" ]; then
+            SIGN=1 INSTALLER_IDENTITY="$INSTALLER_IDENTITY" NOTARY_PROFILE=observer-notary \
+              BINARY=packages/agent/dist/observer VERSION="$v" deploy/client/macos/build-pkg.sh
+          else
+            echo "::warning::Apple signing secrets absent — producing an UNSIGNED pkg (not fleet-deployable)"
+            BINARY=packages/agent/dist/observer VERSION="$v" deploy/client/macos/build-pkg.sh
+          fi
+
+      - name: Generate SBOM (CycloneDX)
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: packages/agent/dist
+          format: cyclonedx-json
+          output-file: client-sbom.cdx.json
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: observer-macos-pkg-${{ steps.v.outputs.version }}
+          path: |
+            dist/*.pkg
+            client-sbom.cdx.json
+          retention-days: 90
+
+      - name: Publish to Iru (Custom App, Canary blueprint)
+        if: ${{ vars.IRU_PUBLISH == '1' }}
+        env:
+          IRU_API_TOKEN: ${{ secrets.IRU_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          pkg="$(ls dist/*.pkg)"
+          v="${{ steps.v.outputs.version }}"
+          echo "Would upload $pkg to Iru as Custom App version $v (Canary blueprint)."
+          # Operator wires KAPPA / Kandji Packages here, e.g.:
+          #   pipx run kappa upload --token "$IRU_API_TOKEN" \
+          #     --name "Observer Agent" --version "$v" --file "$pkg" \
+          #     --blueprint "$IRU_CANARY_BLUEPRINT"
+          # Left as a documented scaffold so no customer specifics enter public git.
+          # Promotion to the Broad blueprint is a separate job behind a GitHub
+          # Environment with required reviewers (the human gate).

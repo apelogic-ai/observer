@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Observer agent LaunchAgent (MDM template).
+
+  Installed to /Library/LaunchAgents so launchd runs ONE instance per
+  logged-in user, in that user's GUI context. The agent must run as the
+  user because it reads per-user trace dirs (~/.claude, ~/.codex, Cursor)
+  — do NOT convert this to a system LaunchDaemon.
+
+  launchd sets HOME/USER for the target user automatically, so no per-user
+  paths are baked in here. To make a managed config authoritative, set
+  OBSERVER_CONFIG below; otherwise the agent uses its search order
+  (see deploy/client/config.example.yaml).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.observer.agent</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/observer/observer</string>
+    <string>daemon</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- Uncomment to pin the managed config as authoritative:
+    <key>OBSERVER_CONFIG</key>
+    <string>/Library/Application Support/Observer/config.yaml</string>
+    -->
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/tmp/observer-agent.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/observer-agent.err.log</string>
+</dict>
+</plist>
