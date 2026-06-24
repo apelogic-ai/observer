@@ -12,10 +12,76 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
+import { join, win32 as winPath } from "node:path";
+import { homedir } from "node:os";
 import YAML from "yaml";
 import type { DisclosureLevel } from "./types";
 
 export type LogLevel = "silent" | "error" | "info" | "debug";
+
+/**
+ * Where the agent looks for its files. Pure (env/home/platform/fs are all
+ * injectable) so MDM-style deployment can be unit-tested without touching
+ * the real filesystem.
+ */
+export interface PathResolution {
+  env?: Record<string, string | undefined>;
+  homeDir?: string;
+  platform?: NodeJS.Platform;
+  /** Explicit state dir (e.g. CLI `--state-dir`); overrides OBSERVER_HOME. */
+  stateDir?: string;
+  fileExists?: (p: string) => boolean;
+}
+
+/**
+ * Per-user state directory (keypair, cursors, offsets, logs). `OBSERVER_HOME`
+ * relocates it for managed/MDM installs; otherwise `~/.observer`. Per-user
+ * state always stays per-user — only the *location* moves.
+ */
+export function resolveStateDir(opts: PathResolution = {}): string {
+  const env = opts.env ?? process.env;
+  const override = env.OBSERVER_HOME?.trim();
+  if (override) return override;
+  return join(opts.homeDir ?? homedir(), ".observer");
+}
+
+/**
+ * System-wide managed config path. MDM (Iru/Kandji etc.) drops a default
+ * config here so un-`init`'d machines still have a working baseline. Not a
+ * secret store — secret *values* never belong here (see resolveConfigPath).
+ */
+export function systemConfigPath(
+  platform: NodeJS.Platform = process.platform,
+  env: Record<string, string | undefined> = process.env,
+): string {
+  if (platform === "darwin") return "/Library/Application Support/Observer/config.yaml";
+  // win32.join so backslash separators are correct regardless of host OS.
+  if (platform === "win32") return winPath.join(env.PROGRAMDATA ?? "C:\\ProgramData", "Observer", "config.yaml");
+  return "/etc/observer/config.yaml";
+}
+
+/**
+ * Resolve which config file to load, in precedence order:
+ *   1. `OBSERVER_CONFIG`           — explicit file (MDM can pin this in the
+ *                                    LaunchAgent env to make managed config
+ *                                    authoritative).
+ *   2. `<stateDir>/config.yaml`    — per-user config from `observer init`.
+ *   3. systemConfigPath()          — MDM-delivered fallback default.
+ *   4. `<stateDir>/config.yaml`    — returned even if absent, so loadConfig
+ *                                    falls back to DEFAULT_CONFIG (preserving
+ *                                    the original no-file behavior).
+ */
+export function resolveConfigPath(opts: PathResolution = {}): string {
+  const env = opts.env ?? process.env;
+  const exists = opts.fileExists ?? existsSync;
+  const explicit = env.OBSERVER_CONFIG?.trim();
+  if (explicit) return explicit;
+  const userPath = join(opts.stateDir ?? resolveStateDir(opts), "config.yaml");
+  if (exists(userPath)) return userPath;
+  const sysPath = systemConfigPath(opts.platform ?? process.platform, env);
+  if (exists(sysPath)) return sysPath;
+  return userPath;
+}
 
 export type DestinationKind = "disk" | "http";
 export type Schedule = "realtime" | "hourly" | "daily";

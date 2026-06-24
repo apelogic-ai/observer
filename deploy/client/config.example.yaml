@@ -1,0 +1,42 @@
+# Observer client — managed default config (TEMPLATE, non-secret).
+#
+# Ship this via MDM (Iru/Kandji Custom Profile, or dropped by the pkg
+# postinstall) to one of the paths the agent searches:
+#   macOS    /Library/Application Support/Observer/config.yaml
+#   Linux    /etc/observer/config.yaml
+#   Windows  %PROGRAMDATA%\Observer\config.yaml
+# …or pin it authoritatively with OBSERVER_CONFIG in the LaunchAgent env.
+#
+# NOTHING SECRET BELONGS HERE. This file is world-readable on-device. The
+# shipping credential is the per-device Ed25519 identity (auth: none below),
+# generated locally on first run — no shared key is distributed. Replace the
+# <PLACEHOLDERS>; keep the real values in your private repo, not in public git.
+
+sources:
+  claude_code: true
+  codex: true
+  cursor: true
+
+destinations:
+  - name: central
+    endpoint: https://<INGESTOR_HOST>/ingest   # operator-specific; private repo
+    kind: http
+    # Ed25519-only: no API key is shipped. The agent signs each batch with a
+    # per-install key; register its public key with the ingestor at enrollment.
+    auth: none
+    disclosure: basic            # never leak output/contents off-device by default
+    schedule: hourly
+    redactSecrets: true
+    anonymize: false
+    orgs:     { include: [], exclude: [] }
+    projects: { include: [], exclude: [] }
+
+privacy:
+  # Global floor — these never reach ANY destination, before per-dest filters.
+  excludeProjects: []
+
+# Local dashboard stays loopback-only on managed machines.
+dashboard:
+  port: 3457
+  log:
+    level: info

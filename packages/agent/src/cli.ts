@@ -92,7 +92,10 @@ function resolveBinaryPath(): string {
   return join(homedir(), ".local", "bin", "observer");
 }
 
-const DEFAULT_STATE_DIR = join(homedir(), ".observer");
+// Mirror resolveStateDir() from ./config without a static import (config is
+// lazy-loaded per-action to keep CLI startup fast). OBSERVER_HOME relocates
+// per-user state for managed/MDM installs; otherwise ~/.observer.
+const DEFAULT_STATE_DIR = process.env.OBSERVER_HOME?.trim() || join(homedir(), ".observer");
 const DEFAULT_CLAUDE_DIR = join(homedir(), ".claude");
 const DEFAULT_CODEX_DIR = join(homedir(), ".codex");
 const DEFAULT_CURSOR_DIR = (() => {
@@ -268,8 +271,8 @@ async function scanAction(opts: ScanOpts): Promise<void> {
   // Git event collection
   if (opts.git !== false && opts.localOutput) {
     try {
-      const { loadConfig } = await import("./config");
-      const config = loadConfig(join(opts.stateDir, "config.yaml"));
+      const { loadConfig, resolveConfigPath } = await import("./config");
+      const config = loadConfig(resolveConfigPath({ stateDir: opts.stateDir }));
       const gitCount = scanGitEvents({
         outputDir: opts.localOutput,
         stateDir: opts.stateDir,
@@ -341,8 +344,8 @@ async function backfillGitAction(opts: BackfillGitOpts): Promise<void> {
     return;
   }
   const outputDir = opts.localOutput ?? join(opts.stateDir, "traces", "normalized");
-  const { loadConfig } = await import("./config");
-  const config = loadConfig(join(opts.stateDir, "config.yaml"));
+  const { loadConfig, resolveConfigPath } = await import("./config");
+  const config = loadConfig(resolveConfigPath({ stateDir: opts.stateDir }));
 
   const allRepos = discoverActiveRepos(
     outputDir,
@@ -594,7 +597,8 @@ Data capture level — how much detail to keep in each trace entry:
  * - Otherwise → print a short status pointer.
  */
 async function defaultAction(): Promise<void> {
-  const configPath = join(DEFAULT_STATE_DIR, "config.yaml");
+  const { resolveConfigPath } = await import("./config");
+  const configPath = resolveConfigPath();
   if (!existsSync(configPath)) {
     console.log("Welcome to observer. No config found — let's set it up.\n");
     await initAction();
@@ -611,9 +615,9 @@ async function defaultAction(): Promise<void> {
 // --- Daemon foreground ---
 
 async function daemonAction(opts: { stateDir: string }): Promise<void> {
-  const { loadConfig, resolveDestinationApiKey } = await import("./config");
+  const { loadConfig, resolveDestinationApiKey, resolveConfigPath } = await import("./config");
   const { detectSecureStore } = await import("./secure-store");
-  const config = loadConfig(join(opts.stateDir, "config.yaml"));
+  const config = loadConfig(resolveConfigPath({ stateDir: opts.stateDir }));
   const secureStore = detectSecureStore();
 
   console.log("Observer daemon starting...");
@@ -899,8 +903,8 @@ async function getSecureStoreOrFail() {
 }
 
 async function keychainAccount(stateDir: string): Promise<string> {
-  const { loadConfig } = await import("./config");
-  const cfg = loadConfig(join(stateDir, "config.yaml"));
+  const { loadConfig, resolveConfigPath } = await import("./config");
+  const cfg = loadConfig(resolveConfigPath({ stateDir }));
   return cfg.developer ?? "default";
 }
 
@@ -946,11 +950,11 @@ async function keychainDeleteAction(service: string, opts: KeychainOptions): Pro
 }
 
 async function cursorUsageAction(opts: CursorUsageOptions): Promise<void> {
-  const { loadConfig } = await import("./config");
+  const { loadConfig, resolveConfigPath } = await import("./config");
   const { fetchAndWriteDailySidecar, readCursorAuth, readCursorUsageSidecar }
     = await import("./cursor-api");
 
-  const config = loadConfig(join(opts.stateDir, "config.yaml"));
+  const config = loadConfig(resolveConfigPath({ stateDir: opts.stateDir }));
   const firstDisk = config.destinations.find((d) => d.kind === "disk");
   const outputDir = firstDisk?.endpoint
     ?? join(homedir(), ".observer", "traces", "normalized");

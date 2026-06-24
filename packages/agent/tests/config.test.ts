@@ -2,7 +2,10 @@ import { describe, it, expect } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { loadConfig, DEFAULT_CONFIG } from "../src/config";
+import {
+  loadConfig, DEFAULT_CONFIG,
+  resolveStateDir, systemConfigPath, resolveConfigPath,
+} from "../src/config";
 
 function makeTmpDir(): string {
   return mkdtempSync(join(tmpdir(), "observer-config-"));
@@ -296,5 +299,83 @@ sources:
     expect(config.sources.cursor).toBe(false);
     expect(config.sources.claude_code).toBe(true);
     expect(config.destinations).toEqual([]);
+  });
+});
+
+// ── Path resolution (MDM / managed deployment) ──────────────────────
+describe("resolveStateDir", () => {
+  it("defaults to <home>/.observer when OBSERVER_HOME is unset", () => {
+    expect(resolveStateDir({ env: {}, homeDir: "/Users/alice" }))
+      .toBe("/Users/alice/.observer");
+  });
+
+  it("honors OBSERVER_HOME for managed installs", () => {
+    expect(resolveStateDir({ env: { OBSERVER_HOME: "/var/observer" }, homeDir: "/Users/alice" }))
+      .toBe("/var/observer");
+  });
+
+  it("ignores a blank OBSERVER_HOME", () => {
+    expect(resolveStateDir({ env: { OBSERVER_HOME: "  " }, homeDir: "/Users/alice" }))
+      .toBe("/Users/alice/.observer");
+  });
+});
+
+describe("systemConfigPath", () => {
+  it("macOS → /Library/Application Support", () => {
+    expect(systemConfigPath("darwin")).toBe("/Library/Application Support/Observer/config.yaml");
+  });
+  it("Linux → /etc/observer", () => {
+    expect(systemConfigPath("linux")).toBe("/etc/observer/config.yaml");
+  });
+  it("Windows → %PROGRAMDATA%\\Observer", () => {
+    expect(systemConfigPath("win32", { PROGRAMDATA: "D:\\PD" }))
+      .toBe("D:\\PD\\Observer\\config.yaml");
+  });
+});
+
+describe("resolveConfigPath — precedence", () => {
+  const home = "/Users/alice";
+  const userPath = "/Users/alice/.observer/config.yaml";
+  const sysPath = "/Library/Application Support/Observer/config.yaml";
+
+  it("OBSERVER_CONFIG wins over everything, even when other files exist", () => {
+    const p = resolveConfigPath({
+      env: { OBSERVER_CONFIG: "/etc/managed/observer.yaml" },
+      homeDir: home, platform: "darwin",
+      fileExists: () => true,
+    });
+    expect(p).toBe("/etc/managed/observer.yaml");
+  });
+
+  it("prefers the per-user config over the system config when it exists", () => {
+    const p = resolveConfigPath({
+      env: {}, homeDir: home, platform: "darwin",
+      fileExists: (f) => f === userPath || f === sysPath,
+    });
+    expect(p).toBe(userPath);
+  });
+
+  it("falls back to the system config when no per-user config exists", () => {
+    const p = resolveConfigPath({
+      env: {}, homeDir: home, platform: "darwin",
+      fileExists: (f) => f === sysPath,
+    });
+    expect(p).toBe(sysPath);
+  });
+
+  it("returns the per-user path (absent) when neither exists, so defaults apply", () => {
+    const p = resolveConfigPath({
+      env: {}, homeDir: home, platform: "darwin",
+      fileExists: () => false,
+    });
+    expect(p).toBe(userPath);
+  });
+
+  it("OBSERVER_HOME relocates the per-user config path", () => {
+    const p = resolveConfigPath({
+      env: { OBSERVER_HOME: "/var/observer" }, homeDir: home, platform: "linux",
+      fileExists: (f) => f === "/var/observer/config.yaml",
+    });
+    expect(p).toBe("/var/observer/config.yaml");
   });
 });
