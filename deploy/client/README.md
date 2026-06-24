@@ -6,6 +6,10 @@ MDM that installs a signed `.pkg`. Same doctrine as the EKS chart: the reusable,
 generic mechanism lives here (public, maintained centrally); every
 site-specific value stays out of this repo.
 
+> **Deploying this as a client?** Follow the step-by-step runbook in
+> [`CONSUMER.md`](CONSUMER.md) (for IT/security). Why PKG and not DMG:
+> [`packaging-format.md`](packaging-format.md).
+
 ```
 ┌─ public: github.com/<org>/observer ───────────────┐   ┌─ your private config repo ───────────┐
 │ packages/agent/**     product code (the binary)    │   │ config.yaml   ingestor URL, filters  │
@@ -79,8 +83,8 @@ SIGN=1 INSTALLER_IDENTITY="Developer ID Installer: Acme (TEAMID)" \
 
 `client.yml` builds + (on a `client-v*` tag) signs/notarizes the pkg and, when
 `vars.IRU_PUBLISH` is set, uploads it to Iru as a Custom App version using
-[KAPPA / Kandji Packages](https://www.iru.com/blog/archive/kandji-packages-create-and-update-custom-apps-via-api).
-Stage the rollout with **Iru Assignment Maps** (identity-group rings):
+[`irupkg`](https://github.com/kandji-inc/irupkg) (formerly Kandji Packages /
+KAPPA). Stage the rollout with **Iru Assignment Maps** (identity-group rings):
 publish to a **Canary** Blueprint automatically; promote to **Broad** behind a
 GitHub **Environment** with required reviewers (the human gate). The promotion
 job calls the Iru API to extend the Assignment Map after the soak.
