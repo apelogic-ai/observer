@@ -13,6 +13,7 @@ import { createHash, createPublicKey, verify as cryptoVerify } from "node:crypto
 import { Store } from "./store";
 import { LocalStorage, type Storage } from "./storage";
 import { redactSecrets } from "./redact";
+import { clampDisclosure, normalizeLevel, type DisclosureLevel } from "./disclosure";
 
 export interface IngestorConfig {
   port: number;
@@ -27,7 +28,7 @@ export interface IngestorConfig {
    *  The `developer` binds the key to a tenant identity so the
    *  authenticated caller can only write batches for their own
    *  developer (OBS-004, 2026-05 review). */
-  trustedKeys?: Record<string, { developer: string; publicKeyPem: string }>;
+  trustedKeys?: Record<string, { developer: string; publicKeyPem: string; maxDisclosure?: DisclosureLevel }>;
   /** API key → developer map. Same tenant-binding semantics as
    *  `trustedKeys`: each key authenticates exactly one developer.
    *  A batch whose `developer` field doesn't match the authenticated
@@ -43,6 +44,14 @@ export interface IngestorConfig {
    *  excess calls get 429 with a Retry-After header. Undefined disables it
    *  (the production entrypoint sets a default via OBSERVER_RATE_LIMIT_RPM). */
   rateLimit?: { windowMs: number; maxRequests: number };
+  /** Server-side disclosure floor (§5). Every ingested entry is clamped to at
+   *  most this level, regardless of the client's config — so a user with root
+   *  on an endpoint can't raise disclosure (e.g. to "full", which includes
+   *  file contents and tool outputs) by editing config.yaml. A per-device
+   *  override lives on `trustedKeys[fp].maxDisclosure` and wins over this.
+   *  Undefined means "full" (no clamping — backward compatible); enterprise
+   *  deployments set it via OBSERVER_MAX_DISCLOSURE. */
+  maxDisclosure?: DisclosureLevel;
 }
 
 const DEFAULT_MAX_BODY_BYTES = 32 * 1024 * 1024;
@@ -158,6 +167,10 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
   const apiKeyToDeveloper = new Map<string, string>(Object.entries(config.apiKeys ?? {}));
   const trustedKeys = config.trustedKeys ?? {};
   const maxBodyBytes = config.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+  // Global disclosure floor. Undefined → "full" (no clamp; backward compatible).
+  const globalMaxDisclosure: DisclosureLevel = config.maxDisclosure
+    ? normalizeLevel(config.maxDisclosure)
+    : "full";
   // Per-principal fixed-window rate limiter (§5). Keyed by the authenticated
   // developer, so the map is bounded by the number of credentials, not by
   // request volume. Disabled when config.rateLimit is undefined.
@@ -228,6 +241,7 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
 
       let authenticatedDeveloper: string | null = null;
       let authMethod = "";
+      let deviceMaxDisclosure: DisclosureLevel | undefined;
 
       // API key auth
       if (authHeader?.startsWith("Bearer ")) {
@@ -295,6 +309,7 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
         nonceCache.set(nonceHeader, Date.now() + NONCE_TTL_MS);
         if (nonceCache.size > NONCE_CACHE_MAX) sweepNonceCache(nonceCache);
         authenticatedDeveloper = entry.developer;
+        deviceMaxDisclosure = entry.maxDisclosure;  // per-device override (optional)
         authMethod = "signature";
       }
 
@@ -366,6 +381,31 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
         return;
       }
 
+      // Authoritative disclosure floor (§5): clamp every entry to at most the
+      // configured level, regardless of the client's config. A per-device
+      // override (from the signature-auth trusted key) wins over the global
+      // default. This is the control against a root user raising disclosure in
+      // config.yaml — the ingestor never trusts the client's level.
+      const maxLevel = normalizeLevel(deviceMaxDisclosure ?? globalMaxDisclosure);
+      const strippedFields = new Set<string>();
+      const processed = entries.map((e) => {
+        const { json, stripped } = clampDisclosure(String(e), maxLevel);
+        for (const f of stripped) strippedFields.add(f);
+        // Defence-in-depth: scrub any secret the client failed to redact
+        // before it lands in the lakehouse (§5). The agent redacts on its
+        // side too — this backstops older/misbehaving clients.
+        return redactSecrets(json);
+      });
+      if (strippedFields.size > 0) {
+        // Over-disclosure attempt — the signal that a client shipped above its
+        // allowed level (e.g. tampered config). Surface it for SIEM alerting.
+        audit("disclosure_clamped", {
+          developerHashPrefix: hashPrefix(developer),
+          maxLevel,
+          fieldsStripped: [...strippedFields].sort(),
+        });
+      }
+
       await store.saveBatch({
         batchId,
         developer,
@@ -375,10 +415,7 @@ export function createIngestor(config: IngestorConfig): Promise<Server> {
         sourceFile: String(batch.sourceFile ?? ""),
         shippedAt: String(batch.shippedAt ?? ""),
         receivedAt: new Date().toISOString(),
-        // Defence-in-depth: scrub any secret the client failed to redact
-        // before it lands in the lakehouse (§5 AI controls). The agent
-        // redacts on its side too — this backstops older/misbehaving clients.
-        entries: entries.map((e) => redactSecrets(String(e))),
+        entries: processed,
       });
 
       json(res, 200, { accepted: true });

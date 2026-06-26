@@ -63,6 +63,10 @@ spec:
             - name: OBSERVER_MAX_BODY_BYTES
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.config.maxDisclosure }}
+            - name: OBSERVER_MAX_DISCLOSURE
+              value: {{ . | quote }}
+            {{- end }}
             # OBSERVER_API_KEYS is injected from a Secret — never from values.
             - name: OBSERVER_API_KEYS
               valueFrom:

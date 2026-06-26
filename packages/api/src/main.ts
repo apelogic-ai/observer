@@ -112,6 +112,21 @@ if (rawRpm === "0") {
   rateLimit = rpm > 0 ? { windowMs: 60_000, maxRequests: rpm } : undefined;
 }
 
+// Server-side disclosure floor (§5). Clamps every ingested entry to at most
+// this level regardless of the client's config — so a root user can't raise
+// disclosure by editing config.yaml. Unset → "full" (no clamp; backward
+// compatible). Enterprise fleets set OBSERVER_MAX_DISCLOSURE=basic.
+const rawDisclosure = process.env.OBSERVER_MAX_DISCLOSURE?.trim().toLowerCase();
+const DISCLOSURE_LEVELS = ["basic", "moderate", "sensitive", "full"] as const;
+let maxDisclosure: (typeof DISCLOSURE_LEVELS)[number] | undefined;
+if (rawDisclosure) {
+  if (!(DISCLOSURE_LEVELS as readonly string[]).includes(rawDisclosure)) {
+    console.error(`Refusing to start: OBSERVER_MAX_DISCLOSURE="${rawDisclosure}" is not one of ${DISCLOSURE_LEVELS.join("|")}.`);
+    process.exit(1);
+  }
+  maxDisclosure = rawDisclosure as (typeof DISCLOSURE_LEVELS)[number];
+}
+
 console.log(`Observer API starting...`);
 console.log(`  Port:    ${port}`);
 console.log(`  Storage: ${storageDescription}`);
@@ -119,6 +134,7 @@ console.log(`  API keys: ${apiKeys.size} configured (bound to ${new Set(apiKeys.
 if (maxBodyBytes !== undefined) {
   console.log(`  Max body: ${maxBodyBytes} bytes (override)`);
 }
+console.log(`  Disclosure floor: ${maxDisclosure ?? "full (unclamped)"}`);
 console.log();
 
 createIngestor({
@@ -126,6 +142,7 @@ createIngestor({
   apiKeys: Object.fromEntries(apiKeys),
   maxBodyBytes,
   rateLimit,
+  maxDisclosure,
 }).then(() => {
   console.log(`Listening on http://localhost:${port}`);
   console.log(`  POST /api/ingest  — receive batches`);
