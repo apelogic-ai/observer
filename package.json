@@ -14,11 +14,10 @@
     "turbo": "^2.9.15"
   },
   "packageManager": "bun@1.2.0",
-  "trustedDependencies": [
-  ],
+  "trustedDependencies": [],
   "overrides": {
     "@dotenvx/dotenvx": "1.61.6",
-    "hono": "4.12.18",
+    "hono": "4.12.25",
     "zod": "4.4.3",
     "fast-uri": "3.1.2",
     "fast-xml-builder": "1.2.0",

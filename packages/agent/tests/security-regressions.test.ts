@@ -164,7 +164,7 @@ describe("OBS-019/020/021/022/025/026/027: vulnerable deps overridden", () => {
     const src = read("package.json");
     const pkg = JSON.parse(src) as { overrides?: Record<string, string> };
     expect(pkg.overrides).toBeDefined();
-    expect(pkg.overrides!["hono"]).toBe("4.12.18");
+    expect(pkg.overrides!["hono"]).toBe("4.12.25"); // bumped for CVE-2026-54290 (CORS middleware)
     expect(pkg.overrides!["zod"]).toBe("4.4.3");
     expect(pkg.overrides!["fast-uri"]).toBe("3.1.2");
     expect(pkg.overrides!["fast-xml-builder"]).toBe("1.2.0");

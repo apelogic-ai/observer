@@ -102,7 +102,7 @@ compensating controls.
 | Control | Current state | Gap | Owner |
 | --- | --- | --- | --- |
 | AI-security review before rollout | Not done | **Gating** — schedule with the operator's AI-security function | Us + Op |
-| Guardrails enforced in code | Agent-side redaction **+ server-side redaction at ingest** (defence in depth) | Keep pattern set in sync with the agent scanner | Us |
+| Guardrails enforced in code | Agent-side redaction **+ server-side redaction at ingest + server-side disclosure floor** (ingestor clamps every entry to a configured max level regardless of client config — `OBSERVER_MAX_DISCLOSURE`/per-device, defends against a root user raising disclosure in `config.yaml`) | Keep redaction patterns + disclosure tiers in sync with the agent | Us |
 | Least-privilege tool/data access | API auth tenant-bound | Carry into IRSA + RBAC | Us |
 | Full audit of data access / tool calls / prompts; GDPR retention | Auth/authz/rate audit events present | Add per-trace-read + MCP-tool-call audit events; define GDPR retention/erasure | Us |
 | Rate limits, per-principal budget caps, anomaly detection | **Per-principal rate limiting** at ingest (120/min default) | Add token/tool-call budget caps + anomaly alerting | Us |

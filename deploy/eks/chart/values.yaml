@@ -25,6 +25,10 @@ config:
   s3Region: ""          # also exported as AWS_REGION for the SDK
   s3Endpoint: ""        # optional: minio / R2 / localstack override
   maxBodyBytes: ""      # optional: override the 32 MiB request-body cap
+  maxDisclosure: ""     # optional: server-side disclosure floor — clamp every
+                        # ingested entry to at most this level regardless of
+                        # client config (basic|moderate|sensitive|full).
+                        # Empty = full (no clamp). Enterprise fleets: "basic".
 
 # ── Secret source for OBSERVER_API_KEYS (REQUIRED) ─────────────────
 # OBSERVER_API_KEYS MUST come from a Kubernetes Secret, never from values.
