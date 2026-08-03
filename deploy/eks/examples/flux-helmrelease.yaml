@@ -12,7 +12,7 @@ metadata:
   namespace: flux-system
 spec:
   interval: 30m
-  url: oci://<your-oci-registry>/charts/observer-ingestor
+  url: oci://<your-oci-registry>/charts/observer
   ref:
     tag: "0.1.0"            # pin the chart version
   # Verify the chart's cosign signature (recommended):
@@ -36,6 +36,7 @@ spec:
   install:
     createNamespace: true
   values:
+    fullnameOverride: observer-ingestor
     image:
       repository: <your-registry>/observer-ingestor
       digest: sha256:<image-digest>     # pin by digest

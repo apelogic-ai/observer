@@ -41,8 +41,8 @@ Legend — **Us** = Observer change; **Op** = platform operator; **Shared**.
 | Control | Current state | Gap | Owner |
 | --- | --- | --- | --- |
 | GitOps deploy (Flux/Argo) | Helm chart published as OCI artifact (`deploy/eks/chart`) | Done for the ingestor; dashboard hosting is a follow-up | Us |
-| Image from trusted registry | Multi-arch image built, pushed, scanned (Trivy), SBOM'd in CI (`.github/workflows/image.yml`) | Point `IMAGE_REPO` at the operator's registry; provide creds | Us + Op (registry creds) |
-| Signed & verified artifacts | Binaries, chart, and **container image** all cosign-signed (keyless) | Enable verification policy (Flux/Kyverno) where supported | Us |
+| Image from trusted registry | Linux/amd64 image published only to configured ECR, scanned by Trivy and ECR, with SBOM (`.github/workflows/image.yml`) | Infrastructure supplies ECR coordinates and the GitHub OIDC publisher role through repository variables | Us + Op |
+| Signed & verified artifacts | Binaries, chart, and **container image** are cosign-signed; image/chart SBOM, provenance, and vulnerability attestations are verified in release CI | Enable verification policy (Flux/Kyverno) where supported | Us |
 | Ingress via WAF + identity-aware proxy | Chart exposes `Ingress` (annotations operator-supplied) | Operator fronts it; we pass annotations | Op / Us (manifest) |
 | Ingest API IP-allowlisted | Separate ingress path supported | Operator attaches the allowlisted, WAF'd ALB | Op / Us |
 

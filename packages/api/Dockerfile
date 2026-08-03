@@ -8,8 +8,8 @@
 #   docker build -f packages/api/Dockerfile -t observer-api .
 #
 # Two stages:
-#   1. deps — install workspace deps (cached when neither lockfile nor
-#      package.json files change).
+#   1. deps — install only API production dependencies (cached when the
+#      lockfile or API manifest changes).
 #   2. runtime — minimal Bun image with the api source + node_modules.
 
 # ── Stage 1: install workspace dependencies ───────────────────────
@@ -17,17 +17,18 @@ FROM oven/bun:1.2.21-alpine AS deps
 
 WORKDIR /app
 
-# Lockfile + each workspace package.json — copy first so changes to
-# unrelated source files don't invalidate the dep cache.
+# Keep all workspace manifests available so Bun can validate the frozen
+# lockfile. The filter still installs only API runtime dependencies, preventing
+# agent/dashboard packages from entering the image or its SBOM/scan inventory.
 COPY package.json bun.lock ./
-COPY packages/api/package.json     packages/api/package.json
-COPY packages/agent/package.json   packages/agent/package.json
+COPY packages/api/package.json packages/api/package.json
+COPY packages/agent/package.json packages/agent/package.json
 COPY packages/dashboard/package.json packages/dashboard/package.json
 
 # --production omits devDependencies (vitest, typescript, @types/*) — they are
 # test/build tooling and must never ship in the runtime image, where image
 # scanning would (rightly) flag their CVEs.
-RUN bun install --frozen-lockfile --production
+RUN bun install --frozen-lockfile --production --filter @observer/api
 
 # ── Stage 2: runtime ──────────────────────────────────────────────
 FROM oven/bun:1.2.21-alpine AS runtime

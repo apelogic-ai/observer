@@ -1,36 +1,44 @@
 name: Chart
 
-# Lints/renders the Helm chart on every PR that touches it, and on a
-# `chart-v*` tag packages it, pushes it to an OCI registry, and cosign-signs
-# the pushed artifact. Consumers pin the chart version and verify the
-# signature from their own GitOps repo (Flux or Argo CD).
+# PRs prove the chart's fail-closed and EKS rendering contracts. chart-v* tags
+# assume a separate infrastructure-provided role and publish the chart to the
+# exact configured ECR repository.
 
 on:
   pull_request:
     paths:
       - "deploy/eks/chart/**"
+      - "deploy/eks/tests/**"
+      - ".github/workflows/image.yml"
       - ".github/workflows/chart.yml"
   push:
     tags:
       - "chart-v*"
 
+concurrency:
+  group: observer-chart-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   lint:
-    name: Lint & render
+    name: Lint, test & render
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.2.21"
       - uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5.0.0
         with:
           version: v3.17.1
 
-      - name: Lint (with CI test values)
+      - name: Release and chart contract tests
+        run: bun test deploy/eks/tests/release-contract.test.ts
+
+      - name: Lint required EKS integration path
         run: helm lint deploy/eks/chart -f deploy/eks/chart/ci/test-values.yaml
 
-      # Fail-closed guard: the chart must REFUSE to render with empty defaults
-      # (no image, no secret source). If this ever renders, a required-value
-      # guard regressed and the chart could ship insecure.
       - name: Fail-closed guard
         run: |
           if helm template t deploy/eks/chart >/dev/null 2>&1; then
@@ -39,54 +47,239 @@ jobs:
           fi
           echo "OK: chart refuses to render without required values"
 
-      - name: Render with CI test values
+      - name: Render required EKS integration path
         run: helm template t deploy/eks/chart -f deploy/eks/chart/ci/test-values.yaml >/dev/null
 
   publish:
-    name: Package, push & sign (OCI)
+    name: Publish immutable ECR chart
     if: startsWith(github.ref, 'refs/tags/chart-v')
     needs: lint
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    # packages: write to push to GHCR; id-token: write for keyless cosign.
+    timeout-minutes: 30
     permissions:
       contents: read
-      packages: write
       id-token: write
     env:
-      # Defaults to GHCR for this repo. A fork/operator overrides the target
-      # by setting the CHART_OCI_REPO repository variable (no file edits).
-      OCI_REPO: ${{ vars.CHART_OCI_REPO || format('oci://ghcr.io/{0}/charts', github.repository_owner) }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+      ECR_REPOSITORY: ${{ vars.OBSERVER_CHART_ECR_REPOSITORY }}
+      AWS_ROLE_ARN: ${{ vars.OBSERVER_CHART_PUBLISH_ROLE_ARN }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5.0.0
         with:
           version: v3.17.1
-      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
         with:
-          cosign-release: "v2.4.1"
+          cosign-release: "v2.6.2"
 
-      # Only the default GHCR target needs login here; a custom CHART_OCI_REPO
-      # is expected to be authenticated by the operator's own runner setup.
-      - name: Registry login (GHCR default)
-        if: ${{ !vars.CHART_OCI_REPO }}
-        run: helm registry login ghcr.io -u ${{ github.actor }} --password ${{ secrets.GITHUB_TOKEN }}
+      - name: Validate release inputs
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          for name in AWS_REGION ECR_REGISTRY ECR_REPOSITORY AWS_ROLE_ARN; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Required repository variable for $name is empty"
+              exit 1
+            fi
+          done
+          VERSION="${REF_NAME#chart-v}"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Release tag must be chart-v<semver>; got $REF_NAME"
+            exit 1
+          fi
+          if [ "${ECR_REPOSITORY##*/}" != "observer" ] || [ "${ECR_REPOSITORY%/*}" = "$ECR_REPOSITORY" ]; then
+            echo "::error::OBSERVER_CHART_ECR_REPOSITORY must be the exact charts/observer-style repository path"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "CHART_PUSH_REPOSITORY=${ECR_REPOSITORY%/*}" >> "$GITHUB_ENV"
 
-      - name: Package
-        run: helm package deploy/eks/chart --destination dist
+      - name: Assume chart publisher role
+        uses: aws-actions/configure-aws-credentials@00943011d9042930efac3dcd3a170e4273319bc8 # v5.1.0
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          role-session-name: observer-chart-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: true
 
-      - name: Push
+      - name: Log in to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076 # v2.0.1
+
+      - name: Verify configured ECR target and Helm login
+        env:
+          LOGIN_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          set -euo pipefail
+          if [ "$LOGIN_REGISTRY" != "$ECR_REGISTRY" ]; then
+            echo "::error::Configured ECR registry does not match the assumed role's registry"
+            exit 1
+          fi
+          aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" >/dev/null
+          if aws ecr describe-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --image-ids "imageTag=$VERSION" >existing-chart.json 2>existing-chart.err; then
+            echo "::error::Chart version $VERSION already exists; refusing to overwrite a release"
+            exit 1
+          fi
+          if ! grep -q 'ImageNotFoundException' existing-chart.err; then
+            cat existing-chart.err >&2
+            exit 1
+          fi
+          aws ecr get-login-password --region "$AWS_REGION" | \
+            helm registry login --username AWS --password-stdin "$ECR_REGISTRY"
+
+      - name: Package chart with released appVersion
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          helm package deploy/eks/chart \
+            --version "$VERSION" \
+            --app-version "$VERSION" \
+            --destination dist
+          CHART_PACKAGE="dist/observer-$VERSION.tgz"
+          test -f "$CHART_PACKAGE"
+          test "$(helm show chart "$CHART_PACKAGE" | awk '/^appVersion:/ {gsub(/"/, "", $2); print $2}')" = "$VERSION"
+          echo "CHART_PACKAGE=$CHART_PACKAGE" >> "$GITHUB_ENV"
+
+      - name: Generate chart SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: deploy/eks/chart
+          format: cyclonedx-json
+          output-file: chart-sbom.cdx.json
+          upload-artifact: false
+
+      - name: Generate chart vulnerability results
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: deploy/eks/chart
+          format: json
+          output: chart-vulnerability-results.json
+          severity: CRITICAL
+          exit-code: "0"
+          ignore-unfixed: false
+
+      - name: Enforce chart critical policy
+        run: |
+          set -euo pipefail
+          CRITICAL_COUNT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' chart-vulnerability-results.json)
+          if [ "$CRITICAL_COUNT" -ne 0 ]; then
+            echo "::error::Trivy found $CRITICAL_COUNT critical findings in the chart contents"
+            exit 1
+          fi
+
+      - name: Push exact chart repository
         id: push
         run: |
-          tgz=$(ls dist/observer-ingestor-*.tgz)
-          out=$(helm push "$tgz" "$OCI_REPO" 2>&1)
-          echo "$out"
-          digest=$(echo "$out" | awk '/Digest:/ {print $2}')
-          if [ -z "$digest" ]; then echo "::error::no digest from helm push"; exit 1; fi
-          echo "ref=${OCI_REPO#oci://}/observer-ingestor" >> "$GITHUB_OUTPUT"
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          OUTPUT=$(helm push "$CHART_PACKAGE" "oci://$ECR_REGISTRY/$CHART_PUSH_REPOSITORY" 2>&1)
+          echo "$OUTPUT"
+          DIGEST=$(awk '/Digest:/ {print $2}' <<<"$OUTPUT" | tail -1)
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::helm push did not return an immutable sha256 digest"
+            exit 1
+          fi
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "ref=$ECR_REGISTRY/$ECR_REPOSITORY" >> "$GITHUB_OUTPUT"
 
-      - name: Sign (cosign keyless)
+      - name: Verify published chart digest
+        env:
+          CHART_DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          PUBLISHED_DIGEST=$(aws ecr describe-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --image-ids "imageTag=$VERSION" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)
+          test "$PUBLISHED_DIGEST" = "$CHART_DIGEST"
+
+      - name: Generate SLSA provenance predicate
+        env:
+          CHART_DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg buildType "https://github.com/Attestations/GitHubActionsWorkflow@v1" \
+            --arg source "git+$GITHUB_SERVER_URL/$GITHUB_REPOSITORY@$GITHUB_REF" \
+            --arg commit "$GITHUB_SHA" \
+            --arg workflow "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --arg invocation "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            --arg version "$VERSION" \
+            --arg digest "$CHART_DIGEST" \
+            '{
+              buildDefinition: {
+                buildType: $buildType,
+                externalParameters: {source: $source, chartVersion: $version, appVersion: $version, digest: $digest},
+                internalParameters: {},
+                resolvedDependencies: [{uri: $source, digest: {gitCommit: $commit}}]
+              },
+              runDetails: {
+                builder: {id: $workflow},
+                metadata: {invocationId: $invocation}
+              }
+            }' > chart-provenance.json
+
+      - name: Sign and attest chart by digest
         env:
           COSIGN_YES: "true"
-        run: cosign sign "${{ steps.push.outputs.ref }}@${{ steps.push.outputs.digest }}"
+          CHART_DIGEST: ${{ steps.push.outputs.digest }}
+          CHART_REF: ${{ steps.push.outputs.ref }}
+        run: |
+          set -euo pipefail
+          SUBJECT="$CHART_REF@$CHART_DIGEST"
+          cosign sign "$SUBJECT"
+          cosign attest --type cyclonedx --predicate chart-sbom.cdx.json "$SUBJECT"
+          cosign attest --type slsaprovenance --predicate chart-provenance.json "$SUBJECT"
+          cosign attest --type vuln --predicate chart-vulnerability-results.json "$SUBJECT"
+
+      - name: Verify signature and attestations
+        env:
+          CHART_DIGEST: ${{ steps.push.outputs.digest }}
+          CHART_REF: ${{ steps.push.outputs.ref }}
+        run: |
+          set -euo pipefail
+          SUBJECT="$CHART_REF@$CHART_DIGEST"
+          IDENTITY="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/.github/workflows/chart.yml@$GITHUB_REF"
+          ISSUER="https://token.actions.githubusercontent.com"
+          cosign verify --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" "$SUBJECT" >chart-signature-verification.json
+          cosign verify-attestation --type cyclonedx --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" "$SUBJECT" >chart-sbom-verification.json
+          cosign verify-attestation --type slsaprovenance --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" "$SUBJECT" >chart-provenance-verification.json
+          cosign verify-attestation --type vuln --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" "$SUBJECT" >chart-vulnerability-verification.json
+
+      - name: Write chart release report
+        env:
+          CHART_DIGEST: ${{ steps.push.outputs.digest }}
+          CHART_REF: ${{ steps.push.outputs.ref }}
+        run: |
+          {
+            echo "# Observer chart release $VERSION"
+            echo
+            echo "- Chart: \`$CHART_REF@$CHART_DIGEST\`"
+            echo "- Chart digest: \`$CHART_DIGEST\`"
+            echo "- Chart version: \`$VERSION\`"
+            echo "- Application version (appVersion): \`$VERSION\`"
+            echo "- Signature: verified"
+            echo "- SBOM, provenance, and vulnerability attestations: verified"
+          } > release-report.md
+          cat release-report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload chart release evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: observer-chart-release-${{ env.VERSION }}
+          path: |
+            release-report.md
+            dist/observer-${{ env.VERSION }}.tgz
+            chart-sbom.cdx.json
+            chart-provenance.json
+            chart-vulnerability-results.json
+            chart-signature-verification.json
+            chart-sbom-verification.json
+            chart-provenance-verification.json
+            chart-vulnerability-verification.json
+          retention-days: 90

@@ -1,24 +1,30 @@
-# Dummy values used only by CI (`helm lint`/`helm template`) to satisfy the
-# chart's fail-closed required fields. NOT a real configuration — all values
-# are placeholders. Real config lives in the consumer's private overlay.
+# Environment-neutral values used only by CI to prove the required EKS render
+# path. These are intentionally non-deployable placeholders; real coordinates,
+# roles, buckets, hostnames, and secret names live outside this repository.
+fullnameOverride: observer-ingestor
 image:
-  repository: example.registry.invalid/observer-ingestor
-  tag: "0.1.23"
+  repository: registry.invalid/observer-ingestor
+  digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 config:
   storage: s3
-  s3Bucket: example-lakehouse
-  s3Region: eu-central-1
-secret:
-  existingSecret: observer-ingestor-keys
+  s3Bucket: deployment-provided
+  s3Region: deployment-provided
+externalSecret:
+  enabled: true
+  secretStoreRef:
+    name: deployment-provided
+  remoteKey: deployment-provided
 serviceAccount:
   create: true
   annotations:
-    eks.amazonaws.com/role-arn: arn:aws:iam::000000000000:role/example-ingestor
+    eks.amazonaws.com/role-arn: deployment-provided
 ingress:
   enabled: true
-  className: example-ingress
+  className: alb
+  annotations:
+    alb.ingress.kubernetes.io/scheme: deployment-provided
   hosts:
-    - host: ingest.example.invalid
+    - host: observer.invalid
       paths:
         - path: /
           pathType: Prefix
@@ -27,7 +33,7 @@ networkPolicy:
   ingressFrom:
     - namespaceSelector:
         matchLabels:
-          kubernetes.io/metadata.name: example-ingress
+          kubernetes.io/metadata.name: deployment-provided
   egress:
     allowHttpsCidrs:
       - 10.0.0.0/16
