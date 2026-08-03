@@ -1,10 +1,8 @@
 name: Image
 
-# Builds the ingestor container image. On a PR it builds, vulnerability-scans
-# (Trivy, fail on HIGH/CRITICAL), and produces an SBOM — gating merge. On a
-# v* release tag it builds multi-arch, pushes to the registry, cosign-signs by
-# digest, scans, and uploads a CycloneDX SBOM. The published, signed image is
-# what the Helm chart (deploy/eks) references.
+# PRs build and scan without registry access. Immutable v* releases assume the
+# infrastructure-provided image publisher role and publish only to the ECR
+# coordinates configured as repository variables.
 
 on:
   pull_request:
@@ -12,11 +10,16 @@ on:
       - "packages/api/**"
       - "package.json"
       - "bun.lock"
+      - "deploy/eks/tests/**"
       - ".github/workflows/image.yml"
+      - ".github/workflows/chart.yml"
   push:
     tags:
       - "v*"
-  workflow_dispatch:
+
+concurrency:
+  group: observer-image-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build-scan:
@@ -28,7 +31,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
-      - name: Build (amd64, load locally — no push)
+      - name: Build (EKS architecture, local only)
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: .
@@ -52,81 +55,262 @@ jobs:
           image: observer-ingestor:pr
           format: cyclonedx-json
           output-file: sbom.cdx.json
+          upload-artifact: false
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: image-sbom
+          name: image-pr-evidence
           path: sbom.cdx.json
           retention-days: 14
 
   publish:
-    name: Build, push, sign, scan, SBOM
+    name: Publish immutable ECR image
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    # packages: write to push to GHCR; id-token: write for keyless cosign.
+    timeout-minutes: 45
     permissions:
       contents: read
-      packages: write
       id-token: write
     env:
-      # Defaults to GHCR for this repo. A fork/operator targets their own
-      # registry by setting the IMAGE_REPO repository variable (no file edits).
-      IMAGE: ${{ vars.IMAGE_REPO || format('ghcr.io/{0}/observer-ingestor', github.repository_owner) }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+      ECR_REPOSITORY: ${{ vars.OBSERVER_IMAGE_ECR_REPOSITORY }}
+      AWS_ROLE_ARN: ${{ vars.OBSERVER_IMAGE_PUBLISH_ROLE_ARN }}
+      IMAGE: ${{ format('{0}/{1}', vars.ECR_REGISTRY, vars.OBSERVER_IMAGE_ECR_REPOSITORY) }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3 # v4.1.0
       - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
-      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+      - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
         with:
-          cosign-release: "v2.4.1"
+          cosign-release: "v2.6.2"
 
-      - name: Registry login (GHCR default)
-        if: ${{ !vars.IMAGE_REPO }}
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+      - name: Validate release inputs
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          for name in AWS_REGION ECR_REGISTRY ECR_REPOSITORY AWS_ROLE_ARN; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Required repository variable for $name is empty"
+              exit 1
+            fi
+          done
+          VERSION="${REF_NAME#v}"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Release tag must be v<semver>; got $REF_NAME"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Assume image publisher role
+        uses: aws-actions/configure-aws-credentials@00943011d9042930efac3dcd3a170e4273319bc8 # v5.1.0
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          role-session-name: observer-image-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: true
 
-      - name: Determine version
-        id: v
-        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+      - name: Log in to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076 # v2.0.1
 
-      - name: Build & push (multi-arch)
+      - name: Verify configured ECR target
+        env:
+          LOGIN_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          set -euo pipefail
+          if [ "$LOGIN_REGISTRY" != "$ECR_REGISTRY" ]; then
+            echo "::error::Configured ECR registry does not match the assumed role's registry"
+            exit 1
+          fi
+          aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" >/dev/null
+          if aws ecr describe-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --image-ids "imageTag=$VERSION" >existing-image.json 2>existing-image.err; then
+            echo "::error::Image tag $VERSION already exists; refusing to overwrite a release"
+            exit 1
+          fi
+          if ! grep -q 'ImageNotFoundException' existing-image.err; then
+            cat existing-image.err >&2
+            exit 1
+          fi
+
+      - name: Build and push immutable amd64 image
         id: build
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
           context: .
           file: packages/api/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
-          tags: |
-            ${{ env.IMAGE }}:${{ steps.v.outputs.version }}
-            ${{ env.IMAGE }}:latest
+          tags: ${{ env.IMAGE }}:${{ env.VERSION }}
+          provenance: false
+          sbom: false
 
-      - name: Sign image (cosign keyless, by digest)
-        env:
-          COSIGN_YES: "true"
-        run: cosign sign "${{ env.IMAGE }}@${{ steps.build.outputs.digest }}"
-
-      - name: Trivy scan pushed image (fail on HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
-          severity: HIGH,CRITICAL
-          exit-code: "1"
-          ignore-unfixed: true
-
-      - name: Generate SBOM (CycloneDX)
+      - name: Generate image SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
           image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
           format: cyclonedx-json
           output-file: sbom.cdx.json
+          upload-artifact: false
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - name: Verify published image digest
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          PUBLISHED_DIGEST=$(aws ecr describe-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --image-ids "imageTag=$VERSION" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)
+          test "$PUBLISHED_DIGEST" = "$IMAGE_DIGEST"
+
+      - name: Generate vulnerability results
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          name: image-sbom-${{ steps.v.outputs.version }}
-          path: sbom.cdx.json
+          image-ref: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          format: json
+          output: vulnerability-results.json
+          severity: CRITICAL
+          exit-code: "0"
+          ignore-unfixed: false
+
+      - name: Enforce Trivy critical policy
+        run: |
+          set -euo pipefail
+          CRITICAL_COUNT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' vulnerability-results.json)
+          if [ "$CRITICAL_COUNT" -ne 0 ]; then
+            echo "::error::Trivy found $CRITICAL_COUNT critical vulnerabilities"
+            exit 1
+          fi
+
+      - name: Wait for ECR scan and enforce critical policy
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if ! aws ecr start-image-scan \
+            --repository-name "$ECR_REPOSITORY" \
+            --image-id "imageDigest=$IMAGE_DIGEST" >ecr-scan-start.json 2>ecr-scan-start.err; then
+            if ! grep -Eq 'LimitExceededException|ScanAlreadyExistsException|ValidationException' ecr-scan-start.err; then
+              cat ecr-scan-start.err >&2
+              exit 1
+            fi
+          fi
+
+          scan_ready=false
+          for attempt in $(seq 1 60); do
+            if aws ecr describe-image-scan-findings \
+              --repository-name "$ECR_REPOSITORY" \
+              --image-id "imageDigest=$IMAGE_DIGEST" >ecr-scan.json 2>ecr-scan.err; then
+              STATUS=$(jq -r '.imageScanStatus.status // "UNKNOWN"' ecr-scan.json)
+              case "$STATUS" in
+                COMPLETE|ACTIVE)
+                  scan_ready=true
+                  break
+                  ;;
+                FAILED|FINDINGS_UNAVAILABLE|SCAN_ELIGIBILITY_EXPIRED|UNSUPPORTED_IMAGE)
+                  echo "::error::ECR scan ended with status $STATUS"
+                  exit 1
+                  ;;
+              esac
+            fi
+            sleep 10
+          done
+          if [ "$scan_ready" != true ]; then
+            cat ecr-scan.err >&2 || true
+            echo "::error::ECR scan did not become ready before timeout"
+            exit 1
+          fi
+
+          BASIC_CRITICAL=$(jq '.imageScanFindings.findingSeverityCounts.CRITICAL // 0' ecr-scan.json)
+          ACTIVE_CRITICAL=$(jq '[.imageScanFindings.enhancedFindings[]? | select(.severity == "CRITICAL" and .status == "ACTIVE")] | length' ecr-scan.json)
+          if [ "$BASIC_CRITICAL" -ne 0 ] || [ "$ACTIVE_CRITICAL" -ne 0 ]; then
+            echo "::error::ECR reports unresolved critical findings"
+            exit 1
+          fi
+
+      - name: Generate SLSA provenance predicate
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg buildType "https://github.com/Attestations/GitHubActionsWorkflow@v1" \
+            --arg source "git+$GITHUB_SERVER_URL/$GITHUB_REPOSITORY@$GITHUB_REF" \
+            --arg commit "$GITHUB_SHA" \
+            --arg workflow "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --arg invocation "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            --arg image "$IMAGE" \
+            --arg digest "$IMAGE_DIGEST" \
+            '{
+              buildDefinition: {
+                buildType: $buildType,
+                externalParameters: {source: $source, image: $image, digest: $digest, platform: "linux/amd64"},
+                internalParameters: {},
+                resolvedDependencies: [{uri: $source, digest: {gitCommit: $commit}}]
+              },
+              runDetails: {
+                builder: {id: $workflow},
+                metadata: {invocationId: $invocation}
+              }
+            }' > provenance.json
+
+      - name: Sign and attest image by digest
+        env:
+          COSIGN_YES: "true"
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          SUBJECT="$IMAGE@$IMAGE_DIGEST"
+          cosign sign "$SUBJECT"
+          cosign attest --type cyclonedx --predicate sbom.cdx.json "$SUBJECT"
+          cosign attest --type slsaprovenance --predicate provenance.json "$SUBJECT"
+          cosign attest --type vuln --predicate vulnerability-results.json "$SUBJECT"
+
+      - name: Verify signature and attestations
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          SUBJECT="$IMAGE@$IMAGE_DIGEST"
+          IDENTITY="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/.github/workflows/image.yml@$GITHUB_REF"
+          ISSUER="https://token.actions.githubusercontent.com"
+          cosign verify --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" "$SUBJECT" >signature-verification.json
+          cosign verify-attestation --type cyclonedx --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" "$SUBJECT" >sbom-verification.json
+          cosign verify-attestation --type slsaprovenance --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" "$SUBJECT" >provenance-verification.json
+          cosign verify-attestation --type vuln --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" "$SUBJECT" >vulnerability-verification.json
+
+      - name: Write image release report
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          {
+            echo "# Observer image release $VERSION"
+            echo
+            echo "- Image: \`$IMAGE@$IMAGE_DIGEST\`"
+            echo "- Image digest: \`$IMAGE_DIGEST\`"
+            echo "- Platform: \`linux/amd64\`"
+            echo "- ECR critical findings: \`0\`"
+            echo "- Signature: verified"
+            echo "- SBOM, provenance, and vulnerability attestations: verified"
+          } > release-report.md
+          cat release-report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload image release evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: observer-image-release-${{ env.VERSION }}
+          path: |
+            release-report.md
+            sbom.cdx.json
+            provenance.json
+            vulnerability-results.json
+            ecr-scan.json
+            signature-verification.json
+            sbom-verification.json
+            provenance-verification.json
+            vulnerability-verification.json
           retention-days: 90

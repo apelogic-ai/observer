@@ -153,11 +153,11 @@ name, region, and ESO ServiceAccount.
 
 ## 5. (prereq) Make the signed image reachable + get its digest
 
-The image is built, scanned, cosign-signed, and published by our
-`image.yml` workflow (`ghcr.io/<owner>/observer-ingestor` by default).
+The image is built for `linux/amd64`, scanned, cosign-signed by immutable
+digest, and published to the private ECR repository configured by the
+maintainers' repository variables. The image workflow's release report records
+the exact digest and its verified SBOM, provenance, and vulnerability evidence.
 
-- If your policy requires images from your own registry, **mirror** the
-  released tag into it and pull from there (`image.repository`).
 - **Pin by digest**, not tag. Get it:
 
   ```bash

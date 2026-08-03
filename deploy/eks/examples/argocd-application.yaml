@@ -12,10 +12,11 @@ spec:
   source:
     # OCI registry hosting the chart (no oci:// prefix in repoURL).
     repoURL: <your-oci-registry>/charts
-    chart: observer-ingestor
+    chart: observer
     targetRevision: "0.1.0"      # pin the chart version
     helm:
       valuesObject:
+        fullnameOverride: observer-ingestor
         image:
           repository: <your-registry>/observer-ingestor
           digest: sha256:<image-digest>
@@ -42,6 +43,10 @@ spec:
                   pathType: Prefix
         networkPolicy:
           enabled: true
+          ingressFrom:
+            - namespaceSelector:
+                matchLabels:
+                  kubernetes.io/metadata.name: <ingress-namespace>
           egress:
             allowHttpsCidrs:
               - <vpc-or-aws-endpoint-cidr>

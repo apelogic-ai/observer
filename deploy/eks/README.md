@@ -28,7 +28,7 @@ Splitting them means:
 └──────────────┬────────────────────────────────────┘   └──────────────┬──────────────────────┘
                │ publish: OCI chart + signed image                       │ GitOps reconcile
                ▼                                                         ▼
-        oci://<registry>/charts/observer-ingestor  ◀── pinned by ──  Flux / Argo CD ──▶ EKS
+        oci://<registry>/charts/observer           ◀── pinned by ──  Flux / Argo CD ──▶ EKS
                                                                           │
                                                        secret values ◀────┘ External Secrets → AWS Secrets Manager
 ```
@@ -75,17 +75,39 @@ Copy one into your private config repo and replace every `<placeholder>`.
 
 ## Publish it (maintainers)
 
-`helm push` to an OCI registry, then cosign-sign the pushed artifact. CI does
-this on a `chart-v*` tag (`.github/workflows/chart.yml`); manually it is:
+Publishing is intentionally configuration-only: no account, registry, or role
+coordinates are stored in this repository. Configure these GitHub repository
+variables before cutting a release:
+
+| Repository variable | Used by | Value supplied by infrastructure |
+| --- | --- | --- |
+| `AWS_REGION` | image + chart | ECR region |
+| `ECR_REGISTRY` | image + chart | Private ECR registry hostname |
+| `OBSERVER_IMAGE_ECR_REPOSITORY` | `v*` | Observer ingestor image repository |
+| `OBSERVER_IMAGE_PUBLISH_ROLE_ARN` | `v*` | GitHub OIDC image publisher role |
+| `OBSERVER_CHART_ECR_REPOSITORY` | `chart-v*` | Exact chart repository path ending in `charts/observer` |
+| `OBSERVER_CHART_PUBLISH_ROLE_ARN` | `chart-v*` | Separate GitHub OIDC chart publisher role |
+
+The `v*` workflow publishes a single `linux/amd64` image tag. The `chart-v*`
+workflow packages chart version `X.Y.Z` with `appVersion: X.Y.Z` and publishes
+it to the configured `charts/observer` ECR repository. Neither workflow emits
+a mutable `latest` tag.
+
+Both workflows sign the pushed digest, attach signed CycloneDX SBOM, SLSA
+provenance, and vulnerability attestations, verify that evidence, and upload a
+release report containing the immutable digest. The image workflow also waits
+for ECR scanning and fails if any critical finding remains unresolved.
+
+CI performs the equivalent chart package/push shape on a `chart-v*` tag:
 
 ```bash
-helm package deploy/eks/chart --destination dist
-helm push dist/observer-ingestor-<version>.tgz oci://<registry>/charts
-cosign sign <registry>/charts/observer-ingestor@<digest>
+helm package deploy/eks/chart --version <version> --app-version <version> --destination dist
+helm push dist/observer-<version>.tgz oci://<registry>/charts
+cosign sign <registry>/charts/observer@<digest>
 ```
 
-The chart version in `Chart.yaml` is what consumers pin — bump it on every
-chart change.
+The release tag is authoritative for both packaged chart version and
+`appVersion`; consumers pin the resulting chart digest from the release report.
 
 ## Validate locally
 
@@ -101,10 +123,10 @@ to smoke-test a real install before touching any operator environment.
 
 The signed image this chart references is built and published by
 `.github/workflows/image.yml`: PRs build + Trivy-scan (fail on HIGH/CRITICAL) +
-SBOM; a `v*` tag builds multi-arch, pushes to the registry
-(`ghcr.io/<owner>/observer-ingestor` by default, or the `IMAGE_REPO` repo
-variable), cosign-signs by digest, and uploads a CycloneDX SBOM. Pin
-`image.digest` in your overlay to that published digest.
+SBOM; a `v*` tag assumes the configured OIDC role, builds `linux/amd64`, pushes
+only to the configured ECR image repository, verifies digest-bound signatures
+and attestations, and uploads the scan evidence. Pin `image.digest` in your
+overlay to the digest in that release report.
 
 ## Scope / not yet here
 
