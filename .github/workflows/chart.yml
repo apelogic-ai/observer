@@ -88,7 +88,15 @@ jobs:
             fi
           done
           if [[ "$REF_NAME" == chart-v-recover-* ]]; then
-            VERSION="${REF_NAME#chart-v-recover-}"
+            RECOVERY_TARGET="${REF_NAME#chart-v-recover-}"
+            VERSION="${RECOVERY_TARGET%%+*}"
+            if [[ "$RECOVERY_TARGET" == *+* ]]; then
+              RECOVERY_LABEL="${RECOVERY_TARGET#*+}"
+              if [[ ! "$RECOVERY_LABEL" =~ ^[0-9A-Za-z.-]+$ ]]; then
+                echo "::error::Recovery tag suffix must contain only letters, digits, dots, or hyphens"
+                exit 1
+              fi
+            fi
             RECOVERY="true"
             RELEASE_REF="refs/tags/chart-v$VERSION"
           else
@@ -319,11 +327,11 @@ jobs:
           set -euo pipefail
           SUBJECT="$CHART_REF@$CHART_DIGEST"
           if [ "$RECOVERY" != "true" ]; then
-            cosign sign "$SUBJECT"
-            cosign attest --type cyclonedx --predicate chart-sbom.cdx.json "$SUBJECT"
+            cosign sign --new-bundle-format "$SUBJECT"
+            cosign attest --new-bundle-format --type cyclonedx --predicate chart-sbom.cdx.json "$SUBJECT"
           fi
-          cosign attest --type slsaprovenance1 --predicate chart-provenance.json "$SUBJECT"
-          cosign attest --type vuln --predicate chart-vulnerability-attestation.json "$SUBJECT"
+          cosign attest --new-bundle-format --type slsaprovenance1 --predicate chart-provenance.json "$SUBJECT"
+          cosign attest --new-bundle-format --type vuln --predicate chart-vulnerability-attestation.json "$SUBJECT"
 
       - name: Verify signature and attestations
         env:
@@ -335,10 +343,15 @@ jobs:
           ORIGINAL_IDENTITY="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/.github/workflows/chart.yml@$RELEASE_REF"
           CURRENT_IDENTITY="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/.github/workflows/chart.yml@$GITHUB_REF"
           ISSUER="https://token.actions.githubusercontent.com"
-          cosign verify --certificate-identity "$ORIGINAL_IDENTITY" --certificate-oidc-issuer "$ISSUER" "$SUBJECT" >chart-signature-verification.json
-          cosign verify-attestation --type cyclonedx --certificate-identity "$ORIGINAL_IDENTITY" --certificate-oidc-issuer "$ISSUER" "$SUBJECT" >chart-sbom-verification.json
-          cosign verify-attestation --type slsaprovenance1 --certificate-identity "$CURRENT_IDENTITY" --certificate-oidc-issuer "$ISSUER" "$SUBJECT" >chart-provenance-verification.json
-          cosign verify-attestation --type vuln --certificate-identity "$CURRENT_IDENTITY" --certificate-oidc-issuer "$ISSUER" "$SUBJECT" >chart-vulnerability-verification.json
+          if [ "$RECOVERY" = "true" ]; then
+            cosign verify --certificate-identity "$ORIGINAL_IDENTITY" --certificate-oidc-issuer "$ISSUER" "$SUBJECT" >chart-signature-verification.json
+            cosign verify-attestation --type cyclonedx --certificate-identity "$ORIGINAL_IDENTITY" --certificate-oidc-issuer "$ISSUER" "$SUBJECT" >chart-sbom-verification.json
+          else
+            cosign verify --new-bundle-format --certificate-identity "$CURRENT_IDENTITY" --certificate-oidc-issuer "$ISSUER" "$SUBJECT" >chart-signature-verification.json
+            cosign verify-attestation --new-bundle-format --type cyclonedx --certificate-identity "$CURRENT_IDENTITY" --certificate-oidc-issuer "$ISSUER" "$SUBJECT" >chart-sbom-verification.json
+          fi
+          cosign verify-attestation --new-bundle-format --type slsaprovenance1 --certificate-identity "$CURRENT_IDENTITY" --certificate-oidc-issuer "$ISSUER" "$SUBJECT" >chart-provenance-verification.json
+          cosign verify-attestation --new-bundle-format --type vuln --certificate-identity "$CURRENT_IDENTITY" --certificate-oidc-issuer "$ISSUER" "$SUBJECT" >chart-vulnerability-verification.json
 
       - name: Write chart release report
         env:

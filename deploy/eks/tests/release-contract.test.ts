@@ -44,7 +44,7 @@ describe("Observer ECR release workflows", () => {
 
   test("the image release signs, attests, verifies, scans, and reports its immutable digest", () => {
     expect(imageWorkflow).toContain('SUBJECT="$IMAGE@$IMAGE_DIGEST"');
-    expect(imageWorkflow).toContain('cosign sign "$SUBJECT"');
+    expect(imageWorkflow).toContain('cosign sign --new-bundle-format "$SUBJECT"');
     expect(imageWorkflow).toContain("cosign attest");
     expect(imageWorkflow).toContain("cosign verify-attestation");
     expect(imageWorkflow).toContain("cosign verify");
@@ -78,6 +78,21 @@ describe("Observer ECR release workflows", () => {
     expect(releaseWorkflow).not.toContain('"v*"');
   });
 
+  test("the image release stores new evidence as OCI referrers for immutable ECR", () => {
+    const writes = imageWorkflow
+      .split("\n")
+      .filter((line) => line.includes("cosign attest "));
+    expect(writes).toHaveLength(3);
+    for (const write of writes) expect(write).toContain("--new-bundle-format");
+    expect(imageWorkflow).toContain(
+      "cosign verify-attestation --new-bundle-format --type slsaprovenance1",
+    );
+    expect(imageWorkflow).toContain(
+      "cosign verify-attestation --new-bundle-format --type vuln",
+    );
+    expect(imageWorkflow).toContain('VERSION="${RECOVERY_TARGET%%+*}"');
+  });
+
   test("the chart-v* release uses the separate chart publisher role and exact ECR repository", () => {
     expect(chartWorkflow).toContain('"chart-v[0-9]*"');
     expect(chartWorkflow).toContain("vars.AWS_REGION");
@@ -93,7 +108,7 @@ describe("Observer ECR release workflows", () => {
   test("the packaged chart pins appVersion and has verified digest-bound supply-chain evidence", () => {
     expect(chartWorkflow).toContain('--app-version "$VERSION"');
     expect(chartWorkflow).toContain('SUBJECT="$CHART_REF@$CHART_DIGEST"');
-    expect(chartWorkflow).toContain('cosign sign "$SUBJECT"');
+    expect(chartWorkflow).toContain('cosign sign --new-bundle-format "$SUBJECT"');
     expect(chartWorkflow).toContain("cosign attest");
     expect(chartWorkflow).toContain("cosign verify-attestation");
     expect(chartWorkflow).toContain("cosign verify");
@@ -121,6 +136,21 @@ describe("Observer ECR release workflows", () => {
     expect(chartWorkflow).toContain('if [ "$RECOVERY" != "true" ]; then');
     expect(chartWorkflow).toContain('ORIGINAL_IDENTITY=');
     expect(chartWorkflow).toContain("steps.subject.outputs.digest");
+  });
+
+  test("the chart release stores new evidence as OCI referrers for immutable ECR", () => {
+    const writes = chartWorkflow
+      .split("\n")
+      .filter((line) => line.includes("cosign attest "));
+    expect(writes).toHaveLength(3);
+    for (const write of writes) expect(write).toContain("--new-bundle-format");
+    expect(chartWorkflow).toContain(
+      "cosign verify-attestation --new-bundle-format --type slsaprovenance1",
+    );
+    expect(chartWorkflow).toContain(
+      "cosign verify-attestation --new-bundle-format --type vuln",
+    );
+    expect(chartWorkflow).toContain('VERSION="${RECOVERY_TARGET%%+*}"');
   });
 });
 
