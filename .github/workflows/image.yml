@@ -15,7 +15,8 @@ on:
       - ".github/workflows/chart.yml"
   push:
     tags:
-      - "v*"
+      - "v[0-9]*"
+      - "v-recover-*"
 
 concurrency:
   group: observer-image-${{ github.ref }}
@@ -79,6 +80,8 @@ jobs:
       IMAGE: ${{ format('{0}/{1}', vars.ECR_REGISTRY, vars.OBSERVER_IMAGE_ECR_REPOSITORY) }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
       - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
       - uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
         with:
@@ -95,12 +98,31 @@ jobs:
               exit 1
             fi
           done
-          VERSION="${REF_NAME#v}"
+          if [[ "$REF_NAME" == v-recover-* ]]; then
+            VERSION="${REF_NAME#v-recover-}"
+            RECOVERY="true"
+            RELEASE_REF="refs/tags/v$VERSION"
+          else
+            VERSION="${REF_NAME#v}"
+            RECOVERY="false"
+            RELEASE_REF="$GITHUB_REF"
+          fi
           if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::Release tag must be v<semver>; got $REF_NAME"
+            echo "::error::Release tag must be v<semver> or v-recover-<semver>; got $REF_NAME"
+            exit 1
+          fi
+          RELEASE_COMMIT=$(git rev-list -n 1 "$RELEASE_REF")
+          if [[ ! "$RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Could not resolve released source ref $RELEASE_REF"
             exit 1
           fi
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "RECOVERY=$RECOVERY" >> "$GITHUB_ENV"
+          echo "RELEASE_REF=$RELEASE_REF" >> "$GITHUB_ENV"
+          echo "RELEASE_COMMIT=$RELEASE_COMMIT" >> "$GITHUB_ENV"
+          if [ "$RECOVERY" = "true" ]; then
+            git checkout --detach "$RELEASE_COMMIT"
+          fi
 
       - name: Assume image publisher role
         uses: aws-actions/configure-aws-credentials@00943011d9042930efac3dcd3a170e4273319bc8 # v5.1.0
@@ -115,6 +137,7 @@ jobs:
         uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076 # v2.0.1
 
       - name: Verify configured ECR target
+        id: target
         env:
           LOGIN_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
@@ -124,18 +147,32 @@ jobs:
             exit 1
           fi
           aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" >/dev/null
-          if aws ecr describe-images \
-            --repository-name "$ECR_REPOSITORY" \
-            --image-ids "imageTag=$VERSION" >existing-image.json 2>existing-image.err; then
-            echo "::error::Image tag $VERSION already exists; refusing to overwrite a release"
-            exit 1
-          fi
-          if ! grep -q 'ImageNotFoundException' existing-image.err; then
-            cat existing-image.err >&2
-            exit 1
+          if [ "$RECOVERY" = "true" ]; then
+            DIGEST=$(aws ecr describe-images \
+              --repository-name "$ECR_REPOSITORY" \
+              --image-ids "imageTag=$VERSION" \
+              --query 'imageDetails[0].imageDigest' \
+              --output text)
+            if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::Existing image tag $VERSION did not resolve to an immutable digest"
+              exit 1
+            fi
+            echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          else
+            if aws ecr describe-images \
+              --repository-name "$ECR_REPOSITORY" \
+              --image-ids "imageTag=$VERSION" >existing-image.json 2>existing-image.err; then
+              echo "::error::Image tag $VERSION already exists; refusing to overwrite a release"
+              exit 1
+            fi
+            if ! grep -q 'ImageNotFoundException' existing-image.err; then
+              cat existing-image.err >&2
+              exit 1
+            fi
           fi
 
       - name: Build and push immutable amd64 image
+        if: env.RECOVERY != 'true'
         id: build
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
@@ -147,17 +184,35 @@ jobs:
           provenance: false
           sbom: false
 
+      - name: Resolve immutable image subject
+        id: subject
+        env:
+          BUILD_DIGEST: ${{ steps.build.outputs.digest }}
+          RECOVERY_DIGEST: ${{ steps.target.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [ "$RECOVERY" = "true" ]; then
+            DIGEST="$RECOVERY_DIGEST"
+          else
+            DIGEST="$BUILD_DIGEST"
+          fi
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Release image did not resolve to an immutable sha256 digest"
+            exit 1
+          fi
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+
       - name: Generate image SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
-          image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          image: ${{ env.IMAGE }}@${{ steps.subject.outputs.digest }}
           format: cyclonedx-json
           output-file: sbom.cdx.json
           upload-artifact: false
 
       - name: Verify published image digest
         env:
-          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_DIGEST: ${{ steps.subject.outputs.digest }}
         run: |
           set -euo pipefail
           PUBLISHED_DIGEST=$(aws ecr describe-images \
@@ -170,7 +225,7 @@ jobs:
       - name: Generate vulnerability results
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          image-ref: ${{ env.IMAGE }}@${{ steps.subject.outputs.digest }}
           format: json
           output: vulnerability-results.json
           severity: CRITICAL
@@ -186,9 +241,34 @@ jobs:
             exit 1
           fi
 
+      - name: Package vulnerability attestation
+        run: |
+          set -euo pipefail
+          TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          jq -n \
+            --slurpfile result vulnerability-results.json \
+            --arg workflow "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --arg event "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            --arg timestamp "$TIMESTAMP" \
+            '{
+              invocation: {
+                parameters: {severity: "CRITICAL", ignoreUnfixed: false},
+                uri: $workflow,
+                event_id: $event,
+                "builder.id": $workflow
+              },
+              scanner: {
+                uri: "https://github.com/aquasecurity/trivy",
+                version: "trivy-action-v0.36.0",
+                db: {uri: "https://github.com/aquasecurity/trivy-db", version: "workflow-resolved"},
+                result: $result[0]
+              },
+              metadata: {scanStartedOn: $timestamp, scanFinishedOn: $timestamp}
+            }' > vulnerability-attestation.json
+
       - name: Wait for ECR scan and enforce critical policy
         env:
-          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_DIGEST: ${{ steps.subject.outputs.digest }}
         run: |
           set -euo pipefail
           if ! aws ecr start-image-scan \
@@ -234,13 +314,13 @@ jobs:
 
       - name: Generate SLSA provenance predicate
         env:
-          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_DIGEST: ${{ steps.subject.outputs.digest }}
         run: |
           set -euo pipefail
           jq -n \
             --arg buildType "https://github.com/Attestations/GitHubActionsWorkflow@v1" \
-            --arg source "git+$GITHUB_SERVER_URL/$GITHUB_REPOSITORY@$GITHUB_REF" \
-            --arg commit "$GITHUB_SHA" \
+            --arg source "git+$GITHUB_SERVER_URL/$GITHUB_REPOSITORY@$RELEASE_REF" \
+            --arg commit "$RELEASE_COMMIT" \
             --arg workflow "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
             --arg invocation "$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
             --arg image "$IMAGE" \
@@ -261,31 +341,34 @@ jobs:
       - name: Sign and attest image by digest
         env:
           COSIGN_YES: "true"
-          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_DIGEST: ${{ steps.subject.outputs.digest }}
         run: |
           set -euo pipefail
           SUBJECT="$IMAGE@$IMAGE_DIGEST"
-          cosign sign "$SUBJECT"
-          cosign attest --type cyclonedx --predicate sbom.cdx.json "$SUBJECT"
-          cosign attest --type slsaprovenance --predicate provenance.json "$SUBJECT"
-          cosign attest --type vuln --predicate vulnerability-results.json "$SUBJECT"
+          if [ "$RECOVERY" != "true" ]; then
+            cosign sign "$SUBJECT"
+            cosign attest --type cyclonedx --predicate sbom.cdx.json "$SUBJECT"
+          fi
+          cosign attest --type slsaprovenance1 --predicate provenance.json "$SUBJECT"
+          cosign attest --type vuln --predicate vulnerability-attestation.json "$SUBJECT"
 
       - name: Verify signature and attestations
         env:
-          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_DIGEST: ${{ steps.subject.outputs.digest }}
         run: |
           set -euo pipefail
           SUBJECT="$IMAGE@$IMAGE_DIGEST"
-          IDENTITY="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/.github/workflows/image.yml@$GITHUB_REF"
+          ORIGINAL_IDENTITY="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/.github/workflows/image.yml@$RELEASE_REF"
+          CURRENT_IDENTITY="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/.github/workflows/image.yml@$GITHUB_REF"
           ISSUER="https://token.actions.githubusercontent.com"
-          cosign verify --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" "$SUBJECT" >signature-verification.json
-          cosign verify-attestation --type cyclonedx --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" "$SUBJECT" >sbom-verification.json
-          cosign verify-attestation --type slsaprovenance --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" "$SUBJECT" >provenance-verification.json
-          cosign verify-attestation --type vuln --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" "$SUBJECT" >vulnerability-verification.json
+          cosign verify --certificate-identity "$ORIGINAL_IDENTITY" --certificate-oidc-issuer "$ISSUER" "$SUBJECT" >signature-verification.json
+          cosign verify-attestation --type cyclonedx --certificate-identity "$ORIGINAL_IDENTITY" --certificate-oidc-issuer "$ISSUER" "$SUBJECT" >sbom-verification.json
+          cosign verify-attestation --type slsaprovenance1 --certificate-identity "$CURRENT_IDENTITY" --certificate-oidc-issuer "$ISSUER" "$SUBJECT" >provenance-verification.json
+          cosign verify-attestation --type vuln --certificate-identity "$CURRENT_IDENTITY" --certificate-oidc-issuer "$ISSUER" "$SUBJECT" >vulnerability-verification.json
 
       - name: Write image release report
         env:
-          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_DIGEST: ${{ steps.subject.outputs.digest }}
         run: |
           {
             echo "# Observer image release $VERSION"
@@ -308,6 +391,7 @@ jobs:
             sbom.cdx.json
             provenance.json
             vulnerability-results.json
+            vulnerability-attestation.json
             ecr-scan.json
             signature-verification.json
             sbom-verification.json

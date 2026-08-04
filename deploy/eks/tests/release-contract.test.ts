@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 const root = resolve(import.meta.dir, "../../..");
 const imageWorkflow = readFileSync(resolve(root, ".github/workflows/image.yml"), "utf8");
 const chartWorkflow = readFileSync(resolve(root, ".github/workflows/chart.yml"), "utf8");
+const releaseWorkflow = readFileSync(resolve(root, ".github/workflows/release.yml"), "utf8");
 const chartMetadata = readFileSync(resolve(root, "deploy/eks/chart/Chart.yaml"), "utf8");
 const imageDockerfile = readFileSync(resolve(root, "packages/api/Dockerfile"), "utf8");
 
@@ -56,8 +57,29 @@ describe("Observer ECR release workflows", () => {
     expect(imageWorkflow).toContain("Image digest");
   });
 
+  test("the image release uses SLSA v1 and preserves the complete Trivy result", () => {
+    expect(imageWorkflow.match(/--type slsaprovenance1/g)).toHaveLength(2);
+    expect(imageWorkflow).not.toMatch(/--type slsaprovenance(?:\s|$)/);
+    expect(imageWorkflow).toContain("vulnerability-attestation.json");
+    expect(imageWorkflow).toContain('result: $result[0]');
+    expect(imageWorkflow).toContain("--predicate vulnerability-attestation.json");
+  });
+
+  test("the image recovery tag signs the existing digest without rebuilding it", () => {
+    expect(imageWorkflow).toContain('"v-recover-*"');
+    expect(imageWorkflow).toContain('RECOVERY="true"');
+    expect(imageWorkflow).toMatch(
+      /name: Build and push immutable amd64 image[\s\S]*?if: env\.RECOVERY != 'true'/,
+    );
+    expect(imageWorkflow).toContain('if [ "$RECOVERY" != "true" ]; then');
+    expect(imageWorkflow).toContain('ORIGINAL_IDENTITY=');
+    expect(imageWorkflow).toContain("steps.subject.outputs.digest");
+    expect(releaseWorkflow).toContain('"v[0-9]*"');
+    expect(releaseWorkflow).not.toContain('"v*"');
+  });
+
   test("the chart-v* release uses the separate chart publisher role and exact ECR repository", () => {
-    expect(chartWorkflow).toContain('"chart-v*"');
+    expect(chartWorkflow).toContain('"chart-v[0-9]*"');
     expect(chartWorkflow).toContain("vars.AWS_REGION");
     expect(chartWorkflow).toContain("vars.ECR_REGISTRY");
     expect(chartWorkflow).toContain("vars.OBSERVER_CHART_ECR_REPOSITORY");
@@ -80,6 +102,25 @@ describe("Observer ECR release workflows", () => {
     expect(chartWorkflow).toContain("chart-vulnerability-results.json");
     expect(chartWorkflow).toContain("release-report.md");
     expect(chartWorkflow).toContain("Chart digest");
+  });
+
+  test("the chart release uses SLSA v1 and preserves the complete Trivy result", () => {
+    expect(chartWorkflow.match(/--type slsaprovenance1/g)).toHaveLength(2);
+    expect(chartWorkflow).not.toMatch(/--type slsaprovenance(?:\s|$)/);
+    expect(chartWorkflow).toContain("chart-vulnerability-attestation.json");
+    expect(chartWorkflow).toContain('result: $result[0]');
+    expect(chartWorkflow).toContain("--predicate chart-vulnerability-attestation.json");
+  });
+
+  test("the chart recovery tag signs the existing digest without republishing it", () => {
+    expect(chartWorkflow).toContain('"chart-v-recover-*"');
+    expect(chartWorkflow).toContain('RECOVERY="true"');
+    expect(chartWorkflow).toMatch(
+      /name: Push exact chart repository[\s\S]*?if: env\.RECOVERY != 'true'/,
+    );
+    expect(chartWorkflow).toContain('if [ "$RECOVERY" != "true" ]; then');
+    expect(chartWorkflow).toContain('ORIGINAL_IDENTITY=');
+    expect(chartWorkflow).toContain("steps.subject.outputs.digest");
   });
 });
 
